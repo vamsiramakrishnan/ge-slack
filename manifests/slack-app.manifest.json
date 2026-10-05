@@ -20,25 +20,7 @@
       "always_online": true
     },
     "agent_view": {
-      "agent_description": "Gemini Enterprise, grounded on your company's sources and acting as you. Ask anything, or try /gemini help.",
-      "suggested_prompts": [
-        {
-          "title": "Catch me up",
-          "message": "summarize #general --since 24h"
-        },
-        {
-          "title": "Explain a decision",
-          "message": "explain why we chose the current on-call rotation @unit"
-        },
-        {
-          "title": "Draft an update",
-          "message": "draft a weekly status update from #eng --since 7d"
-        },
-        {
-          "title": "What can you do?",
-          "message": "help"
-        }
-      ]
+      "agent_description": "Gemini Enterprise, grounded on your company's sources and acting as you. Ask anything, or try /gemini help."
     },
     "slash_commands": [
       {
@@ -116,6 +98,8 @@
     "event_subscriptions": {
       "request_url": "https://ge-slack.example.com/slack/events",
       "bot_events": [
+        "agent_session_stopped",
+        "app_context_changed",
         "app_home_opened",
         "app_mention",
         "function_executed",

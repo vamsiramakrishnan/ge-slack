@@ -69,6 +69,7 @@ export async function onMention(
   c: Container,
   e: MessageEventInput,
   botUserId: string | undefined,
+  signal?: AbortSignal,
 ): Promise<void> {
   const text = botUserId
     ? e.text.replace(new RegExp(`<@${botUserId}(\\|[^>]*)?>`, 'g'), ' ')
@@ -85,11 +86,70 @@ export async function onMention(
   if (parsed.kind === 'compose') return;
   const inv =
     parsed.kind === 'invoke' || parsed.kind === 'automate' ? parsed.invocation : undefined;
-  await c.orch.handle(parsed, origin, c.sinkFor(origin, inv));
+  await c.orch.handle(parsed, origin, c.sinkFor(origin, inv), signal ? { signal } : {});
+}
+
+/**
+ * In the agent DM, "summarize this" means the channel the user is viewing (Slack's
+ * `app_context`). Only channels are used, only when the request has no explicit scope, and for
+ * plain `ask` only when the text refers to "this/here". The membership gate still applies.
+ */
+export function applyViewingContext(inv: Invocation, viewing: string | undefined): Invocation {
+  if (!viewing || !/^[CG][A-Z0-9]+$/.test(viewing)) return inv;
+  // "this channel" typed in the DM means the viewed channel, not the DM itself.
+  if (inv.scope?.kind === 'channel' && !inv.scope.channel) {
+    return { ...inv, scope: { kind: 'channel', channel: viewing } };
+  }
+  if (inv.scope) return inv;
+  const refersHere = /\b(this|here|channel|these|today|catch me up)\b/i.test(inv.instruction);
+  if (inv.verb === 'ask' && !refersHere) return inv;
+  return { ...inv, scope: { kind: 'channel', channel: viewing } };
+}
+
+/** First channel entity in an `app_context` / `app_context_changed` payload. */
+export function viewedChannel(context: unknown): string | undefined {
+  const entities = (context as { entities?: Array<{ type?: string; value?: string }> } | undefined)
+    ?.entities;
+  return entities?.find((e) => e.type === 'slack#/types/channel_id' && typeof e.value === 'string')
+    ?.value;
+}
+
+/** Suggested prompts for the Messages tab, relative to the viewed channel (≤ 4, Slack's limit). */
+export function suggestedPrompts(
+  viewing: string | undefined,
+  name: string | undefined,
+): Array<{ title: string; message: string }> {
+  const where = name ? `#${name}` : 'this channel';
+  return viewing
+    ? [
+        { title: `Catch me up on ${where}`, message: 'summarize this channel --since 24h' },
+        { title: `Action items from ${where}`, message: 'notes this channel --since 24h' },
+        {
+          title: `Draft an update for ${where}`,
+          message: 'draft "a short status update" this channel',
+        },
+        { title: 'What can you do?', message: 'help' },
+      ]
+    : [
+        {
+          title: 'Ask anything',
+          message: 'what changed in our incident runbooks this month? @unit',
+        },
+        {
+          title: 'Draft a message',
+          message: 'draft "a friendly reminder about Friday\'s deadline"',
+        },
+        { title: 'My automations', message: 'automations' },
+        { title: 'What can you do?', message: 'help' },
+      ];
 }
 
 /** Agent Messages tab / DM: conversational; each top-level message starts a session thread. */
-export async function onDirectMessage(c: Container, e: MessageEventInput): Promise<void> {
+export async function onDirectMessage(
+  c: Container,
+  e: MessageEventInput & { viewing?: string },
+  signal?: AbortSignal,
+): Promise<void> {
   const parsed = parseCommand(e.text);
   const origin: Origin = {
     entry: 'agent-dm',
@@ -100,9 +160,15 @@ export async function onDirectMessage(c: Container, e: MessageEventInput): Promi
     threadTs: e.threadTs ?? e.ts,
   };
   if (parsed.kind === 'compose') return;
+  const contextual =
+    parsed.kind === 'invoke'
+      ? { ...parsed, invocation: applyViewingContext(parsed.invocation, e.viewing) }
+      : parsed;
   const inv =
-    parsed.kind === 'invoke' || parsed.kind === 'automate' ? parsed.invocation : undefined;
-  await c.orch.handle(parsed, origin, c.sinkFor(origin, inv));
+    contextual.kind === 'invoke' || contextual.kind === 'automate'
+      ? contextual.invocation
+      : undefined;
+  await c.orch.handle(contextual, origin, c.sinkFor(origin, inv), signal ? { signal } : {});
 }
 
 // ------------------------------------------------------------------ composer

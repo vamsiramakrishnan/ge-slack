@@ -1,4 +1,4 @@
-import type { TaskUpdate } from '@ge-slack/contracts';
+import { toSlackMetadata, type TaskUpdate } from '@ge-slack/contracts';
 import type {
   AnswerView,
   AutomationPlanView,
@@ -32,6 +32,8 @@ export type SinkTarget =
       userId: string;
       teamId: string;
       agentSession?: boolean;
+      /** Root message text when there is no thread yet (streaming needs a thread outside sessions). */
+      anchorText?: string;
     }
   /** Only visible to the invoker (slash / shortcuts / modal): ephemeral via response_url or postEphemeral. */
   | { mode: 'ephemeral'; channel: string; threadTs?: string; userId: string; responseUrl?: string }
@@ -58,6 +60,7 @@ export class SlackTurnSink implements TurnSink {
   private text = '';
   private lastFlush = 0;
   private progressSent = false;
+  private anchorTs: string | undefined;
   private finished = false;
 
   constructor(
@@ -119,10 +122,11 @@ export class SlackTurnSink implements TurnSink {
     const t = this.target;
     if (t.mode === 'stream') {
       await this.flush();
+      const metadata = a.provenance ? toSlackMetadata(a.provenance) : undefined;
       if (this.streamTs) {
-        await this.stop(answerBlocks(a, { includeText: false }));
+        await this.stop(answerBlocks(a, { includeText: false }), metadata);
       } else {
-        await this.finalFallback(answerBlocks(a, { includeText: true }), a.text);
+        await this.finalFallback(answerBlocks(a, { includeText: true }), a.text, metadata);
       }
       await this.idle();
     } else if (t.mode === 'ephemeral') {
@@ -147,7 +151,7 @@ export class SlackTurnSink implements TurnSink {
     if (t.mode === 'stream') {
       await must(this.api, 'chat.postMessage', {
         channel: t.channel,
-        ...(t.threadTs ? { thread_ts: t.threadTs } : {}),
+        ...(this.thread() ? { thread_ts: this.thread() } : {}),
         text,
         blocks,
         unfurl_links: false,
@@ -207,14 +211,29 @@ export class SlackTurnSink implements TurnSink {
 
   // ------------------------------------------------------------------ streaming internals
 
+  /** The thread this turn renders in (given, or the anchor we created). */
+  private thread(): string | undefined {
+    const t = this.target;
+    return t.mode === 'unattended' ? t.threadTs : (t.threadTs ?? this.anchorTs);
+  }
+
   private async ensureStream(): Promise<void> {
     const t = this.target;
     if (t.mode !== 'stream' || this.streamTs || this.fallbackTs) return;
+    if (!t.threadTs && !this.anchorTs && !t.agentSession) {
+      // chat.startStream requires a thread outside session channels: anchor one visibly.
+      const root = await must(this.api, 'chat.postMessage', {
+        channel: t.channel,
+        text: t.anchorText ?? `✦ <@${t.userId}> asked Gemini: ${this.title}`,
+      });
+      this.anchorTs = root.ts as string;
+    }
     if (!this.streamingUnavailable) {
       try {
+        const thread = this.thread();
         const r = await must(this.api, 'chat.startStream', {
           channel: t.channel,
-          ...(t.threadTs ? { thread_ts: t.threadTs } : {}),
+          ...(thread ? { thread_ts: thread } : {}),
           recipient_user_id: t.userId,
           recipient_team_id: t.teamId,
           task_display_mode: 'plan',
@@ -227,9 +246,10 @@ export class SlackTurnSink implements TurnSink {
         this.streamingUnavailable = true;
       }
     }
+    const thread = this.thread();
     const r = await must(this.api, 'chat.postMessage', {
       channel: t.channel,
-      ...(t.threadTs ? { thread_ts: t.threadTs } : {}),
+      ...(thread ? { thread_ts: thread } : {}),
       text: this.title,
       blocks: progressBlocks(this.title, [...this.tasks.values()]),
     });
@@ -256,12 +276,16 @@ export class SlackTurnSink implements TurnSink {
     else await this.updateFallback();
   }
 
-  private async stop(blocks: Block[]): Promise<void> {
+  private async stop(blocks: Block[], metadata?: Record<string, unknown>): Promise<void> {
     if (!this.streamTs) return;
+    const t = this.target;
     await must(this.api, 'chat.stopStream', {
       channel: this.streamChannel,
       ts: this.streamTs,
       ...(blocks.length ? { blocks } : {}),
+      // Streamed answers carry the same durable provenance as writes.
+      ...(metadata ? { metadata } : {}),
+      ...(t.mode === 'stream' && t.agentSession ? { session_status: 'active' } : {}),
     });
     this.streamTs = undefined;
   }
@@ -290,7 +314,11 @@ export class SlackTurnSink implements TurnSink {
     });
   }
 
-  private async finalFallback(blocks: Block[], text: string): Promise<void> {
+  private async finalFallback(
+    blocks: Block[],
+    text: string,
+    metadata?: Record<string, unknown>,
+  ): Promise<void> {
     const t = this.target;
     if (t.mode !== 'stream') return;
     if (this.fallbackTs) {
@@ -299,15 +327,18 @@ export class SlackTurnSink implements TurnSink {
         ts: this.fallbackTs,
         text: text.slice(0, 3000),
         blocks,
+        ...(metadata ? { metadata } : {}),
       });
       this.fallbackTs = undefined;
     } else {
+      const thread = this.thread();
       await must(this.api, 'chat.postMessage', {
         channel: t.channel,
-        ...(t.threadTs ? { thread_ts: t.threadTs } : {}),
+        ...(thread ? { thread_ts: thread } : {}),
         text: text.slice(0, 3000),
         blocks,
         unfurl_links: false,
+        ...(metadata ? { metadata } : {}),
       });
     }
   }
@@ -336,7 +367,7 @@ export class SlackTurnSink implements TurnSink {
       // The agent DM is already private to this user.
       await must(this.api, 'chat.postMessage', {
         channel: t.channel,
-        ...(t.threadTs ? { thread_ts: t.threadTs } : {}),
+        ...(this.thread() ? { thread_ts: this.thread() } : {}),
         text,
         blocks,
       });
@@ -345,7 +376,7 @@ export class SlackTurnSink implements TurnSink {
     await must(this.api, 'chat.postEphemeral', {
       channel: t.channel,
       user: t.userId,
-      ...(t.threadTs ? { thread_ts: t.threadTs } : {}),
+      ...(this.thread() ? { thread_ts: this.thread() } : {}),
       text,
       blocks,
     });

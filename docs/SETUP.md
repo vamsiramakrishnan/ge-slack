@@ -60,7 +60,7 @@ gcloud run deploy ge-slack --source . --region europe-west1 \
   --service-account gemini-slack-runtime@PROJECT.iam.gserviceaccount.com \
   --no-cpu-throttling --min-instances 1 \
   --set-env-vars GE_STORE=firestore,NODE_ENV=production,... \
-  --set-secrets SLACK_BOT_TOKEN=slack-bot-token:latest,SLACK_SIGNING_SECRET=slack-signing:latest,GE_SLACK_VAULT_KEY=ge-vault-key:latest,GE_CRON_SECRET=ge-cron:latest,IDP_CLIENT_SECRET=idp-secret:latest
+  --set-secrets SLACK_BOT_TOKEN=slack-bot-token:latest,SLACK_SIGNING_SECRET=slack-signing:latest,GE_CRON_SECRET=ge-cron:latest,IDP_CLIENT_SECRET=idp-secret:latest
 ```
 
 - `--no-cpu-throttling`: Gemini turns continue after the 3-second Slack `ack()`.

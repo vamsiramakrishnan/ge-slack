@@ -13,6 +13,8 @@ import {
   onPolicySubmit,
   onSlash,
   openComposer,
+  suggestedPrompts,
+  viewedChannel,
   openPlanEditor,
   openPolicy,
   publishHome,
@@ -52,6 +54,24 @@ function clickOrigin(c: Container, body: BlockAction): Origin {
 
 export function register(app: App, c: Container, botUserId: () => string | undefined): void {
   const team = c.cfg.SLACK_TEAM_ID;
+  // Running turns by thread, so Slack's native stop button cancels the work, not just the UI.
+  const running = new Map<string, AbortController>();
+  const track = async (key: string, fn: (signal: AbortSignal) => Promise<void>) => {
+    const ac = new AbortController();
+    running.get(key)?.abort();
+    running.set(key, ac);
+    try {
+      await fn(ac.signal);
+    } finally {
+      if (running.get(key) === ac) running.delete(key);
+    }
+  };
+  // What each user is viewing (from app_context), used by the agent DM.
+  const viewing = new Map<string, { channel: string; at: number }>();
+  const viewingFor = (userId: string) => {
+    const v = viewing.get(userId);
+    return v && Date.now() - v.at < 30 * 60_000 ? v.channel : undefined;
+  };
 
   // ---------------------------------------------------------------- entry points
   app.command('/gemini', async ({ command, ack }) => {
@@ -68,17 +88,22 @@ export function register(app: App, c: Container, botUserId: () => string | undef
 
   app.event('app_mention', async ({ event }) => {
     if (!event.user) return;
-    await guard('mention', onMention)(
-      c,
-      {
-        teamId: team,
-        userId: event.user,
-        channelId: event.channel,
-        ts: event.ts,
-        ...(event.thread_ts ? { threadTs: event.thread_ts } : {}),
-        text: event.text,
-      },
-      botUserId(),
+    const user = event.user;
+    const threadTs = event.thread_ts ?? event.ts;
+    await track(`${event.channel}:${threadTs}`, (signal) =>
+      guard('mention', onMention)(
+        c,
+        {
+          teamId: team,
+          userId: user,
+          channelId: event.channel,
+          ts: event.ts,
+          ...(event.thread_ts ? { threadTs: event.thread_ts } : {}),
+          text: event.text,
+        },
+        botUserId(),
+        signal,
+      ),
     );
   });
 
@@ -98,14 +123,25 @@ export function register(app: App, c: Container, botUserId: () => string | undef
     if (m.subtype && m.subtype !== 'thread_broadcast' && m.subtype !== 'file_share') return;
     if (m.channel_type === 'im') {
       if (fromBot || !m.user) return;
-      await guard('dm', onDirectMessage)(c, {
-        teamId: team,
-        userId: m.user,
-        channelId: m.channel,
-        ts: m.ts,
-        ...(m.thread_ts ? { threadTs: m.thread_ts } : {}),
-        text: m.text ?? '',
-      });
+      const user = m.user;
+      const ctx = viewedChannel((message as { app_context?: unknown }).app_context);
+      if (ctx) viewing.set(user, { channel: ctx, at: Date.now() });
+      const view = ctx ?? viewingFor(user);
+      await track(`${m.channel}:${m.thread_ts ?? m.ts}`, (signal) =>
+        guard('dm', onDirectMessage)(
+          c,
+          {
+            teamId: team,
+            userId: user,
+            channelId: m.channel,
+            ts: m.ts,
+            ...(m.thread_ts ? { threadTs: m.thread_ts } : {}),
+            text: m.text ?? '',
+            ...(view ? { viewing: view } : {}),
+          },
+          signal,
+        ),
+      );
       return;
     }
     // Mentions are handled by app_mention; keyword triggers see every other human message.
@@ -147,6 +183,44 @@ export function register(app: App, c: Container, botUserId: () => string | undef
 
   app.event('app_home_opened', async ({ event }) => {
     if (event.tab === 'home') await guard('home', publishHome)(c, event.user);
+    if (event.tab === 'messages') {
+      const ctx = viewedChannel((event as { context?: unknown }).context);
+      if (ctx) viewing.set(event.user, { channel: ctx, at: Date.now() });
+      await guard('prompts', setPrompts)(event.user, (event as { channel?: string }).channel);
+    }
+  });
+
+  // Context-aware suggested prompts follow the channel the user is looking at.
+  const setPrompts = async (userId: string, dmChannel?: string) => {
+    const v = viewingFor(userId);
+    const name = v ? (await c.surface.conversationInfo(v).catch(() => undefined))?.name : undefined;
+    let channel = dmChannel;
+    if (!channel) {
+      const r = await c.api.call('conversations.open', { users: userId });
+      channel = (r.channel as { id?: string } | undefined)?.id;
+    }
+    if (!channel) return;
+    // Agent apps must not pass thread_ts here (the call fails silently if they do).
+    await c.api.call('assistant.threads.setSuggestedPrompts', {
+      channel_id: channel,
+      title: v ? 'Try this here' : 'Try',
+      prompts: suggestedPrompts(v, name),
+    });
+  };
+
+  app.event('app_context_changed', async ({ event }) => {
+    const e = event as unknown as { user?: string; channel?: string; context?: unknown };
+    if (!e.user) return;
+    const ctx = viewedChannel(e.context);
+    if (ctx) viewing.set(e.user, { channel: ctx, at: Date.now() });
+    else viewing.delete(e.user);
+    await guard('context', setPrompts)(e.user, e.channel);
+  });
+
+  // Slack's native stop button: cancel the running turn (the sink closes the stream).
+  app.event('agent_session_stopped', async ({ event }) => {
+    const e = event as unknown as { channel?: string; thread_ts?: string };
+    if (e.channel && e.thread_ts) running.get(`${e.channel}:${e.thread_ts}`)?.abort();
   });
 
   // ---------------------------------------------------------------- shortcuts

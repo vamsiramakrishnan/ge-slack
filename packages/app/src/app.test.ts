@@ -276,3 +276,52 @@ describe('manifest', () => {
     expect(ACTIONS.approve).toBe('ge_approve');
   });
 });
+
+describe('agent DM context', () => {
+  const base = {
+    verb: 'summarize' as const,
+    inferredVerb: false,
+    grounds: [],
+    people: [],
+    from: [],
+    instruction: '',
+    flags: {},
+  };
+  it('uses the viewed channel only when no explicit scope was given', async () => {
+    const { applyViewingContext, viewedChannel } = await import('./handlers.js');
+    const viewing = viewedChannel({
+      entities: [{ type: 'slack#/types/channel_id', value: 'C0ENG', team_id: 'T0ACME' }],
+    });
+    expect(viewing).toBe('C0ENG');
+    expect(applyViewingContext(base, viewing).scope).toEqual({ kind: 'channel', channel: 'C0ENG' });
+    expect(applyViewingContext({ ...base, scope: { kind: 'channel' } }, viewing).scope).toEqual({
+      kind: 'channel',
+      channel: 'C0ENG',
+    });
+    expect(
+      applyViewingContext({ ...base, scope: { kind: 'channel', channel: 'C0OTHER' } }, viewing)
+        .scope,
+    ).toEqual({ kind: 'channel', channel: 'C0OTHER' });
+    expect(
+      applyViewingContext({ ...base, verb: 'ask', instruction: 'what is WIF?' }, viewing).scope,
+    ).toBeUndefined();
+    expect(
+      applyViewingContext(
+        { ...base, verb: 'ask', instruction: 'what happened here today?' },
+        viewing,
+      ).scope,
+    ).toBeDefined();
+    expect(applyViewingContext(base, 'D0DM').scope).toBeUndefined();
+  });
+  it('suggests at most four prompts that parse in the DM', async () => {
+    const { suggestedPrompts } = await import('./handlers.js');
+    const { parseCommand } = await import('@ge-slack/contracts');
+    for (const prompts of [
+      suggestedPrompts('C0ENG', 'eng'),
+      suggestedPrompts(undefined, undefined),
+    ]) {
+      expect(prompts.length).toBeLessThanOrEqual(4);
+      for (const p of prompts) expect(parseCommand(p.message).kind).not.toBe('error');
+    }
+  });
+});

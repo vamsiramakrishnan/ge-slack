@@ -530,3 +530,15 @@ describe('security regressions', () => {
     expect(s.last('answer')).toBeUndefined();
   });
 });
+
+describe('stop button', () => {
+  it('an aborted turn stops cleanly and posts nothing', async () => {
+    const { orch } = setup([[{ type: 'token', text: 'partial' }]]);
+    const ac = new AbortController();
+    ac.abort();
+    const sink = new RecordingSink();
+    await orch.handle(parseCommand('ask something'), origin(), sink, { signal: ac.signal });
+    expect(sink.last<{ text: string }>('notice')?.text).toContain('Stopped');
+    expect(sink.last('answer')).toBeUndefined();
+  });
+});

@@ -80,7 +80,13 @@ type Turn = {
   allowedChannels: Set<string>;
   readChannels: Set<string>;
   externallyShared: boolean;
+  /** Aborted by Slack's stop button (`agent_session_stopped`). */
+  signal?: AbortSignal;
 };
+
+export interface RunOptions {
+  signal?: AbortSignal;
+}
 
 export type HandleResult = { kind: 'compose' } | { kind: 'done' };
 
@@ -98,7 +104,12 @@ export class Orchestrator {
     this.newId = deps.newId ?? (() => randomUUID().replace(/-/g, '').slice(0, 20));
   }
 
-  async handle(parsed: ParsedCommand, origin: Origin, sink: TurnSink): Promise<HandleResult> {
+  async handle(
+    parsed: ParsedCommand,
+    origin: Origin,
+    sink: TurnSink,
+    opts: RunOptions = {},
+  ): Promise<HandleResult> {
     switch (parsed.kind) {
       case 'compose':
         return { kind: 'compose' };
@@ -115,7 +126,7 @@ export class Orchestrator {
         await this.draftAutomation(parsed.trigger, parsed.invocation, origin, sink);
         return { kind: 'done' };
       case 'invoke':
-        await this.run(parsed.invocation, origin, sink, parsed.warnings);
+        await this.run(parsed.invocation, origin, sink, parsed.warnings, opts);
         return { kind: 'done' };
     }
   }
@@ -126,10 +137,12 @@ export class Orchestrator {
     origin: Origin,
     sink: TurnSink,
     warnings: string[] = [],
+    opts: RunOptions = {},
   ): Promise<void> {
     try {
       const turn = await this.admit(inv, origin, sink);
       if (!turn) return;
+      if (opts.signal) turn.signal = opts.signal;
       warnings.push(...turn.grounds.warnings);
       const actionable = inv.inferredVerb && looksActionable(inv.instruction);
       if (!isActuating(inv.verb) && !actionable) {
@@ -379,6 +392,7 @@ export class Orchestrator {
       ...(turn.grounds.notebookId ? { notebookId: turn.grounds.notebookId } : {}),
       sessionless: true,
       identity: turn.identity,
+      ...(turn.signal ? { signal: turn.signal } : {}),
     });
     const sources: SourceRef[] = [];
     let related: string[] = [];
@@ -411,6 +425,11 @@ export class Orchestrator {
       } else if (e.type === 'done') complete = true;
     }
     if (!complete) {
+      if (turn.signal?.aborted) {
+        await sink.task({ id: 'ask', title: 'Stopped', status: 'error' });
+        await sink.notice('info', 'Stopped. Nothing was posted.');
+        return;
+      }
       await sink.notice('error', 'The answer was cut off before it finished. Try again.');
       return;
     }
@@ -449,6 +468,19 @@ export class Orchestrator {
           origin.entry === 'modal' ||
           origin.entry === 'global-shortcut'),
       followUps: Boolean(origin.channelId),
+      provenance: {
+        changeId: `ans_${turnId}`,
+        agentId: provenance?.agentId ?? 'gemini-enterprise',
+        principal: turn.identity,
+        invoker: origin.userId,
+        approval: 'human',
+        edited: false,
+        timestamp: this.now().toISOString(),
+        contentHash: await contentHash(text),
+        sources: sources
+          .slice(0, 20)
+          .map((s) => ({ title: s.title, ...(s.uri ? { uri: s.uri } : {}) })),
+      },
     });
   }
 
@@ -560,6 +592,7 @@ export class Orchestrator {
         route: 'planner',
         sessionless: true,
         identity: turn.identity,
+        ...(turn.signal ? { signal: turn.signal } : {}),
       }),
     );
     if (r.blocked) {
@@ -620,6 +653,10 @@ export class Orchestrator {
       status: 'in_progress',
     });
     for (let i = 0; i < maxTurns; i++) {
+      if (turn.signal?.aborted) {
+        await sink.notice('info', 'Stopped. Nothing was proposed or changed.');
+        return;
+      }
       const r = await collectStream(
         this.deps.gemini.stream(turn.tokens, {
           text: composeCommandPrompt({
@@ -640,10 +677,15 @@ export class Orchestrator {
           ...(turn.grounds.notebookId ? { notebookId: turn.grounds.notebookId } : {}),
           sessionless: true,
           identity: turn.identity,
+          ...(turn.signal ? { signal: turn.signal } : {}),
         }),
       );
       if (r.blocked) {
         await sink.notice('policy', "Gemini Enterprise's policy blocked this response.");
+        return;
+      }
+      if (turn.signal?.aborted) {
+        await sink.notice('info', 'Stopped. Nothing was proposed or changed.');
         return;
       }
       if (r.error || !r.complete) {

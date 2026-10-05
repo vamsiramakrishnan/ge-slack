@@ -315,9 +315,31 @@ describe('SlackTurnSink', () => {
     await sink.task({ id: 'a', title: 'step', status: 'in_progress' });
     await sink.token('Hello');
     await sink.answer(answer);
-    expect(api.methods()[0]).toBe('chat.startStream');
+    // No thread yet: a visible anchor is posted first, then streaming is attempted in its thread.
+    expect(api.methods().slice(0, 2)).toEqual(['chat.postMessage', 'chat.startStream']);
+    expect(api.calls[1]!.args.thread_ts).toBe('2.2');
     expect(api.methods()).toContain('chat.postMessage');
     expect(api.methods().at(-1)).toBe('chat.update');
+  });
+
+  it('attaches ge_provenance metadata and closes the agent session at stop', async () => {
+    const api = new FakeSlack({
+      'chat.startStream': () => ({ ok: true, ts: '1.1', channel: 'D1' }),
+    });
+    const sink = new SlackTurnSink(api, {
+      mode: 'stream',
+      channel: 'D1',
+      threadTs: '1700000000.000100',
+      userId: 'U1',
+      teamId: 'T1',
+      agentSession: true,
+    });
+    await sink.begin('x');
+    await sink.token('Hi');
+    await sink.answer({ ...answer, provenance: { ...prov, changeId: 'ans_t1' } });
+    const stop = api.calls.find((c) => c.method === 'chat.stopStream')!;
+    expect(stop.args.session_status).toBe('active');
+    expect(fromSlackMetadata(stop.args.metadata)).toMatchObject({ changeId: 'ans_t1' });
   });
 
   it('ephemeral mode uses response_url once for progress and once for the answer', async () => {

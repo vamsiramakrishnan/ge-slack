@@ -325,3 +325,12 @@ run**, with *Run once now (preview)*.
 | Workflow Builder custom steps (`function_executed`) | automation building blocks |
 | App Home | identity, automations, ledger, admin |
 | `external_select` | live `@` source catalog from GE |
+
+**Agent platform details (2026-10).** In the agent DM, Gemini reads `app_context` so "summarize
+this channel" means the channel you're viewing. Suggested prompts are set dynamically per viewed
+channel (static manifest prompts are removed; the two are mutually exclusive). Slack's stop button
+(`agent_session_stopped`) cancels the running turn. Streamed answers close with `ge_provenance`
+metadata and `session_status: "active"`. Public answers outside a thread first post a short anchor
+message, because streaming needs a thread. The roadmap for richer native rendering is in
+[SLACK-UX-ADVANCED.md](SLACK-UX-ADVANCED.md); competitive positioning is in
+[COMPETITIVE.md](COMPETITIVE.md).

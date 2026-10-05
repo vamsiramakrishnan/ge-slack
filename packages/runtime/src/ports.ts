@@ -14,6 +14,7 @@ import type {
   SourceRef,
   TaskUpdate,
   Trigger,
+  WriteProvenance,
 } from '@ge-slack/contracts';
 import type { AssistTurn, TokenSource } from '@ge-slack/gemini-client';
 import type { Resolved, ResolveInput } from '@ge-slack/identity';
@@ -132,6 +133,8 @@ export interface AnswerView {
   shareable: boolean;
   /** Offer "Draft follow-up" (pre-fills the composer with `draft`). */
   followUps: boolean;
+  /** Durable provenance for the answer message itself (attached as `ge_provenance` metadata). */
+  provenance?: WriteProvenance;
 }
 
 export interface PlanEffectView {

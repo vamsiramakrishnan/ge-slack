@@ -84,12 +84,17 @@ docs/             EXPERIENCE.md (UX spec), ADR-0001, SETUP.md, STATUS.md, mockup
 ```bash
 bun install
 bun run typecheck      # tsc -b across workspaces
-bun run test           # vitest (117 tests)
+bun run test           # vitest
 bun run test:skills    # Python parser parity tests
 bun run lint           # eslint + prettier
 cp .env.example .env   # then fill in; Socket Mode (SLACK_APP_TOKEN) is easiest locally
 bun run dev
 ```
+
+How we compare with Claude Tag, @ChatGPT, Slackbot and Google's own Gemini Enterprise Slack app
+is in [docs/COMPETITIVE.md](docs/COMPETITIVE.md). How we use Slack's newest agent platform features
+(sessions, stop button, context-aware prompts, plan/task cards, data tables, Lists, Work Objects,
+Real-time Search) is in [docs/SLACK-UX-ADVANCED.md](docs/SLACK-UX-ADVANCED.md).
 
 The UX spec is [docs/EXPERIENCE.md](docs/EXPERIENCE.md) and the visual mockup is
 [docs/mockups/slack.html](docs/mockups/slack.html). [docs/SETUP.md](docs/SETUP.md) covers
