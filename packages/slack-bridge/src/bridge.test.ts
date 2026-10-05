@@ -135,6 +135,38 @@ describe('SlackSurface reads', () => {
   });
 });
 
+describe('SlackSurface access + write client', () => {
+  it('identifies canvases and the conversations they are shared in', async () => {
+    const api = new FakeSlack({
+      'files.info': () => ({
+        ok: true,
+        file: { filetype: 'quip', channels: ['C1'], groups: ['G2'] },
+      }),
+    });
+    expect(await new SlackSurface(api, { teamId: 'T1' }).canvasAccess('F1')).toEqual({
+      isCanvas: true,
+      channels: ['C1', 'G2'],
+    });
+    const pdf = new FakeSlack({
+      'files.info': () => ({ ok: true, file: { filetype: 'pdf', channels: ['C1'] } }),
+    });
+    expect((await new SlackSurface(pdf, { teamId: 'T1' }).canvasAccess('F2')).isCanvas).toBe(false);
+  });
+  it('sends writes through the non-retrying write client', async () => {
+    const reads = new FakeSlack();
+    const writes = new FakeSlack({
+      'chat.postMessage': () => ({ ok: true, ts: '1.1', channel: 'C1' }),
+    });
+    const s = new SlackSurface(reads, { teamId: 'T1', domain: 'acme', writeApi: writes });
+    await s.actuate({
+      changeId: 'chg_12345678',
+      params: { kind: 'post', channel: 'C1A', text: 'x' },
+    });
+    expect(writes.methods()).toEqual(['chat.postMessage']);
+    expect(reads.methods()).toEqual([]);
+  });
+});
+
 describe('SlackSurface writes', () => {
   const reply: ActuationRequest = {
     changeId: 'chg_abcdef123456',

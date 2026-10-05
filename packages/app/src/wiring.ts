@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { App, BlockAction } from '@slack/bolt';
 import type { Origin } from '@ge-slack/contracts';
 import { ACTIONS, CALLBACKS, WORKFLOW_STEPS } from '@ge-slack/slack-bridge';
+import { safeMessage } from '@ge-slack/runtime';
 import { runWorkflowStep } from '@ge-slack/automations';
 import type { Container } from './container.js';
 import {
@@ -25,9 +26,7 @@ function guard<T extends unknown[]>(name: string, fn: (...a: T) => Promise<void>
     try {
       await fn(...a);
     } catch (err) {
-      console.error(
-        `[ge-slack] ${name} failed: ${err instanceof Error ? err.name + ': ' + err.message.slice(0, 200) : 'error'}`,
-      );
+      console.error(`[ge-slack] ${name} failed: ${safeMessage(err)}`);
     }
   };
 }
@@ -72,7 +71,7 @@ export function register(app: App, c: Container, botUserId: () => string | undef
     await guard('mention', onMention)(
       c,
       {
-        teamId: event.team ?? team,
+        teamId: team,
         userId: event.user,
         channelId: event.channel,
         ts: event.ts,
@@ -100,7 +99,7 @@ export function register(app: App, c: Container, botUserId: () => string | undef
     if (m.channel_type === 'im') {
       if (fromBot || !m.user) return;
       await guard('dm', onDirectMessage)(c, {
-        teamId: m.team ?? team,
+        teamId: team,
         userId: m.user,
         channelId: m.channel,
         ts: m.ts,
@@ -327,14 +326,15 @@ export function register(app: App, c: Container, botUserId: () => string | undef
 
   // ---------------------------------------------------------------- Workflow Builder steps
   for (const step of Object.values(WORKFLOW_STEPS)) {
-    app.function(step, async ({ inputs, complete, fail, body }) => {
-      const ownerId =
-        (body as { event?: { bot_user_id?: string } }).event?.bot_user_id ?? 'U0WORKFLOW';
+    app.function(step, async ({ inputs, complete, fail }) => {
+      // Slack-attested interactor (slack#/types/interactivity input), never a free-form user input.
+      const interactivity = (inputs as { interactivity?: { interactor?: { id?: string } } })
+        .interactivity;
       const r = await runWorkflowStep(
         c.orch,
         step,
         team,
-        ownerId,
+        interactivity?.interactor?.id,
         inputs as Record<string, string>,
       ).catch((e: unknown) => ({
         ok: false as const,

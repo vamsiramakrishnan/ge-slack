@@ -24,6 +24,7 @@ const DiscoverySchema = z.object({
   issuer: z.string(),
   authorization_endpoint: z.string().url(),
   token_endpoint: z.string().url(),
+  revocation_endpoint: z.string().url().optional(),
 });
 type Discovery = z.infer<typeof DiscoverySchema>;
 
@@ -151,6 +152,23 @@ export class OidcClient {
     return this.tokenRequest({ grant_type: 'refresh_token', refresh_token: refreshToken });
   }
 
+  /** RFC 7009 revocation, if the IdP advertises it. Never throws for "unsupported". */
+  async revoke(refreshToken: string): Promise<void> {
+    const d = await this.discover();
+    if (!d.revocation_endpoint) return;
+    const body = new URLSearchParams({
+      token: refreshToken,
+      token_type_hint: 'refresh_token',
+      client_id: this.config.clientId,
+    });
+    if (this.config.clientSecret) body.set('client_secret', this.config.clientSecret);
+    await this.fetchImpl(d.revocation_endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+  }
+
   private async tokenRequest(params: Record<string, string>): Promise<TokenResponse> {
     const d = await this.discover();
     const body = new URLSearchParams({ ...params, client_id: this.config.clientId });
@@ -214,6 +232,8 @@ export class OidcError extends Error {
 
 /** The identity email to bind against Slack's profile email. */
 export function claimEmail(c: IdTokenClaims): string | undefined {
+  // An explicitly unverified email is never used for binding (L1).
+  if (c.email !== undefined && c.email_verified === false) return undefined;
   const e = c.email ?? c.preferred_username ?? c.upn;
   return e && /^[^@\s]+@[^@\s]+$/.test(e) ? e.toLowerCase() : undefined;
 }

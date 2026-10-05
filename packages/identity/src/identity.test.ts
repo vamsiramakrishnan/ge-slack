@@ -208,3 +208,46 @@ describe('IdentityBroker', () => {
     expect(!r.ok && r.decision.reason).toBe('needs-link');
   });
 });
+
+describe('identity regressions', () => {
+  it('a disconnect during an in-flight refresh is not resurrected, and the token is revoked (M4)', async () => {
+    const store = new MemoryStore();
+    const idp = fakeIdp();
+    const { oidc } = await link(idp, store);
+    const broker = new IdentityBroker({
+      store,
+      vault: vault(),
+      oidc,
+      wif: { poolId: 'pool', providerId: 'acme' },
+      fetchImpl: idp.fetchImpl as unknown as typeof fetch,
+    });
+    const r = await broker.resolve({
+      teamId: 'T1',
+      userId: 'U0ALEX',
+      policy: 'user-only',
+      unattended: false,
+      externallyShared: false,
+    });
+    if (!r.ok) throw new Error('expected ok');
+    await broker.unlink('T1', 'U0ALEX');
+    await expect(r.tokens.getAccessToken()).rejects.toBeInstanceOf(IdentityRevokedError);
+    expect(await store.get(identityKey('T1', 'U0ALEX'))).toBeUndefined();
+  });
+
+  it('refuses an explicitly unverified email for binding (L1)', async () => {
+    const { claimEmail } = await import('./oidc.js');
+    expect(
+      claimEmail({
+        iss: 'i',
+        sub: 's',
+        aud: 'a',
+        exp: 1,
+        email: 'x@acme.com',
+        email_verified: false,
+      }),
+    ).toBeUndefined();
+    expect(claimEmail({ iss: 'i', sub: 's', aud: 'a', exp: 1, email: 'X@acme.com' })).toBe(
+      'x@acme.com',
+    );
+  });
+});

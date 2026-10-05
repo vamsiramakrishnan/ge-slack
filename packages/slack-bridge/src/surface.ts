@@ -35,6 +35,11 @@ export interface SlackSurfaceOptions {
   now?: () => number;
   /** Max pages of conversations.members to scan before failing closed. */
   maxMemberPages?: number;
+  /**
+   * Client used for writes and undo. Must not auto-retry (a retried chat.postMessage can land
+   * twice); the app passes a WebClient with retries disabled (M6). Defaults to the read client.
+   */
+  writeApi?: SlackApi;
 }
 
 const MEMBER_TTL_MS = 2 * 60_000;
@@ -50,6 +55,7 @@ export class SlackSurface implements SurfacePort {
   private readonly nameCache = new Map<string, string>();
   private domain: string | undefined;
   private readonly now: () => number;
+  private readonly writeApi: SlackApi;
 
   constructor(
     private readonly api: SlackApi,
@@ -57,6 +63,25 @@ export class SlackSurface implements SurfacePort {
   ) {
     this.domain = opts.domain;
     this.now = opts.now ?? Date.now;
+    this.writeApi = opts.writeApi ?? api;
+  }
+
+  async canvasAccess(id: string): Promise<{ isCanvas: boolean; channels: string[] }> {
+    try {
+      const r = await must(this.api, 'files.info', { file: id });
+      const f = r.file as {
+        filetype?: string;
+        pretty_type?: string;
+        channels?: string[];
+        groups?: string[];
+        ims?: string[];
+      };
+      const isCanvas =
+        f.filetype === 'quip' || f.filetype === 'canvas' || f.pretty_type === 'Canvas';
+      return { isCanvas, channels: [...(f.channels ?? []), ...(f.groups ?? []), ...(f.ims ?? [])] };
+    } catch {
+      return { isCanvas: false, channels: [] };
+    }
   }
 
   async conversationInfo(channel: string): Promise<ConversationInfo> {
@@ -328,7 +353,7 @@ export class SlackSurface implements SurfacePort {
       switch (p.kind) {
         case 'reply':
         case 'post': {
-          const r = await must(this.api, 'chat.postMessage', {
+          const r = await must(this.writeApi, 'chat.postMessage', {
             channel: p.channel,
             ...(p.kind === 'reply' ? { thread_ts: p.threadTs } : {}),
             ...messageBody(p.text),
@@ -350,14 +375,14 @@ export class SlackSurface implements SurfacePort {
           };
         }
         case 'canvas': {
-          const r = await must(this.api, 'canvases.create', {
+          const r = await must(this.writeApi, 'canvases.create', {
             title: p.title,
             document_content: { type: 'markdown', markdown: p.markdown },
           });
           const canvasId = r.canvas_id as string;
           if (p.shareTo) {
             try {
-              await must(this.api, 'canvases.access.set', {
+              await must(this.writeApi, 'canvases.access.set', {
                 canvas_id: canvasId,
                 access_level: 'read',
                 channel_ids: [p.shareTo],
@@ -394,7 +419,7 @@ export class SlackSurface implements SurfacePort {
           };
         }
         case 'canvas-edit':
-          await must(this.api, 'canvases.edit', {
+          await must(this.writeApi, 'canvases.edit', {
             canvas_id: p.canvasId,
             changes: [
               {
@@ -419,11 +444,11 @@ export class SlackSurface implements SurfacePort {
           let channel: string;
           let text = p.text;
           if (p.kind === 'remind') {
-            const open = await must(this.api, 'conversations.open', { users: p.user });
+            const open = await must(this.writeApi, 'conversations.open', { users: p.user });
             channel = (open.channel as { id: string }).id;
             text = `🔔 Reminder${req.provenance ? ` (requested by <@${req.provenance.invoker}>)` : ''}: ${p.text}`;
           } else channel = p.channel;
-          const r = await must(this.api, 'chat.scheduleMessage', {
+          const r = await must(this.writeApi, 'chat.scheduleMessage', {
             channel,
             post_at: p.postAt,
             ...messageBody(text),
@@ -438,7 +463,7 @@ export class SlackSurface implements SurfacePort {
           };
         }
         case 'bookmark': {
-          const r = await must(this.api, 'bookmarks.add', {
+          const r = await must(this.writeApi, 'bookmarks.add', {
             channel_id: p.channel,
             title: p.title,
             type: 'link',
@@ -454,7 +479,7 @@ export class SlackSurface implements SurfacePort {
           };
         }
         case 'react':
-          await must(this.api, 'reactions.add', {
+          await must(this.writeApi, 'reactions.add', {
             channel: p.channel,
             timestamp: p.ts,
             name: p.emoji,
@@ -486,25 +511,25 @@ export class SlackSurface implements SurfacePort {
     try {
       switch (inverse.op) {
         case 'delete-message':
-          await must(this.api, 'chat.delete', { channel: inverse.channel, ts: inverse.ts });
+          await must(this.writeApi, 'chat.delete', { channel: inverse.channel, ts: inverse.ts });
           return { ok: true, message: 'Deleted the message.' };
         case 'delete-canvas':
-          await must(this.api, 'canvases.delete', { canvas_id: inverse.canvasId });
+          await must(this.writeApi, 'canvases.delete', { canvas_id: inverse.canvasId });
           return { ok: true, message: 'Deleted the canvas.' };
         case 'delete-scheduled':
-          await must(this.api, 'chat.deleteScheduledMessage', {
+          await must(this.writeApi, 'chat.deleteScheduledMessage', {
             channel: inverse.channel,
             scheduled_message_id: inverse.scheduledMessageId,
           });
           return { ok: true, message: 'Cancelled the scheduled message.' };
         case 'remove-bookmark':
-          await must(this.api, 'bookmarks.remove', {
+          await must(this.writeApi, 'bookmarks.remove', {
             channel_id: inverse.channel,
             bookmark_id: inverse.bookmarkId,
           });
           return { ok: true, message: 'Removed the bookmark.' };
         case 'remove-reaction':
-          await must(this.api, 'reactions.remove', {
+          await must(this.writeApi, 'reactions.remove', {
             channel: inverse.channel,
             timestamp: inverse.ts,
             name: inverse.emoji,

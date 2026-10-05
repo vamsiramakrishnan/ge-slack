@@ -20,7 +20,8 @@ const EnvSchema = z.object({
   SLACK_APP_TOKEN: z.string().startsWith('xapp-').optional(),
   SLACK_APP_ID: z.string().optional(),
   SLACK_TEAM_ID: z.string().regex(/^[TE][A-Z0-9]+$/),
-  SLACK_TEAM_DOMAIN: z.string().optional(),
+  /** Workspace subdomain (acme → acme.slack.com); used for permalinks instead of team:read. */
+  SLACK_TEAM_DOMAIN: z.string().regex(/^[a-z0-9-]+$/),
   PORT: z.coerce.number().int().default(3000),
 
   GE_PROJECT: z.string().min(1),
@@ -52,7 +53,14 @@ const EnvSchema = z.object({
     .regex(/^[^@\s]+@[^@\s]+\.iam\.gserviceaccount\.com$/)
     .optional(),
 
-  GE_SLACK_VAULT_KEY: z.string().min(40, 'GE_SLACK_VAULT_KEY must be 32 random bytes, base64'),
+  GE_SLACK_VAULT_KEY: z
+    .string()
+    .min(40, 'GE_SLACK_VAULT_KEY must be 32 random bytes, base64')
+    .optional(),
+  /** Production: Cloud KMS key that wraps the vault data keys (envelope encryption). */
+  GE_SLACK_KMS_KEY: z.string().optional(),
+  /** keyId=base64-KMS-ciphertext pairs, comma separated. */
+  GE_SLACK_WRAPPED_KEYS: z.string().optional(),
   GE_SLACK_VAULT_KEY_ID: z.string().default('k1'),
   GE_SLACK_VAULT_OLD_KEYS: z.string().optional(),
 
@@ -89,7 +97,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       'GE_SERVICE_MODE requires GE_SERVICE_ACCOUNT (the GE-licensed service account email).',
     );
   }
+  if (!c.GE_SLACK_VAULT_KEY && !(c.GE_SLACK_KMS_KEY && c.GE_SLACK_WRAPPED_KEYS)) {
+    throw new Error(
+      'Set GE_SLACK_KMS_KEY + GE_SLACK_WRAPPED_KEYS (production) or GE_SLACK_VAULT_KEY (dev).',
+    );
+  }
   if (c.NODE_ENV === 'production') {
+    if (c.GE_SLACK_VAULT_KEY) {
+      throw new Error(
+        'GE_SLACK_VAULT_KEY (static key) is not allowed in production; use Cloud KMS envelope keys.',
+      );
+    }
+    if (c.GE_EMAIL_BINDING !== 'enforce') {
+      throw new Error(
+        'GE_EMAIL_BINDING must be enforce in production (it is the defence against link injection).',
+      );
+    }
     if (c.GE_STORE === 'memory')
       throw new Error(
         'GE_STORE=memory is not allowed in production (tokens and plans must persist).',

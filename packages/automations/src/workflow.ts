@@ -16,8 +16,6 @@ export interface WorkflowStepInputs {
   message_ts?: string;
   /** Window for channel scope, e.g. "24h", "7d". */
   since?: string;
-  /** User who ran the workflow (Slack provides it in the trigger context). */
-  user_id?: string;
 }
 
 export interface WorkflowStepOutputs {
@@ -69,12 +67,23 @@ export async function runWorkflowStep(
   orch: Orchestrator,
   step: string,
   teamId: string,
-  /** The workflow owner/collaborator who installed the step (automation owner semantics). */
-  ownerId: string,
+  /**
+   * The human Slack attests ran the workflow (`interactivity.interactor.id`). Free-form user
+   * inputs are author-controlled and never used for authorization; without an attested human
+   * the step fails closed (H2).
+   */
+  attestedUserId: string | undefined,
   inputs: WorkflowStepInputs,
 ): Promise<WorkflowStepResult> {
   const verb = STEP_VERB[step];
   if (!verb) return { ok: false, error: `Unknown step ${step}` };
+  if (!attestedUserId || !/^[UW][A-Z0-9]+$/.test(attestedUserId)) {
+    return {
+      ok: false,
+      error:
+        'Gemini steps need a person to start the workflow (a link or button trigger), so access can be checked.',
+    };
+  }
   const instruction =
     step === 'ge_draft'
       ? `Draft a Slack message (text only, ready to post): ${inputs.prompt ?? ''}`
@@ -99,9 +108,8 @@ export async function runWorkflowStep(
   const origin: Origin = {
     entry: 'workflow',
     teamId,
-    // Membership checks run against the person who ran the workflow when Slack tells us,
-    // otherwise against the step owner.
-    userId: inputs.user_id && /^[UW][A-Z0-9]+$/.test(inputs.user_id) ? inputs.user_id : ownerId,
+    // Membership checks run against the Slack-attested person who ran the workflow.
+    userId: attestedUserId,
     ...(inputs.channel_id ? { channelId: inputs.channel_id } : {}),
   };
   const sink = new CollectingSink();

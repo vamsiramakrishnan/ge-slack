@@ -17,8 +17,10 @@ export function neutralize(text: string): string {
     .replace(/[\p{Cc}\p{Cf}]/gu, (c) => (c === '\n' || c === '\t' ? c : ''))
     .replace(/```/g, 'ˋˋˋ')
     .replace(/"""/g, '”””')
-    .replace(/<\/?slack_context>/gi, '[slack_context]')
-    .replace(/<\/?confirmed_plan>/gi, '[confirmed_plan]');
+    .replace(
+      /<\/?(slack_context|confirmed_plan|capabilities|result)>/gi,
+      (_m, t: string) => `[${t}]`,
+    );
 }
 
 const MAX_CONTEXT_CHARS = 60_000;

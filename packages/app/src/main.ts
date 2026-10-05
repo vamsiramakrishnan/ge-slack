@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { App, LogLevel } from '@slack/bolt';
+import { App, LogLevel, webApi } from '@slack/bolt';
 import type { SlackApi } from '@ge-slack/slack-bridge';
 import { loadConfig } from './config.js';
 import { buildContainer, type Container } from './container.js';
@@ -43,7 +43,17 @@ async function main(): Promise<void> {
       return (await app.client.apiCall(method, args)) as Awaited<ReturnType<SlackApi['call']>>;
     },
   };
-  const container = await buildContainer(cfg, { api });
+  // Writes must not be auto-retried: a retried chat.postMessage can land twice (M6).
+  const writeClient = new webApi.WebClient(cfg.SLACK_BOT_TOKEN, {
+    retryConfig: { retries: 0 },
+    rejectRateLimitedCalls: true,
+  });
+  const writeApi: SlackApi = {
+    async call(method, args) {
+      return (await writeClient.apiCall(method, args)) as Awaited<ReturnType<SlackApi['call']>>;
+    },
+  };
+  const container = await buildContainer(cfg, { api, writeApi });
   ref.container = container;
   register(app, container, () => ref.botUserId);
   ref.botUserId = (await app.client.auth.test()).user_id;

@@ -115,6 +115,11 @@ export class FakeSurface implements SurfacePort {
     this.undone.push(inverse);
     return { ok: true, message: 'Undone.' };
   }
+  canvases = new Map<string, string[]>();
+  async canvasAccess(id: string) {
+    const channels = this.canvases.get(id);
+    return { isCanvas: channels !== undefined, channels: channels ?? [] };
+  }
   async userEmail() {
     return 'alex@acme.com';
   }

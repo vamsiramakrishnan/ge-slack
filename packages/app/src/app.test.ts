@@ -109,7 +109,19 @@ describe('config', () => {
     ).toThrow(/Workforce/);
     expect(() =>
       loadConfig({ ...ENV, NODE_ENV: 'production' } as unknown as NodeJS.ProcessEnv),
-    ).toThrow(/memory/);
+    ).toThrow(/static key/);
+    const kms = {
+      ...ENV,
+      GE_SLACK_VAULT_KEY: undefined,
+      GE_SLACK_KMS_KEY: 'projects/p/locations/eu/keyRings/r/cryptoKeys/k',
+      GE_SLACK_WRAPPED_KEYS: 'k1=abc',
+      NODE_ENV: 'production',
+    };
+    const load = (e: Record<string, unknown>) => () =>
+      loadConfig(e as unknown as NodeJS.ProcessEnv);
+    expect(load(kms)).toThrow(/memory/);
+    expect(load({ ...kms, GE_STORE: 'firestore', GE_EMAIL_BINDING: 'off' })).toThrow(/enforce/);
+    expect(load({ ...kms, GE_STORE: 'firestore' })).not.toThrow();
   });
 });
 

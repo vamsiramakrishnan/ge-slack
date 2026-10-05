@@ -21,6 +21,8 @@ import type { Resolved, ResolveInput } from '@ge-slack/identity';
 /** A message captured from Slack, already reduced to what the model may see. */
 export interface CapturedMessage {
   ts: string;
+  /** Conversation the message lives in (defaults to the context's channel). */
+  channel?: string;
   user?: string;
   /** Display name resolved by the bridge; may be absent. */
   author?: string;
@@ -71,6 +73,8 @@ export interface SurfacePort {
   ): Promise<CapturedContext>;
   actuate(req: ActuationRequest): Promise<ActuationResult>;
   undo(inverse: Inverse): Promise<{ ok: boolean; message: string }>;
+  /** Is this file a canvas, and which conversations is it shared in? (canvas membership gate) */
+  canvasAccess(id: string): Promise<{ isCanvas: boolean; channels: string[] }>;
   userEmail(userId: string): Promise<string | undefined>;
 }
 

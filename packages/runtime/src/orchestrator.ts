@@ -21,7 +21,12 @@ import {
 } from '@ge-slack/contracts';
 import { collectStream, contentHash, type TokenSource } from '@ge-slack/gemini-client';
 import { IdentityRevokedError } from '@ge-slack/identity';
-import { compileEffect, sanitizeOutbound, type CompiledEffect } from './compile.js';
+import {
+  StreamSanitizer,
+  compileEffect,
+  sanitizeOutbound,
+  type CompiledEffect,
+} from './compile.js';
 import { composeChatPrompt, composeCommandPrompt, composePlannerPrompt } from './prompt.js';
 import {
   kindsFor,
@@ -73,6 +78,8 @@ type Turn = {
   grounds: GroundResolution;
   ctx: CapturedContext | undefined;
   allowedChannels: Set<string>;
+  readChannels: Set<string>;
+  externallyShared: boolean;
 };
 
 export type HandleResult = { kind: 'compose' } | { kind: 'done' };
@@ -147,7 +154,11 @@ export class Orchestrator {
         await this.promptConnect(inv, origin, sink, err.message, false);
         return;
       }
-      await sink.notice('error', `Something went wrong: ${safeMessage(err)}`);
+      console.error(`[ge-slack] turn failed: ${safeMessage(err)}`);
+      await sink.notice(
+        'error',
+        'Something went wrong running that. Try again, or check `/gemini whoami`.',
+      );
     }
   }
 
@@ -160,12 +171,41 @@ export class Orchestrator {
       await sink.notice('error', scope.error);
       return undefined;
     }
-    const channel = scopeChannel(scope) ?? origin.channelId;
+    // Canvas scope: the file must be a canvas shared somewhere the invoker can see (H1).
+    let canvasChannels: string[] = [];
+    if (scope.kind === 'canvas') {
+      const access = await surface.canvasAccess(scope.id);
+      if (!access.isCanvas) {
+        await sink.notice('error', 'That id is not a canvas.');
+        return undefined;
+      }
+      const visible: string[] = [];
+      for (const c of access.channels)
+        if (await surface.isMember(c, origin.userId)) visible.push(c);
+      if (!visible.length) {
+        await sink.notice(
+          'denied',
+          "You don't have access to that canvas through any conversation you're in.",
+        );
+        return undefined;
+      }
+      canvasChannels = visible;
+    }
+    const channel = scopeChannel(scope) ?? canvasChannels[0] ?? origin.channelId;
     const info = channel ? await surface.conversationInfo(channel) : undefined;
-    const externallyShared = Boolean(origin.externallyShared || info?.isExtShared);
-    const policy = channel
-      ? await config.channelPolicy(origin.teamId, channel)
-      : await config.channelPolicy(origin.teamId, '');
+    // Slack Connect coercion applies if *any* conversation this turn touches is shared externally.
+    const touched = [
+      ...new Set(
+        [origin.channelId, scopeChannel(scope), inv.flags.to, ...canvasChannels].filter(
+          (c): c is string => Boolean(c),
+        ),
+      ),
+    ];
+    let externallyShared = Boolean(origin.externallyShared);
+    for (const c of touched) {
+      if ((await surface.conversationInfo(c)).isExtShared) externallyShared = true;
+    }
+    const policy = await config.channelPolicy(origin.teamId, channel ?? '');
 
     const resolved = await identity.resolve({
       teamId: origin.teamId,
@@ -204,7 +244,7 @@ export class Orchestrator {
         return undefined;
       }
     }
-    const readChannel = scopeChannel(scope);
+    const readChannel = scopeChannel(scope) ?? canvasChannels[0];
     if (principal.kind === 'service' && readChannel && !policy.serviceMayRead) {
       await sink.notice(
         'denied',
@@ -252,8 +292,14 @@ export class Orchestrator {
     const allowedChannels = new Set<string>(
       [origin.channelId, scopeChannel(scope), inv.flags.to].filter((c): c is string => Boolean(c)),
     );
+    // Reads (executor `read <permalink>`) stay inside the admitted scope only (M3).
+    const readChannels = new Set<string>(
+      [scopeChannel(scope), ...canvasChannels].filter((c): c is string => Boolean(c)),
+    );
     return {
       principal,
+      readChannels,
+      externallyShared,
       tokens: resolved.tokens,
       identity: resolved.identity,
       badge,
@@ -296,9 +342,14 @@ export class Orchestrator {
 
   /** Resume a request after linking, or re-run it as the service ("Answer with the Gemini service"). */
   async resume(resumeId: string, userId: string, sink: TurnSink, asService = false): Promise<void> {
-    const r = await this.deps.stores.takeResume(resumeId);
-    if (!r || r.origin.userId !== userId) {
+    const peek = await this.deps.stores.getResume(resumeId);
+    if (!peek || peek.origin.userId !== userId) {
       await sink.notice('info', 'That request expired — run it again.');
+      return;
+    }
+    const r = await this.deps.stores.takeResume(resumeId);
+    if (!r) {
+      await sink.notice('info', 'That request was already resumed.');
       return;
     }
     const inv = asService
@@ -329,15 +380,19 @@ export class Orchestrator {
       sessionless: true,
       identity: turn.identity,
     });
-    let text = '';
     const sources: SourceRef[] = [];
     let related: string[] = [];
     let provenance;
     let complete = false;
+    // Model output is sanitized on every path, including the live stream (M2).
+    const sanitizer = new StreamSanitizer(this.knownUsers(turn.ctx, inv, origin));
+    // Workflow steps return their answer as step outputs (the workflow decides where it lands);
+    // every other unattended answer is a write and goes through the gate.
+    const unattended = isUnattended(origin) && origin.entry !== 'workflow';
     for await (const e of events) {
       if (e.type === 'token') {
-        text += e.text;
-        await sink.token(e.text);
+        const safe = sanitizer.push(e.text);
+        if (safe && !unattended) await sink.token(safe);
       } else if (e.type === 'citation') sources.push(e.source);
       else if (e.type === 'related-questions') related = e.questions;
       else if (e.type === 'provenance') provenance = e.payload;
@@ -359,7 +414,15 @@ export class Orchestrator {
       await sink.notice('error', 'The answer was cut off before it finished. Try again.');
       return;
     }
+    const tail = sanitizer.finish();
+    if (tail && !unattended) await sink.token(tail);
+    const text = sanitizer.text;
     await sink.task({ id: 'ask', title: `Answered ${asWho(turn.principal)}`, status: 'complete' });
+    if (unattended) {
+      // Unattended answers are writes like any other: gate, provenance, ledger, undo (H4).
+      await this.landUnattendedAnswer(text, sources, provenance?.agentId, inv, origin, sink, turn);
+      return;
+    }
     const turnId = this.newId();
     const stored: StoredAnswer = {
       turnId,
@@ -387,6 +450,100 @@ export class Orchestrator {
           origin.entry === 'global-shortcut'),
       followUps: Boolean(origin.channelId),
     });
+  }
+
+  private knownUsers(
+    ctx: CapturedContext | undefined,
+    inv: Invocation,
+    origin: Origin,
+  ): Set<string> {
+    return new Set<string>([
+      ...(ctx?.messages ?? []).flatMap((m) => (m.user ? [m.user] : [])),
+      ...inv.people,
+      ...inv.from,
+      origin.userId,
+    ]);
+  }
+
+  /**
+   * The unattended gate, evaluated per target: the *destination's* policy must allow auto-apply,
+   * the destination must not be externally shared, and the effect must be a reply in the
+   * triggering thread or a post to the configured destination (M10).
+   */
+  private async autoApplicable(
+    p: ActuationParams,
+    inv: Invocation,
+    origin: Origin,
+  ): Promise<boolean> {
+    const targets = targetChannels(p);
+    if (targets.length !== 1) return false;
+    const target = targets[0]!;
+    const [policy, info] = await Promise.all([
+      this.deps.config.channelPolicy(origin.teamId, target),
+      this.deps.surface.conversationInfo(target),
+    ]);
+    if (info.isExtShared) return false;
+    return canAutoApply(p, {
+      ...(origin.channelId ? { originChannel: origin.channelId } : {}),
+      ...(origin.threadTs ? { originThreadTs: origin.threadTs } : {}),
+      ...(inv.flags.to ? { destination: inv.flags.to } : {}),
+      channelAutoApply: policy.autoApply,
+    });
+  }
+
+  private async landUnattendedAnswer(
+    text: string,
+    sources: SourceRef[],
+    agentId: string | undefined,
+    inv: Invocation,
+    origin: Origin,
+    sink: TurnSink,
+    turn: Turn,
+  ): Promise<void> {
+    const body = (text.length > 3900 ? `${text.slice(0, 3899)}…` : text) || '(no answer)';
+    const destination = inv.flags.to ?? origin.channelId;
+    if (!destination) {
+      await sink.notice('error', 'This automation has no destination.');
+      return;
+    }
+    const params: ActuationParams =
+      origin.threadTs && origin.channelId && !inv.flags.to
+        ? { kind: 'reply', channel: origin.channelId, threadTs: origin.threadTs, text: body }
+        : { kind: 'post', channel: destination, text: body };
+    const createdAt = this.now().getTime();
+    const pending: PendingPlan = {
+      id: this.newId(),
+      teamId: origin.teamId,
+      invokerId: origin.userId,
+      origin,
+      invocation: inv,
+      scope: turn.scope,
+      effects: [
+        {
+          changeId: `chg_${randomUUID()}`,
+          params,
+          line: params.kind === 'reply' ? 'reply "…"' : `post <#${destination}> "…"`,
+          label: params.kind === 'reply' ? 'Reply in thread' : `Post message in <#${destination}>`,
+          preview: body.replace(/\s+/g, ' ').slice(0, 140),
+          approvalClass: 'in-conversation',
+          reversible: true,
+        },
+      ],
+      sources,
+      agentId: agentId ?? 'gemini-enterprise',
+      contentHash: await contentHash(body),
+      identity: turn.identity,
+      ...(origin.automationId ? { automationId: origin.automationId } : {}),
+      dryRun: false,
+      createdAt,
+      expiresAt: createdAt + PLAN_TTL_MS,
+    };
+    if (await this.autoApplicable(params, inv, origin)) {
+      await this.apply(pending, turn.identity, turn.badge, sink, { approval: 'auto' });
+      return;
+    }
+    await this.deps.stores.savePlan(pending);
+    await sink.plan(this.planView(pending, turn.badge));
   }
 
   // ------------------------------------------------------------------ planner route
@@ -518,7 +675,7 @@ export class Orchestrator {
         origin.userId,
       ]);
       const knownMessages = new Set<string>([
-        ...ctx.messages.map((m) => `${ctx.channel ?? ''}:${m.ts}`),
+        ...ctx.messages.map((m) => `${m.channel ?? ctx.channel ?? ''}:${m.ts}`),
         ...(turn.scope.kind === 'thread' || turn.scope.kind === 'message'
           ? [`${turn.scope.channel}:${turn.scope.ts}`]
           : []),
@@ -596,6 +753,7 @@ export class Orchestrator {
       sources,
       agentId,
       contentHash: await contentHash(compiled.map((e) => JSON.stringify(e.params)).join('\n')),
+      identity: turn.identity,
       ...(origin.automationId ? { automationId: origin.automationId } : {}),
       dryRun: inv.flags.dryRun === true,
       createdAt,
@@ -604,15 +762,9 @@ export class Orchestrator {
 
     // Unattended gate (fail closed): auto-apply only when *every* effect is allowed.
     if (isUnattended(origin) && !pending.dryRun) {
-      const policy = await this.deps.config.channelPolicy(origin.teamId, origin.channelId ?? '');
-      const auto = compiled.every((e) =>
-        canAutoApply(e.params, {
-          ...(origin.channelId ? { originChannel: origin.channelId } : {}),
-          ...(origin.threadTs ? { originThreadTs: origin.threadTs } : {}),
-          ...(inv.flags.to ? { destination: inv.flags.to } : {}),
-          channelAutoApply: policy.autoApply,
-        }),
-      );
+      let auto = true;
+      for (const e of compiled)
+        if (!(await this.autoApplicable(e.params, inv, origin))) auto = false;
       if (auto) {
         await this.apply(pending, turn.identity, turn.badge, sink, { approval: 'auto' });
         return;
@@ -645,13 +797,18 @@ export class Orchestrator {
       scope = { kind: 'channel', channel: ctx.channel, sinceMs: 7 * 86_400_000 };
     } else if (typeof line.target === 'object') {
       // A permalink read is only served within conversations already admitted for this turn.
-      if (!turn.allowedChannels.has(line.target.channel)) return `${line.line}: not in scope`;
+      if (!turn.readChannels.has(line.target.channel)) return `${line.line}: not in scope`;
       scope = { kind: 'thread', channel: line.target.channel, ts: line.target.ts };
     }
     if (!scope) return `${line.line}: nothing to read`;
     const more = await this.deps.surface.capture(scope, { from: [], maxMessages: 100 });
     const seen = new Set(ctx.messages.map((m) => m.ts));
-    const fresh = more.messages.filter((m) => !seen.has(m.ts));
+    const fresh = more.messages
+      .filter((m) => !seen.has(m.ts))
+      .map((m) => ({
+        ...m,
+        channel: m.channel ?? more.channel ?? ('channel' in scope ? scope.channel : undefined),
+      }));
     ctx.messages.push(...fresh);
     return `${line.line}: read ${fresh.length} new message(s); they are now in <slack_context>`;
   }
@@ -715,22 +872,51 @@ export class Orchestrator {
     // Re-admit at click time: identity and membership may have changed since the card rendered.
     const channel = scopeChannel(p.scope) ?? p.origin.channelId ?? '';
     const policy = await this.deps.config.channelPolicy(p.teamId, channel);
-    const info = channel ? await this.deps.surface.conversationInfo(channel) : undefined;
+    const targets = new Set(p.effects.flatMap((e) => targetChannels(e.params)));
+    let externallyShared = Boolean(p.origin.externallyShared);
+    for (const c of new Set([channel, ...targets].filter(Boolean))) {
+      if ((await this.deps.surface.conversationInfo(c)).isExtShared) externallyShared = true;
+    }
     const resolved = await this.deps.identity.resolve({
       teamId: p.teamId,
       userId,
       policy: policy.identity,
       ...(p.invocation.flags.as ? { requested: p.invocation.flags.as } : {}),
       unattended: false,
-      externallyShared: Boolean(p.origin.externallyShared || info?.isExtShared),
+      externallyShared,
     });
     if (!resolved.ok) {
       await sink.notice('denied', resolved.decision.message);
       return;
     }
-    for (const c of new Set(p.effects.flatMap((e) => targetChannels(e.params)))) {
+    // The content was drafted by one principal; never land it under a different one (M5).
+    if (resolved.identity !== p.identity) {
+      await sink.notice(
+        'denied',
+        'The identity this plan was drafted with no longer applies here (you connected, disconnected, or the channel policy changed). Run it again.',
+      );
+      return;
+    }
+    for (const c of targets) {
       if (!(await this.deps.surface.isMember(c, userId))) {
         await sink.notice('denied', `You're no longer a member of <#${c}>; nothing was applied.`);
+        return;
+      }
+    }
+    // Canvas edits: re-check that the approver can still reach the canvas (H1).
+    for (const e of p.effects) {
+      if (e.params.kind !== 'canvas-edit') continue;
+      const access = await this.deps.surface.canvasAccess(e.params.canvasId);
+      let ok = access.isCanvas;
+      if (ok) {
+        ok = false;
+        for (const c of access.channels) if (await this.deps.surface.isMember(c, userId)) ok = true;
+      }
+      if (!ok) {
+        await sink.notice(
+          'denied',
+          'You no longer have access to that canvas; nothing was applied.',
+        );
         return;
       }
     }
@@ -885,7 +1071,19 @@ export class Orchestrator {
       await sink.notice('denied', "You can't post in that conversation.");
       return;
     }
-    const text = sanitizeOutbound(a.text, new Set([userId])).slice(0, 3900) || '(empty answer)';
+    // A user-grounded answer may quote sources external members can't open (H3).
+    if (
+      !a.principal.startsWith('service:') &&
+      (await this.deps.surface.conversationInfo(channel)).isExtShared
+    ) {
+      await sink.notice(
+        'denied',
+        "Answers made with your identity can't be shared into an externally shared channel.",
+      );
+      return;
+    }
+    // The stored answer was sanitized when it was produced; truncate only.
+    const text = a.text.slice(0, 3900) || '(empty answer)';
     const params: ActuationParams = a.origin.threadTs
       ? { kind: 'reply', channel, threadTs: a.origin.threadTs, text }
       : { kind: 'post', channel, text };
@@ -918,6 +1116,7 @@ export class Orchestrator {
       sources: a.provenance?.sources ?? [],
       agentId: a.provenance?.agentId ?? 'gemini-enterprise',
       contentHash: a.provenance?.contentHash ?? (await contentHash(a.text)),
+      identity: a.principal,
       dryRun: false,
       createdAt: this.now().getTime(),
       expiresAt: this.now().getTime() + PLAN_TTL_MS,
@@ -959,6 +1158,14 @@ export class Orchestrator {
       return;
     }
     const runAs = inv.flags.as === 'me' ? 'me' : 'service';
+    // Reaction/keyword triggers let *any* channel member start a run; they never run as a person (H5).
+    if (runAs === 'me' && (trigger.kind === 'reaction' || trigger.kind === 'keyword')) {
+      await sink.notice(
+        'denied',
+        'Reaction and keyword automations always run as the Gemini service, because anyone in the channel can trigger them. Remove --as me.',
+      );
+      return;
+    }
     const policy = await this.deps.config.channelPolicy(origin.teamId, channel);
     const info = await this.deps.surface.conversationInfo(channel);
     const pre = await this.deps.identity.resolve({
@@ -1012,8 +1219,13 @@ export class Orchestrator {
   }
 
   async confirmAutomation(draftId: string, userId: string, sink: TurnSink): Promise<void> {
+    const peek = await this.deps.stores.getAutomationDraft(draftId);
+    if (!peek || peek.invokerId !== userId) {
+      await sink.notice('info', 'That automation draft expired — create it again.');
+      return;
+    }
     const d = await this.deps.stores.takeAutomationDraft(draftId);
-    if (!d || d.invokerId !== userId) {
+    if (!d) {
       await sink.notice('info', 'That automation draft expired — create it again.');
       return;
     }
@@ -1095,9 +1307,8 @@ function friendlyProviderError(code: string, message: string): string {
   if (code === 'incomplete') return 'The response was cut off before it finished. Try again.';
   if (code.startsWith('http_5'))
     return 'Gemini Enterprise is temporarily unavailable. Try again shortly.';
-  return message
-    ? `Gemini Enterprise error: ${message.slice(0, 300)}`
-    : 'Gemini Enterprise returned an error.';
+  void message; // provider bodies can echo request details; show only the code (L2)
+  return `Gemini Enterprise returned an error (${code.replace(/[^\w-]/g, '').slice(0, 40)}).`;
 }
 
 export function safeMessage(err: unknown): string {

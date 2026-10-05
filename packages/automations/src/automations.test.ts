@@ -153,14 +153,60 @@ describe('AutomationEngine', () => {
       serviceMayRead: true,
       autoApply: false,
     });
+    await w.config.setChannelPolicy('T1', 'C0DIG', {
+      identity: 'user-preferred',
+      serviceGrounds: [],
+      serviceMayRead: false,
+      autoApply: true,
+    });
     const a = await w.engine.create(digest);
     expect(await w.engine.tick(w.orch, 'T1', w.sinkFor)).toEqual([]);
     w.setNow('2026-10-05T09:00:30Z');
     expect(await w.engine.tick(w.orch, 'T1', w.sinkFor)).toEqual([a.id]);
     expect(await w.engine.tick(w.orch, 'T1', w.sinkFor)).toEqual([]); // retried tick: no double run
-    const answer = w.sinks[0]!.last<{ text: string; identity: { kind: string } }>('answer');
-    expect(answer).toMatchObject({ text: 'Digest: shipped.', identity: { kind: 'service' } });
+    // The digest lands as a provenanced, undoable post — not a raw message (unattended gate).
+    expect(w.surface.actuated).toHaveLength(1);
+    expect(w.surface.actuated[0]!.params).toMatchObject({
+      kind: 'post',
+      channel: 'C0DIG',
+      text: 'Digest: shipped.',
+    });
+    expect(w.surface.actuated[0]!.provenance).toMatchObject({
+      approval: 'auto',
+      automationId: a.id,
+      principal: 'service:ge-bot@p1.iam.gserviceaccount.com',
+    });
     expect((await w.engine.get('T1', a.id))?.lastOutcome).toBe('ok');
+  });
+
+  it('gates the digest to the owner when the destination does not allow auto-apply', async () => {
+    const w = world(['Digest']);
+    await w.config.setChannelPolicy('T1', 'C0ENG', {
+      identity: 'user-preferred',
+      serviceGrounds: [],
+      serviceMayRead: true,
+      autoApply: true,
+    });
+    const a = await w.engine.create(digest);
+    await w.engine.runNow(w.orch, 'T1', a.id, 'U0ALEX', w.sinkFor);
+    expect(w.surface.actuated).toHaveLength(0);
+    expect(w.sinks[0]!.last('plan')).toBeDefined();
+    expect((await w.engine.get('T1', a.id))?.lastOutcome).toBe('gated');
+  });
+
+  it('event triggers never run run-as-me automations', async () => {
+    const w = world(['x']);
+    await w.engine.create({
+      ...digest,
+      runAs: 'me',
+      trigger: { kind: 'reaction', emoji: 'memo', channel: 'C0ENG' },
+    });
+    const n = await w.engine.onReaction(
+      w.orch,
+      { teamId: 'T1', channel: 'C0ENG', ts: '1700000000.000100', emoji: 'memo', userId: 'U0MAYA' },
+      w.sinkFor,
+    );
+    expect(n).toBe(0);
   });
 
   it('auto-suspends after repeated denied runs', async () => {
@@ -244,10 +290,9 @@ describe('workflow steps', () => {
       serviceMayRead: true,
       autoApply: false,
     });
-    const r = await runWorkflowStep(w.orch, 'ge_summarize', 'T1', 'U0ALEX', {
+    const r = await runWorkflowStep(w.orch, 'ge_summarize', 'T1', 'U0RUNNER', {
       channel_id: 'C0ENG',
       since: '7d',
-      user_id: 'U0RUNNER',
     });
     expect(r).toMatchObject({
       ok: true,
@@ -263,10 +308,16 @@ describe('workflow steps', () => {
       serviceMayRead: true,
       autoApply: false,
     });
-    const r = await runWorkflowStep(w.orch, 'ge_summarize', 'T1', 'U0ALEX', {
+    const r = await runWorkflowStep(w.orch, 'ge_summarize', 'T1', 'U0OUTSIDER', {
       channel_id: 'C0ENG',
-      user_id: 'U0OUTSIDER',
     });
     expect(r.ok).toBe(false);
+  });
+  it('fails closed without a Slack-attested person (scheduled workflows, author-chosen inputs)', async () => {
+    const w = world(['x']);
+    const r = await runWorkflowStep(w.orch, 'ge_summarize', 'T1', undefined, {
+      channel_id: 'C0ENG',
+    });
+    expect(r).toMatchObject({ ok: false });
   });
 });

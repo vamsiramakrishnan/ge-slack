@@ -42,20 +42,87 @@ const MAX_FUTURE_S = 120 * 86_400;
  * mentions are kept only for people who appeared in the turn — the model never pings strangers.
  */
 export function sanitizeOutbound(text: string, knownUsers: ReadonlySet<string>): string {
-  return text
-    .replace(/[‪-‮⁦-⁩]/g, '')
-    .replace(/<!(channel|here|everyone)(\|[^>]*)?>/gi, (_m, w: string) => `@⁠${w}`)
-    .replace(
-      /<!subteam\^[A-Z0-9]+(\|([^>]*))?>/gi,
-      (_m, _l, label: string | undefined) => label ?? '@group',
-    )
-    .replace(
-      /(^|[^\w])@(channel|here|everyone)\b/gi,
-      (_m, pre: string, w: string) => `${pre}@⁠${w}`,
-    )
-    .replace(/<@([UW][A-Z0-9]+)(\|[^>]*)?>/g, (m, id: string) =>
-      knownUsers.has(id) ? `<@${id}>` : 'someone',
-    );
+  const WJ = '\u2060'; // word joiner: keeps "@channel" readable but inert
+  return (
+    text
+      .replace(/[\u202A-\u202E\u2066-\u2069\u200B-\u200F]/g, '')
+      .replace(/<!(channel|here|everyone)(\|[^>]*)?>/gi, (_m, w: string) => `@${WJ}${w}`)
+      .replace(
+        /<!subteam\^[A-Z0-9]+(\|([^>]*))?>/gi,
+        (_m, _l, label: string | undefined) => label ?? '@group',
+      )
+      .replace(
+        /(^|[^\w])@(channel|here|everyone)\b/gi,
+        (_m, pre: string, w: string) => `${pre}@${WJ}${w}`,
+      )
+      .replace(/<@([UW][A-Z0-9]+)(\|[^>]*)?>/g, (_m, id: string) =>
+        knownUsers.has(id) ? `<@${id}>` : 'someone',
+      )
+      // Canvas mention syntax.
+      .replace(/!\[\]\(@([UW][A-Z0-9]+)\)/g, (_m, id: string) =>
+        knownUsers.has(id) ? `![](@${id})` : 'someone',
+      )
+      // Links: never let a label disguise its destination (phishing). Show label + real URL.
+      .replace(
+        /<(https?:\/\/[^|>\s]+)\|([^>]*)>/g,
+        (_m, url: string, label: string) => `${label} (${url})`,
+      )
+      .replace(/\[([^\]\n]{1,200})\]\((https?:\/\/[^)\s]+)\)/g, (_m, label: string, url: string) =>
+        label === url ? url : `${label} (${url})`,
+      )
+  );
+}
+
+/** Escape Slack mrkdwn control characters in untrusted text embedded in labels. */
+export function mrkdwnEscape(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/**
+ * Sanitizes a token stream without letting a construct split across chunks slip through: text
+ * after an unclosed `<`, `[`, `!` or a trailing `@word` is held back until it completes.
+ */
+export class StreamSanitizer {
+  private raw = '';
+  private emitted = 0;
+  constructor(private readonly knownUsers: ReadonlySet<string>) {}
+
+  push(chunk: string): string {
+    this.raw += chunk;
+    const safeEnd = this.safeBoundary();
+    const clean = sanitizeOutbound(this.raw.slice(0, safeEnd), this.knownUsers);
+    const out = clean.slice(this.emitted);
+    this.emitted = clean.length;
+    return out;
+  }
+
+  /** Everything, sanitized. Call once at the end. */
+  finish(): string {
+    const clean = sanitizeOutbound(this.raw, this.knownUsers);
+    const out = clean.slice(this.emitted);
+    this.emitted = clean.length;
+    return out;
+  }
+
+  get text(): string {
+    return sanitizeOutbound(this.raw, this.knownUsers);
+  }
+
+  private safeBoundary(): number {
+    const s = this.raw;
+    let cut = s.length;
+    const lt = s.lastIndexOf('<');
+    if (lt >= 0 && s.indexOf('>', lt) < 0) cut = Math.min(cut, lt);
+    const br = s.lastIndexOf('[');
+    if (br >= 0 && !/\]\([^)]*\)/.test(s.slice(br)) && s.length - br < 600) cut = Math.min(cut, br);
+    const bang = s.lastIndexOf('![');
+    if (bang >= 0 && s.indexOf(')', bang) < 0) cut = Math.min(cut, bang);
+    const at = /@\w*$/.exec(s);
+    if (at) cut = Math.min(cut, at.index);
+    // Keep the sanitized prefix stable: only cut at whitespace so replacements don't shift.
+    const ws = s.lastIndexOf(' ', cut - 1);
+    return cut === s.length ? cut : Math.max(0, ws + 1);
+  }
 }
 
 function preview(text: string): string {
@@ -120,7 +187,7 @@ export function compileEffect(effect: CmdEffect, line: string, ctx: CompileConte
     case 'canvas':
       params = {
         kind: 'canvas',
-        title: effect.title.slice(0, 150),
+        title: clean(effect.title).slice(0, 150),
         markdown: clean(effect.markdown),
         ...(ctx.originChannel && channelOk(ctx.originChannel)
           ? { shareTo: ctx.originChannel }
@@ -157,7 +224,12 @@ export function compileEffect(effect: CmdEffect, line: string, ctx: CompileConte
     case 'bookmark': {
       const channel = ctx.originChannel;
       if (!channel || !channelOk(channel)) return err('bookmarks need a channel');
-      params = { kind: 'bookmark', channel, title: effect.title, link: effect.link };
+      params = {
+        kind: 'bookmark',
+        channel,
+        title: clean(effect.title).slice(0, 150),
+        link: effect.link,
+      };
       break;
     }
     case 'react':
@@ -197,13 +269,13 @@ function describe(p: ActuationParams): string {
     case 'post':
       return `${l} in <#${p.channel}>`;
     case 'canvas':
-      return `${l} “${p.title}”`;
+      return `${l} “${mrkdwnEscape(p.title)}”`;
     case 'schedule':
       return `${l} to <#${p.channel}> · <!date^${p.postAt}^{date_short_pretty} {time}|${new Date(p.postAt * 1000).toISOString()}>`;
     case 'remind':
       return `${l} <@${p.user}> · <!date^${p.postAt}^{date_short_pretty} {time}|${new Date(p.postAt * 1000).toISOString()}>`;
     case 'bookmark':
-      return `${l} “${p.title}”`;
+      return `${l} “${mrkdwnEscape(p.title)}”`;
     case 'react':
       return `${l} :${p.emoji}:`;
     default:

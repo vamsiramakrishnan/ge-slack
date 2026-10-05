@@ -238,6 +238,7 @@ export class AutomationEngine implements AutomationPort {
       (a) =>
         a.enabled &&
         a.trigger.kind === 'reaction' &&
+        a.runAs === 'service' && // event triggers never run as a person (H5)
         a.trigger.emoji === ev.emoji &&
         (!a.trigger.channel || a.trigger.channel === ev.channel),
     );
@@ -274,6 +275,7 @@ export class AutomationEngine implements AutomationPort {
     const matches = (await this.list(ev.teamId)).filter(
       (a) =>
         a.enabled &&
+        a.runAs === 'service' &&
         a.trigger.kind === 'keyword' &&
         a.trigger.channel === ev.channel &&
         safeTest(a.trigger.pattern, ev.text),

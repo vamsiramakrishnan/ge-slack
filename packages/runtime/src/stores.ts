@@ -29,6 +29,8 @@ export interface PendingPlan {
   sources: SourceRef[];
   agentId: string;
   contentHash: string;
+  /** Principal that drafted the content (`user:…` / `service:…`). Approval must match it. */
+  identity: string;
   /** Unattended run awaiting the owner (automation gate). */
   automationId?: string;
   dryRun: boolean;
@@ -94,12 +96,18 @@ export class RuntimeStores {
   saveAutomationDraft(a: PendingAutomation) {
     return this.kv.set(`automation-draft/${a.id}`, a, { ttlMs: PLAN_TTL_MS });
   }
+  getAutomationDraft(id: string) {
+    return this.kv.get<PendingAutomation>(`automation-draft/${id}`);
+  }
   takeAutomationDraft(id: string) {
     return this.kv.take<PendingAutomation>(`automation-draft/${id}`);
   }
 
   saveResume(id: string, value: { origin: Origin; invocation: Invocation }) {
     return this.kv.set(`resume/${id}`, value, { ttlMs: RESUME_TTL_MS });
+  }
+  getResume(id: string) {
+    return this.kv.get<{ origin: Origin; invocation: Invocation }>(`resume/${id}`);
   }
   takeResume(id: string) {
     return this.kv.take<{ origin: Origin; invocation: Invocation }>(`resume/${id}`);

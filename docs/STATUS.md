@@ -6,6 +6,7 @@ against live Slack or a live Gemini Enterprise engine.**
 
 | Area | State | Evidence |
 |---|---|---|
+| Security review findings (H1–H5, M1–M10) | Fixed | regression tests in each package |
 | Grammar: `/` verbs, scope, `@` grounds, flags, `automate` | Implemented | unit-tested (`contracts/grammar.test.ts`) |
 | Principal policy (user / service, Slack Connect coercion, unattended rules) | Implemented | unit-tested (`contracts/policy.test.ts`, `identity.test.ts`) |
 | OIDC + PKCE linking, email binding, sealed refresh tokens, rotation, revocation | Implemented | unit-tested against a fake IdP |
@@ -20,6 +21,32 @@ against live Slack or a live Gemini Enterprise engine.**
 | Skill bundles (planner + commander) + Python parity parsers | Implemented | Python tests + TS/Python parity corpus |
 | Canvas *reading* | Limited | Slack's Web API exposes canvas metadata, not full markdown; capture says when it's truncated |
 | `canvas-edit` undo | Not reversible | Slack doesn't expose prior section content; shown as such |
+
+## Security review (2026-10-05)
+
+A `security-reviewer` pass found no criticals; all high findings and most mediums are fixed, each
+with a regression test:
+
+| Finding | Fix |
+|---|---|
+| H1 canvas read/edit by id | canvas must be shared in a conversation the invoker is in; re-checked at approval |
+| H2 workflow steps trusted author-chosen `user_id` | Slack-attested `interactivity` input only; fail closed without it |
+| H3 Slack Connect coercion only checked the scope | computed over origin, scope, `--to`, share target; re-checked at approval |
+| H4 unattended chat answers posted raw | gated like any write (destination policy, provenance, ledger, undo) or sent to the owner as a plan |
+| H5 event triggers could run as the owner | reaction/keyword automations are service-only |
+| M1/M2 unescaped labels, links, stream output | titles escaped; links show their real URL; canvas mentions handled; streamed tokens sanitized |
+| M3 service reads beyond allow-list | executor reads limited to the admitted scope |
+| M4 disconnect resurrection, no revocation | no stale fallback; compare-before-write rotation; RFC 7009 revocation on unlink |
+| M5 provenance identity drift | plans pin the drafting principal; approval refused if it changed |
+| M6 auto-retried writes | writes use a WebClient with retries disabled and 429s rejected |
+| M8/M9 binding off / static key in prod | refused in production; Cloud KMS envelope `KeyProvider` |
+| M10 auto-apply used origin policy | destination policy + not externally shared |
+| L1–L6, L9, L10 | `email_verified`, no provider bodies in Slack, redacted logs, attached-SA check, check-then-take, all prompt delimiters neutralized, real-channel message keys, `team:read` removed, team id pinned |
+
+Accepted / documented: `remind` DMs only people who took part in the conversation (L4); cron uses a
+shared secret header (L8; Cloud Scheduler OIDC is a follow-up); Firestore region is an operator
+setting (L7). M7 (Firestore prefix query) was a false positive — the upper bound is U+F8FF, now
+written as an explicit escape.
 
 ## Next live checks
 

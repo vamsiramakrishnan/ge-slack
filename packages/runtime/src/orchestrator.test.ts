@@ -447,3 +447,86 @@ describe('prompt framing', () => {
     expect(r.match(/```/g)).toBeNull();
   });
 });
+
+describe('security regressions', () => {
+  it('canvas scope requires the canvas to be shared somewhere the invoker can see (H1)', async () => {
+    const { orch, surface } = setup(['ok']);
+    surface.canvases.set('F0SECRET', ['C0PRIV']);
+    surface.members.set('C0PRIV', new Set(['U0MAYA']));
+    const denied = await run(orch, 'summarize scope:canvas(F0SECRET)');
+    expect(denied.last<{ kind: string }>('notice')?.kind).toBe('denied');
+    const notCanvas = await run(orch, 'summarize scope:canvas(F0NOPE)');
+    expect(notCanvas.last<{ text: string }>('notice')?.text).toContain('not a canvas');
+    surface.canvases.set('F0OPEN', ['C0ENG']);
+    const ok = await run(orch, 'summarize scope:canvas(F0OPEN)');
+    expect(ok.last('answer')).toBeDefined();
+  });
+
+  it('Slack Connect coercion covers --to destinations, not just the scope (H3)', async () => {
+    const { orch, surface, identity } = setup(['```cmd\npost <#C0EXT|vendor> "hi"\ndone\n```']);
+    surface.info.set('C0EXT', {
+      id: 'C0EXT',
+      name: 'vendor',
+      isPrivate: false,
+      isIm: false,
+      isExtShared: true,
+    });
+    surface.members.set('C0EXT', new Set(['U0ALEX']));
+    await run(orch, 'draft "status" --to <#C0EXT|vendor>');
+    expect(identity.lastInput?.externallyShared).toBe(true);
+  });
+
+  it('user-identity answers cannot be shared into an externally shared channel (H3)', async () => {
+    const { orch, surface } = setup(['secret-ish answer']);
+    const sink = await run(orch, 'ask x', origin({ entry: 'slash', threadTs: undefined }));
+    surface.info.set('C0ENG', { id: 'C0ENG', isPrivate: false, isIm: false, isExtShared: true });
+    const s = new RecordingSink();
+    await orch.share(sink.last<{ turnId: string }>('answer')!.turnId, 'U0ALEX', s);
+    expect(s.last<{ kind: string }>('notice')?.kind).toBe('denied');
+    expect(surface.actuated).toHaveLength(0);
+  });
+
+  it('approval is refused when the drafting identity no longer applies (M5)', async () => {
+    const { orch, identity, surface, config } = setup(['```cmd\nreply "x"\ndone\n```']);
+    const sink = await run(orch, 'draft "x"');
+    identity.linked.delete('U0ALEX');
+    await config.setChannelPolicy('T1', 'C0ENG', {
+      identity: 'user-preferred',
+      serviceGrounds: [],
+      serviceMayRead: true,
+      autoApply: false,
+    });
+    const s = new RecordingSink();
+    await orch.approve(sink.last<PlanView>('plan')!.planId, 'U0ALEX', s, {});
+    // Either the connect requirement or the identity-change guard must stop it; nothing lands.
+    expect(surface.actuated).toHaveLength(0);
+  });
+
+  it('executor reads stay inside the admitted scope (M3)', async () => {
+    const other = 'https://acme.slack.com/archives/C0DIG/p1700000000000900';
+    const { orch, gemini } = setup([
+      `\`\`\`cmd\nread <${other}>\n\`\`\``,
+      '```cmd\nreply "x"\ndone\n```',
+    ]);
+    await run(orch, `draft "x" --to <#C0DIG|digest>`);
+    expect(gemini.turns[1]!.text).toContain('not in scope');
+  });
+
+  it('unattended answers never post raw: without auto-apply they gate to the owner (H4)', async () => {
+    const { orch, surface, config } = setup(['Answer']);
+    await config.setChannelPolicy('T1', 'C0ENG', {
+      identity: 'user-preferred',
+      serviceGrounds: [],
+      serviceMayRead: true,
+      autoApply: false,
+    });
+    const s = await run(
+      orch,
+      'ask x',
+      origin({ entry: 'keyword', automationId: 'a1', userId: 'U0ALEX' }),
+    );
+    expect(surface.actuated).toHaveLength(0);
+    expect(s.last('plan')).toBeDefined();
+    expect(s.last('answer')).toBeUndefined();
+  });
+});

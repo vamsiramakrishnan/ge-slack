@@ -95,9 +95,25 @@ export class IdentityBroker {
   }
 
   /** Delete the sealed refresh token and drop any in-memory Google token. */
+  /** Delete the sealed refresh token, revoke it at the IdP (best effort), drop cached tokens. */
   async unlink(teamId: string, userId: string): Promise<void> {
+    const rec = await this.getLinked(teamId, userId);
     await this.opts.store.delete(identityKey(teamId, userId));
-    this.cache.delete(`${teamId}:${userId}`);
+    if (rec) {
+      this.cache.delete(this.cacheKey(rec));
+      try {
+        await this.opts.oidc.revoke(
+          await this.opts.vault.open(rec.refresh, userAad(teamId, userId)),
+        );
+      } catch {
+        /* revocation is best effort; the sealed token is already deleted */
+      }
+    }
+  }
+
+  /** Cache entries are per link (re-linking or another instance's unlink yields a new key). */
+  private cacheKey(rec: LinkedIdentity): string {
+    return `${rec.teamId}:${rec.slackUserId}:${rec.linkedAt}:${rec.subject}`;
   }
 
   async resolve(input: ResolveInput): Promise<Resolved> {
@@ -142,7 +158,7 @@ export class IdentityBroker {
   }
 
   private userTokens(rec: LinkedIdentity): TokenSource {
-    const key = `${rec.teamId}:${rec.slackUserId}`;
+    const key = this.cacheKey(rec);
     const hit = this.cache.get(key);
     if (hit) {
       this.cache.delete(key);
@@ -186,7 +202,12 @@ export class IdentityBroker {
   private async refresh(rec: LinkedIdentity) {
     const aad = userAad(rec.teamId, rec.slackUserId);
     // Re-read: another instance may have rotated the refresh token since this record was cached.
-    const current = (await this.getLinked(rec.teamId, rec.slackUserId)) ?? rec;
+    // A deleted record means the user disconnected: never fall back to the stale copy (M4).
+    const current = await this.getLinked(rec.teamId, rec.slackUserId);
+    if (!current || current.subject !== rec.subject) {
+      this.cache.delete(this.cacheKey(rec));
+      throw new IdentityRevokedError();
+    }
     let refreshToken: string;
     try {
       refreshToken = await this.opts.vault.open(current.refresh, aad);
@@ -208,10 +229,15 @@ export class IdentityBroker {
       throw e;
     }
     if (t.refresh_token && t.refresh_token !== refreshToken) {
-      await this.opts.store.set(identityKey(rec.teamId, rec.slackUserId), {
-        ...current,
-        refresh: await this.opts.vault.seal(t.refresh_token, aad),
-      });
+      // Write the rotated token only if the record is unchanged since we read it: a concurrent
+      // disconnect must not be resurrected, and a concurrent rotation must not be clobbered.
+      const latest = await this.getLinked(rec.teamId, rec.slackUserId);
+      if (latest && latest.refresh.ct === current.refresh.ct) {
+        await this.opts.store.set(identityKey(rec.teamId, rec.slackUserId), {
+          ...latest,
+          refresh: await this.opts.vault.seal(t.refresh_token, aad),
+        });
+      }
     }
     return t;
   }

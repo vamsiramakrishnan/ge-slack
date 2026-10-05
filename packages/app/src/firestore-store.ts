@@ -89,7 +89,7 @@ export class FirestoreStore implements KeyValueStore {
     const q = await this.db
       .collection(this.collection)
       .where('k', '>=', prefix)
-      .where('k', '<', `${prefix}`)
+      .where('k', '<', `${prefix}\uf8ff`) // U+F8FF: highest BMP private-use char
       .limit(1000)
       .get();
     return q.docs

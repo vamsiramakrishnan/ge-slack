@@ -11,6 +11,7 @@ import {
   MemoryStore,
   OidcClient,
   StaticKeyProvider,
+  CloudKmsKeyProvider,
   TokenVault,
   type KeyValueStore,
   type ServiceIdentity,
@@ -47,6 +48,10 @@ export interface Container {
 
 export interface ContainerDeps {
   api: SlackApi;
+  /** Non-retrying client for writes (a retried post can land twice). Defaults to `api`. */
+  writeApi?: SlackApi;
+  /** Skip the metadata-server SA check (tests only). */
+  verifyServiceAccount?: boolean;
   kv?: KeyValueStore;
   fetchImpl?: typeof fetch;
   postResponse?: ResponsePoster;
@@ -62,17 +67,27 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
         })
       : new MemoryStore());
 
-  const oldKeys = Object.fromEntries(
-    (cfg.GE_SLACK_VAULT_OLD_KEYS ?? '')
-      .split(',')
-      .map((p) => p.trim().split('='))
-      .filter((p): p is [string, string] => p.length === 2),
-  );
+  const pairs = (text: string | undefined) =>
+    Object.fromEntries(
+      (text ?? '')
+        .split(',')
+        .map((p) => p.trim().split('='))
+        .filter((p): p is [string, string] => p.length === 2 && Boolean(p[0]) && Boolean(p[1])),
+    );
+  const runtimeIdentity = new MetadataServerTokenSource(fetchImpl);
   const vault = new TokenVault(
-    new StaticKeyProvider(cfg.GE_SLACK_VAULT_KEY_ID, {
-      ...oldKeys,
-      [cfg.GE_SLACK_VAULT_KEY_ID]: cfg.GE_SLACK_VAULT_KEY,
-    }),
+    cfg.GE_SLACK_KMS_KEY && cfg.GE_SLACK_WRAPPED_KEYS
+      ? new CloudKmsKeyProvider(
+          cfg.GE_SLACK_KMS_KEY,
+          cfg.GE_SLACK_VAULT_KEY_ID,
+          pairs(cfg.GE_SLACK_WRAPPED_KEYS),
+          runtimeIdentity,
+          fetchImpl,
+        )
+      : new StaticKeyProvider(cfg.GE_SLACK_VAULT_KEY_ID, {
+          ...pairs(cfg.GE_SLACK_VAULT_OLD_KEYS),
+          [cfg.GE_SLACK_VAULT_KEY_ID]: cfg.GE_SLACK_VAULT_KEY!,
+        }),
   );
   const oidc = new OidcClient(
     {
@@ -88,7 +103,16 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
 
   let service: ServiceIdentity | undefined;
   if (cfg.GE_SERVICE_MODE !== 'none' && cfg.GE_SERVICE_ACCOUNT) {
-    const metadata = new MetadataServerTokenSource(fetchImpl);
+    const metadata = runtimeIdentity;
+    if (cfg.GE_SERVICE_MODE === 'metadata' && deps.verifyServiceAccount !== false) {
+      // Provenance names this account, so the attached identity must actually be it (L3).
+      const attached = await metadata.email();
+      if (attached !== cfg.GE_SERVICE_ACCOUNT) {
+        throw new Error(
+          `Attached service account ${attached} is not GE_SERVICE_ACCOUNT ${cfg.GE_SERVICE_ACCOUNT}.`,
+        );
+      }
+    }
     service = {
       serviceAccount: cfg.GE_SERVICE_ACCOUNT,
       tokens:
@@ -146,8 +170,9 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
 
   const surface = new SlackSurface(deps.api, {
     teamId: cfg.SLACK_TEAM_ID,
+    ...(deps.writeApi ? { writeApi: deps.writeApi } : {}),
     ...(cfg.SLACK_APP_ID ? { appId: cfg.SLACK_APP_ID } : {}),
-    ...(cfg.SLACK_TEAM_DOMAIN ? { domain: cfg.SLACK_TEAM_DOMAIN } : {}),
+    domain: cfg.SLACK_TEAM_DOMAIN,
   });
   const workspace = new KvWorkspaceConfig(kv, cfg.sources);
   const stores = new RuntimeStores(kv);
