@@ -1,0 +1,155 @@
+{
+  "_metadata": { "major_version": 2, "minor_version": 1 },
+  "display_information": {
+    "name": "Gemini",
+    "description": "Gemini Enterprise in Slack — grounded on your sources, acting as you, every change reviewable.",
+    "long_description": "Ask, summarize, explain, rewrite, review, draft and take notes with Gemini Enterprise from any conversation. Answers run as you (your Gemini Enterprise licence and access) or, where your admins allow it, as a licensed Gemini service identity limited to shared sources. Anything Gemini wants to post is shown as a plan you approve first; every change is attributed and can be undone from App Home.",
+    "background_color": "#1d1c2b"
+  },
+  "features": {
+    "app_home": {
+      "home_tab_enabled": true,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
+    "bot_user": { "display_name": "Gemini", "always_online": true },
+    "agent_view": {
+      "agent_description": "Gemini Enterprise, grounded on your company's sources and acting as you. Ask anything, or try /gemini help.",
+      "suggested_prompts": [
+        { "title": "Catch me up", "message": "summarize #general --since 24h" },
+        { "title": "Explain a decision", "message": "explain why we chose the current on-call rotation @unit" },
+        { "title": "Draft an update", "message": "draft a weekly status update from #eng --since 7d" },
+        { "title": "What can you do?", "message": "help" }
+      ]
+    },
+    "slash_commands": [
+      {
+        "command": "/gemini",
+        "url": "https://ge-slack.example.com/slack/events",
+        "description": "Ask · summarize · explain · rewrite · review · draft · notes — grounded and reviewable",
+        "usage_hint": "summarize #channel --since 7d @unit  ·  draft \"an update\" --to #team  ·  help",
+        "should_escape": true
+      }
+    ],
+    "shortcuts": [
+      { "name": "Gemini: new task", "type": "global", "callback_id": "ge_global_new", "description": "Open the Gemini composer" },
+      { "name": "Ask Gemini about this", "type": "message", "callback_id": "ge_msg_ask", "description": "Ask about this message" },
+      { "name": "Summarize thread", "type": "message", "callback_id": "ge_msg_summarize", "description": "Summarize this thread" },
+      { "name": "Draft a reply", "type": "message", "callback_id": "ge_msg_draft_reply", "description": "Draft a reviewable reply" },
+      { "name": "Review with Gemini", "type": "message", "callback_id": "ge_msg_review", "description": "Post findings as threaded replies" },
+      { "name": "Turn into canvas", "type": "message", "callback_id": "ge_msg_canvas", "description": "Draft a canvas from this thread" }
+    ]
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "assistant:write",
+        "bookmarks:write",
+        "canvases:write",
+        "channels:history",
+        "channels:read",
+        "chat:write",
+        "commands",
+        "files:read",
+        "groups:history",
+        "groups:read",
+        "im:history",
+        "im:read",
+        "im:write",
+        "reactions:read",
+        "reactions:write",
+        "team:read",
+        "users:read",
+        "users:read.email"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://ge-slack.example.com/slack/events",
+      "bot_events": [
+        "app_home_opened",
+        "app_mention",
+        "function_executed",
+        "message.channels",
+        "message.groups",
+        "message.im",
+        "reaction_added"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": true,
+      "request_url": "https://ge-slack.example.com/slack/events"
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false,
+    "function_runtime": "remote"
+  },
+  "functions": {
+    "ge_ask": {
+      "title": "Gemini: Ask",
+      "description": "Ask Gemini Enterprise (as the Gemini service identity) and get a grounded answer",
+      "input_parameters": {
+        "properties": {
+          "prompt": { "type": "string", "title": "Question" },
+          "channel_id": { "type": "slack#/types/channel_id", "title": "Conversation to read (optional)" },
+          "since": { "type": "string", "title": "Window, e.g. 24h or 7d" },
+          "user_id": { "type": "slack#/types/user_id", "title": "Person running the workflow" }
+        },
+        "required": ["prompt", "user_id"]
+      },
+      "output_parameters": {
+        "properties": {
+          "answer": { "type": "string", "title": "Answer" },
+          "sources": { "type": "string", "title": "Sources" },
+          "identity": { "type": "string", "title": "Identity used" }
+        },
+        "required": ["answer"]
+      }
+    },
+    "ge_summarize": {
+      "title": "Gemini: Summarize conversation",
+      "description": "Summarize a channel window or thread with Gemini Enterprise",
+      "input_parameters": {
+        "properties": {
+          "channel_id": { "type": "slack#/types/channel_id", "title": "Channel" },
+          "message_ts": { "type": "string", "title": "Thread (message timestamp, optional)" },
+          "since": { "type": "string", "title": "Window, e.g. 24h or 7d" },
+          "prompt": { "type": "string", "title": "Focus (optional)" },
+          "user_id": { "type": "slack#/types/user_id", "title": "Person running the workflow" }
+        },
+        "required": ["channel_id", "user_id"]
+      },
+      "output_parameters": {
+        "properties": {
+          "answer": { "type": "string", "title": "Summary" },
+          "sources": { "type": "string", "title": "Sources" },
+          "identity": { "type": "string", "title": "Identity used" }
+        },
+        "required": ["answer"]
+      }
+    },
+    "ge_draft": {
+      "title": "Gemini: Draft a message",
+      "description": "Draft message text with Gemini Enterprise; post it with a Send message step",
+      "input_parameters": {
+        "properties": {
+          "prompt": { "type": "string", "title": "What to draft" },
+          "channel_id": { "type": "slack#/types/channel_id", "title": "Context conversation (optional)" },
+          "user_id": { "type": "slack#/types/user_id", "title": "Person running the workflow" }
+        },
+        "required": ["prompt", "user_id"]
+      },
+      "output_parameters": {
+        "properties": {
+          "answer": { "type": "string", "title": "Draft" },
+          "sources": { "type": "string", "title": "Sources" },
+          "identity": { "type": "string", "title": "Identity used" }
+        },
+        "required": ["answer"]
+      }
+    }
+  }
+}

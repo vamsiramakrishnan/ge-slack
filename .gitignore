@@ -1,0 +1,13 @@
+node_modules/
+dist/
+build/
+coverage/
+.env
+.env.local
+*.log
+.DS_Store
+*.tsbuildinfo
+skill/**/*.zip
+__pycache__/
+*.pyc
+.ge-slack-dev/

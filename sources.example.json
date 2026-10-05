@@ -1,0 +1,20 @@
+[
+  {
+    "alias": "runbooks",
+    "title": "Incident runbooks",
+    "dataStore": "projects/my-project/locations/eu/collections/default_collection/dataStores/runbooks",
+    "serviceAllowed": true
+  },
+  {
+    "alias": "handbook",
+    "title": "Engineering handbook",
+    "dataStore": "projects/my-project/locations/eu/collections/default_collection/dataStores/eng-handbook",
+    "serviceAllowed": true
+  },
+  {
+    "alias": "drive",
+    "title": "My Drive (federated, personal)",
+    "dataStore": "projects/my-project/locations/eu/collections/default_collection/dataStores/drive-federated",
+    "serviceAllowed": false
+  }
+]

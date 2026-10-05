@@ -1,0 +1,544 @@
+import {
+  toSlackMetadata,
+  type ActuationRequest,
+  type ActuationResult,
+  type Inverse,
+} from '@ge-slack/contracts';
+import type {
+  CapturedContext,
+  CapturedMessage,
+  ConversationInfo,
+  ResolvedScope,
+  SurfacePort,
+} from '@ge-slack/runtime';
+import { must, slackErrorCode, type SlackApi } from './slack-api.js';
+import { provenanceFooter, markdownBlocks } from './blocks.js';
+
+interface SlackMessage {
+  ts: string;
+  user?: string;
+  bot_id?: string;
+  app_id?: string;
+  text?: string;
+  thread_ts?: string;
+  reply_count?: number;
+  subtype?: string;
+  files?: Array<{ name?: string; title?: string }>;
+}
+
+export interface SlackSurfaceOptions {
+  /** Our app id, to mark our own messages for the model. */
+  appId?: string;
+  /** Workspace domain for constructing permalinks (`acme` → acme.slack.com). */
+  domain?: string;
+  teamId: string;
+  now?: () => number;
+  /** Max pages of conversations.members to scan before failing closed. */
+  maxMemberPages?: number;
+}
+
+const MEMBER_TTL_MS = 2 * 60_000;
+const INFO_TTL_MS = 5 * 60_000;
+
+/**
+ * SurfacePort over the Slack Web API — the only place the bot reads or mutates Slack.
+ * Reads are bounded; writes carry `ge_provenance` metadata and return a host inverse.
+ */
+export class SlackSurface implements SurfacePort {
+  private readonly memberCache = new Map<string, { ok: boolean; at: number }>();
+  private readonly infoCache = new Map<string, { v: ConversationInfo; at: number }>();
+  private readonly nameCache = new Map<string, string>();
+  private domain: string | undefined;
+  private readonly now: () => number;
+
+  constructor(
+    private readonly api: SlackApi,
+    private readonly opts: SlackSurfaceOptions,
+  ) {
+    this.domain = opts.domain;
+    this.now = opts.now ?? Date.now;
+  }
+
+  async conversationInfo(channel: string): Promise<ConversationInfo> {
+    const hit = this.infoCache.get(channel);
+    if (hit && this.now() - hit.at < INFO_TTL_MS) return hit.v;
+    const r = await must(this.api, 'conversations.info', { channel });
+    const c = r.channel as Record<string, unknown>;
+    const v: ConversationInfo = {
+      id: channel,
+      ...(typeof c.name === 'string' ? { name: c.name } : {}),
+      isPrivate: c.is_private === true,
+      isIm: c.is_im === true || c.is_mpim === true,
+      // Fail toward the stricter policy: any shared signal counts as externally shared.
+      isExtShared:
+        c.is_ext_shared === true || c.is_pending_ext_shared === true || c.is_shared === true,
+    };
+    this.infoCache.set(channel, { v, at: this.now() });
+    return v;
+  }
+
+  async isMember(channel: string, userId: string): Promise<boolean> {
+    const key = `${channel}:${userId}`;
+    const hit = this.memberCache.get(key);
+    if (hit && this.now() - hit.at < MEMBER_TTL_MS) return hit.ok;
+    let ok = false;
+    try {
+      let cursor: string | undefined;
+      for (let page = 0; page < (this.opts.maxMemberPages ?? 20); page++) {
+        const r = await must(this.api, 'conversations.members', {
+          channel,
+          limit: 1000,
+          ...(cursor ? { cursor } : {}),
+        });
+        if ((r.members as string[] | undefined)?.includes(userId)) {
+          ok = true;
+          break;
+        }
+        cursor = r.response_metadata?.next_cursor || undefined;
+        if (!cursor) break;
+      }
+    } catch {
+      ok = false; // not_in_channel, channel_not_found, … → fail closed
+    }
+    this.memberCache.set(key, { ok, at: this.now() });
+    return ok;
+  }
+
+  async userEmail(userId: string): Promise<string | undefined> {
+    const r = await must(this.api, 'users.info', { user: userId });
+    const user = r.user as { profile?: { email?: string }; deleted?: boolean; is_bot?: boolean };
+    if (user.deleted || user.is_bot) return undefined;
+    return user.profile?.email;
+  }
+
+  private async ensureDomain(): Promise<string | undefined> {
+    if (this.domain) return this.domain;
+    try {
+      const r = await must(this.api, 'team.info', {});
+      this.domain = (r.team as { domain?: string }).domain;
+    } catch {
+      /* permalinks become ts handles */
+    }
+    return this.domain;
+  }
+
+  permalink(channel: string, ts: string, threadTs?: string): string | undefined {
+    if (!this.domain) return undefined;
+    const base = `https://${this.domain}.slack.com/archives/${channel}/p${ts.replace('.', '')}`;
+    return threadTs && threadTs !== ts ? `${base}?thread_ts=${threadTs}&cid=${channel}` : base;
+  }
+
+  private async authorName(user: string | undefined): Promise<string | undefined> {
+    if (!user) return undefined;
+    const hit = this.nameCache.get(user);
+    if (hit) return hit;
+    if (this.nameCache.size > 2000) this.nameCache.clear();
+    try {
+      const r = await must(this.api, 'users.info', { user });
+      const u = r.user as {
+        real_name?: string;
+        name?: string;
+        profile?: { display_name?: string };
+      };
+      const name = u.profile?.display_name || u.real_name || u.name;
+      if (name) this.nameCache.set(user, name);
+      return name;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async toCaptured(
+    channel: string,
+    msgs: SlackMessage[],
+    threadTs?: string,
+  ): Promise<CapturedMessage[]> {
+    await this.ensureDomain();
+    const names = new Map<string, string | undefined>();
+    for (const u of new Set(
+      msgs.map((m) => m.user).filter((u): u is string => Boolean(u)),
+    ).values()) {
+      if (names.size >= 50) break;
+      names.set(u, await this.authorName(u));
+    }
+    return msgs
+      .filter(
+        (m) =>
+          !m.subtype ||
+          m.subtype === 'thread_broadcast' ||
+          m.subtype === 'bot_message' ||
+          m.subtype === 'file_share',
+      )
+      .map((m) => {
+        const files = (m.files ?? [])
+          .map((f) => `[file: ${f.title ?? f.name ?? 'attachment'}]`)
+          .join(' ');
+        const author = m.user ? names.get(m.user) : undefined;
+        const permalink = this.permalink(channel, m.ts, threadTs ?? m.thread_ts);
+        return {
+          ts: m.ts,
+          ...(m.user ? { user: m.user } : {}),
+          ...(author ? { author } : {}),
+          text: [m.text ?? '', files].filter(Boolean).join(' '),
+          ...(m.thread_ts ? { threadTs: m.thread_ts } : {}),
+          ...(m.reply_count ? { replyCount: m.reply_count } : {}),
+          ...(permalink ? { permalink } : {}),
+          ...(this.opts.appId && m.app_id === this.opts.appId ? { fromApp: true } : {}),
+        };
+      });
+  }
+
+  async capture(
+    scope: ResolvedScope,
+    opts: { from: string[]; maxMessages: number; search?: string },
+  ): Promise<CapturedContext> {
+    const filter = (ms: CapturedMessage[]) =>
+      ms.filter(
+        (m) =>
+          (!opts.from.length || (m.user && opts.from.includes(m.user))) &&
+          (!opts.search || m.text.toLowerCase().includes(opts.search.toLowerCase())),
+      );
+
+    switch (scope.kind) {
+      case 'none':
+        return { label: 'no conversation', messages: [], truncated: false };
+      case 'thread':
+      case 'message': {
+        const { messages, truncated } = await this.page(
+          'conversations.replies',
+          { channel: scope.channel, ts: scope.ts },
+          opts.maxMessages,
+        );
+        const msgs =
+          scope.kind === 'message' ? messages.filter((m) => m.ts === scope.ts) : messages;
+        if (scope.kind === 'message' && msgs.length === 0) {
+          // Not a thread parent: fetch the single message from history.
+          const r = await must(this.api, 'conversations.history', {
+            channel: scope.channel,
+            latest: scope.ts,
+            inclusive: true,
+            limit: 1,
+          });
+          msgs.push(...((r.messages as SlackMessage[]) ?? []));
+        }
+        const info = await this.conversationInfo(scope.channel);
+        return {
+          label: `${scope.kind === 'thread' ? 'thread' : 'message'} in #${info.name ?? scope.channel}`,
+          channel: scope.channel,
+          threadTs: scope.ts,
+          messages: filter(
+            await this.toCaptured(
+              scope.channel,
+              msgs,
+              scope.kind === 'thread' ? scope.ts : undefined,
+            ),
+          ),
+          truncated,
+        };
+      }
+      case 'channel':
+      case 'dm': {
+        const oldest =
+          scope.kind === 'channel' ? String((this.now() - scope.sinceMs) / 1000) : undefined;
+        const { messages, truncated } = await this.page(
+          'conversations.history',
+          { channel: scope.channel, ...(oldest ? { oldest } : {}) },
+          opts.maxMessages,
+        );
+        const info = await this.conversationInfo(scope.channel);
+        const days =
+          scope.kind === 'channel' ? Math.max(1, Math.round(scope.sinceMs / 86_400_000)) : 0;
+        return {
+          label:
+            scope.kind === 'channel' ? `#${info.name ?? scope.channel} · last ${days}d` : 'this DM',
+          channel: scope.channel,
+          messages: filter(await this.toCaptured(scope.channel, messages.reverse())),
+          truncated,
+        };
+      }
+      case 'canvas': {
+        // The Web API exposes canvas metadata, not its rendered markdown; capture what we can and say so.
+        const r = await must(this.api, 'files.info', { file: scope.id });
+        const f = r.file as {
+          title?: string;
+          name?: string;
+          preview?: string;
+          plain_text?: string;
+        };
+        return {
+          label: `canvas ${f.title ?? scope.id}`,
+          ...(scope.channel ? { channel: scope.channel } : {}),
+          messages: [],
+          canvas: {
+            id: scope.id,
+            title: f.title ?? f.name ?? 'Canvas',
+            markdown: f.plain_text ?? f.preview ?? '',
+          },
+          truncated: !(f.plain_text ?? f.preview),
+        };
+      }
+    }
+  }
+
+  private async page(
+    method: string,
+    args: Record<string, unknown>,
+    max: number,
+  ): Promise<{ messages: SlackMessage[]; truncated: boolean }> {
+    const out: SlackMessage[] = [];
+    let cursor: string | undefined;
+    for (;;) {
+      const r = await must(this.api, method, {
+        ...args,
+        limit: Math.min(200, max - out.length),
+        ...(cursor ? { cursor } : {}),
+      });
+      out.push(...((r.messages as SlackMessage[]) ?? []));
+      cursor = r.response_metadata?.next_cursor || undefined;
+      if (!cursor || out.length >= max)
+        return { messages: out.slice(0, max), truncated: Boolean(cursor) };
+    }
+  }
+
+  // ------------------------------------------------------------------ writes
+
+  async actuate(req: ActuationRequest): Promise<ActuationResult> {
+    const p = req.params;
+    const base = { changeId: req.changeId, kind: p.kind } as const;
+    const meta = req.provenance ? toSlackMetadata(req.provenance) : undefined;
+    const footer = req.provenance
+      ? provenanceFooter({
+          invoker: req.provenance.invoker,
+          principal: req.provenance.principal,
+          sources: req.provenance.sources.length,
+          approval: req.provenance.approval,
+          ...(req.provenance.automationId ? { automationId: req.provenance.automationId } : {}),
+          changeId: req.changeId,
+        })
+      : undefined;
+    const messageBody = (text: string) => ({
+      text,
+      blocks: [...markdownBlocks(text), ...(footer ? [footer] : [])],
+      ...(meta ? { metadata: meta } : {}),
+      unfurl_links: false,
+      unfurl_media: false,
+    });
+
+    try {
+      switch (p.kind) {
+        case 'reply':
+        case 'post': {
+          const r = await must(this.api, 'chat.postMessage', {
+            channel: p.channel,
+            ...(p.kind === 'reply' ? { thread_ts: p.threadTs } : {}),
+            ...messageBody(p.text),
+          });
+          const ts = r.ts as string;
+          const channel = (r.channel as string) ?? p.channel;
+          await this.ensureDomain();
+          const permalink = this.permalink(
+            channel,
+            ts,
+            p.kind === 'reply' ? p.threadTs : undefined,
+          );
+          return {
+            ...base,
+            outcome: 'applied',
+            location: { channel, ts, ...(permalink ? { permalink } : {}) },
+            inverse: { op: 'delete-message', channel, ts },
+            provenancePersisted: meta !== undefined,
+          };
+        }
+        case 'canvas': {
+          const r = await must(this.api, 'canvases.create', {
+            title: p.title,
+            document_content: { type: 'markdown', markdown: p.markdown },
+          });
+          const canvasId = r.canvas_id as string;
+          if (p.shareTo) {
+            try {
+              await must(this.api, 'canvases.access.set', {
+                canvas_id: canvasId,
+                access_level: 'read',
+                channel_ids: [p.shareTo],
+              });
+            } catch {
+              // Created but not shared: report honestly rather than rolling back silently.
+              return {
+                ...base,
+                outcome: 'applied',
+                location: { canvasId },
+                inverse: { op: 'delete-canvas', canvasId },
+                provenancePersisted: false,
+                error: {
+                  code: 'share_failed',
+                  message: 'Canvas created but could not be shared to the channel.',
+                },
+              };
+            }
+          }
+          await this.ensureDomain();
+          return {
+            ...base,
+            outcome: 'applied',
+            location: {
+              canvasId,
+              ...(this.domain
+                ? {
+                    permalink: `https://${this.domain}.slack.com/docs/${this.opts.teamId}/${canvasId}`,
+                  }
+                : {}),
+            },
+            inverse: { op: 'delete-canvas', canvasId },
+            provenancePersisted: false,
+          };
+        }
+        case 'canvas-edit':
+          await must(this.api, 'canvases.edit', {
+            canvas_id: p.canvasId,
+            changes: [
+              {
+                operation: 'replace',
+                ...(p.sectionId ? { section_id: p.sectionId } : {}),
+                document_content: { type: 'markdown', markdown: p.markdown },
+              },
+            ],
+          });
+          return {
+            ...base,
+            outcome: 'applied',
+            location: { canvasId: p.canvasId },
+            inverse: {
+              op: 'not-reversible',
+              reason: 'Slack does not expose the previous canvas content to restore',
+            },
+            provenancePersisted: false,
+          };
+        case 'schedule':
+        case 'remind': {
+          let channel: string;
+          let text = p.text;
+          if (p.kind === 'remind') {
+            const open = await must(this.api, 'conversations.open', { users: p.user });
+            channel = (open.channel as { id: string }).id;
+            text = `🔔 Reminder${req.provenance ? ` (requested by <@${req.provenance.invoker}>)` : ''}: ${p.text}`;
+          } else channel = p.channel;
+          const r = await must(this.api, 'chat.scheduleMessage', {
+            channel,
+            post_at: p.postAt,
+            ...messageBody(text),
+          });
+          const id = r.scheduled_message_id as string;
+          return {
+            ...base,
+            outcome: 'applied',
+            location: { channel },
+            inverse: { op: 'delete-scheduled', channel, scheduledMessageId: id, postAt: p.postAt },
+            provenancePersisted: meta !== undefined,
+          };
+        }
+        case 'bookmark': {
+          const r = await must(this.api, 'bookmarks.add', {
+            channel_id: p.channel,
+            title: p.title,
+            type: 'link',
+            link: p.link,
+          });
+          const id = (r.bookmark as { id: string }).id;
+          return {
+            ...base,
+            outcome: 'applied',
+            location: { channel: p.channel },
+            inverse: { op: 'remove-bookmark', channel: p.channel, bookmarkId: id },
+            provenancePersisted: false,
+          };
+        }
+        case 'react':
+          await must(this.api, 'reactions.add', {
+            channel: p.channel,
+            timestamp: p.ts,
+            name: p.emoji,
+          });
+          return {
+            ...base,
+            outcome: 'applied',
+            location: { channel: p.channel, ts: p.ts },
+            inverse: { op: 'remove-reaction', channel: p.channel, ts: p.ts, emoji: p.emoji },
+            provenancePersisted: false,
+          };
+      }
+    } catch (err) {
+      const code = slackErrorCode(err);
+      if (code) {
+        // Slack answered with a definite error: nothing landed.
+        return {
+          ...base,
+          outcome: 'failed',
+          provenancePersisted: false,
+          error: { code, message: slackErrorText(code) },
+        };
+      }
+      throw err; // transport failure: outcome unknown — the orchestrator records it as uncertain.
+    }
+  }
+
+  async undo(inverse: Inverse): Promise<{ ok: boolean; message: string }> {
+    try {
+      switch (inverse.op) {
+        case 'delete-message':
+          await must(this.api, 'chat.delete', { channel: inverse.channel, ts: inverse.ts });
+          return { ok: true, message: 'Deleted the message.' };
+        case 'delete-canvas':
+          await must(this.api, 'canvases.delete', { canvas_id: inverse.canvasId });
+          return { ok: true, message: 'Deleted the canvas.' };
+        case 'delete-scheduled':
+          await must(this.api, 'chat.deleteScheduledMessage', {
+            channel: inverse.channel,
+            scheduled_message_id: inverse.scheduledMessageId,
+          });
+          return { ok: true, message: 'Cancelled the scheduled message.' };
+        case 'remove-bookmark':
+          await must(this.api, 'bookmarks.remove', {
+            channel_id: inverse.channel,
+            bookmark_id: inverse.bookmarkId,
+          });
+          return { ok: true, message: 'Removed the bookmark.' };
+        case 'remove-reaction':
+          await must(this.api, 'reactions.remove', {
+            channel: inverse.channel,
+            timestamp: inverse.ts,
+            name: inverse.emoji,
+          });
+          return { ok: true, message: 'Removed the reaction.' };
+        case 'not-reversible':
+          return { ok: false, message: `Can't undo: ${inverse.reason}.` };
+      }
+    } catch (err) {
+      const code = slackErrorCode(err) ?? 'unknown_error';
+      return { ok: false, message: `Undo failed (${code}). ${slackErrorText(code)}` };
+    }
+  }
+}
+
+function slackErrorText(code: string): string {
+  switch (code) {
+    case 'not_in_channel':
+    case 'channel_not_found':
+      return 'Invite @Gemini to that channel first.';
+    case 'msg_too_long':
+      return 'The message was too long for Slack.';
+    case 'time_in_past':
+    case 'time_too_far':
+      return 'That time is outside what Slack allows for scheduling.';
+    case 'invalid_scheduled_message_id':
+      return 'It already posted, so it can’t be cancelled.';
+    case 'message_not_found':
+      return 'It was already deleted.';
+    case 'missing_scope':
+      return 'The app is missing a Slack permission for this action — ask an admin to reinstall it.';
+    case 'ratelimited':
+      return 'Slack is rate-limiting the app; try again shortly.';
+    default:
+      return 'Slack rejected the change.';
+  }
+}

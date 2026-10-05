@@ -1,0 +1,33 @@
+{
+  "name": "gemini-slack",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Gemini Enterprise for Slack: / and @ verb commands, dual-principal identity, Slack-native streaming, plans, and automations.",
+  "packageManager": "bun@1.3.14",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "bun --watch packages/app/src/main.ts",
+    "start": "bun packages/app/src/main.ts",
+    "typecheck": "tsc -b",
+    "test": "vitest run --passWithNoTests",
+    "test:skills": "python3 -m unittest discover -s skill -p 'test_*.py'",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "manifest:check": "bun packages/app/scripts/check-manifest.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@typescript-eslint/eslint-plugin": "^7.13.0",
+    "@typescript-eslint/parser": "^7.13.0",
+    "eslint": "^8.57.0",
+    "prettier": "^3.3.0",
+    "typescript": "^5.5.0",
+    "vitest": "^1.6.0"
+  }
+}
