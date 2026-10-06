@@ -3,6 +3,7 @@ import {
   TelemetryEventSchema,
   summarize,
   type InsightsSummary,
+  type LicenceAuditEntry,
   type Origin,
   type TelemetryEvent,
   type TelemetryRecord,
@@ -95,12 +96,44 @@ const CSV_COLUMNS = [
  * Ledger export: ids, kinds, outcomes, principals, approvers, links — no content. Cells are
  * quoted, and ones a spreadsheet would read as a formula are prefixed with `'` (CSV injection).
  */
+function cell(v: unknown): string {
+  let s = v === undefined || v === null ? '' : String(v);
+  if (/^[\s]*[=+\-@]/.test(s) || /^[\t\r\n]/.test(s)) s = `'${s}`;
+  return `"${s.replace(/"/g, '""')}"`;
+}
+
+/** Licence decisions (ADR-0003 §1): who decided what for whom, and which admin identity acted. */
+export function licenceAuditCsv(entries: LicenceAuditEntry[]): string {
+  const cols = [
+    'at',
+    'request_id',
+    'requester',
+    'decider',
+    'outcome',
+    'principal',
+    'licence_config',
+    'admin_identity',
+    'code',
+  ];
+  const rows = entries.map((e) =>
+    [
+      e.at,
+      e.requestId,
+      e.requesterId,
+      e.deciderId,
+      e.outcome,
+      e.principal,
+      e.licenseConfig,
+      e.adminIdentity,
+      e.code,
+    ]
+      .map(cell)
+      .join(','),
+  );
+  return [cols.join(','), ...rows].join('\n') + '\n';
+}
+
 export function ledgerCsv(entries: LedgerEntry[]): string {
-  const cell = (v: unknown) => {
-    let s = v === undefined || v === null ? '' : String(v);
-    if (/^[\s]*[=+\-@]/.test(s) || /^[\t\r\n]/.test(s)) s = `'${s}`;
-    return `"${s.replace(/"/g, '""')}"`;
-  };
   const rows = entries.map((e) =>
     [
       e.at,
@@ -148,6 +181,17 @@ export async function showStats(
       content: ledgerCsv(entries),
       comment: `${entries.length} landed change${entries.length === 1 ? '' : 's'} in the last 30 days. Ids, outcomes and links only — no content.`,
     });
+    const licences = orch.deps.licences
+      ? await orch.deps.licences.auditSince(origin.teamId, since)
+      : [];
+    if (r.ok && licences.length) {
+      await orch.deps.surface.sendFile(origin.userId, {
+        name: `gemini-licences-${new Date().toISOString().slice(0, 10)}.csv`,
+        title: 'Gemini Enterprise licence decisions (30 days)',
+        content: licenceAuditCsv(licences),
+        comment: `${licences.length} licence decision${licences.length === 1 ? '' : 's'} in the last 30 days.`,
+      });
+    }
     await sink.notice(
       r.ok ? 'info' : 'error',
       r.ok ? 'The ledger export is in your DM with Gemini.' : r.message,

@@ -192,6 +192,7 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
         )
       : runtimeIdentity,
     principalField: cfg.GE_LICENCE_PRINCIPAL,
+    adminIdentity: cfg.GE_LICENCE_ADMIN_SERVICE_ACCOUNT ?? 'runtime service account',
     ...(cfg.GE_LICENCE_CONFIG ? { licenseConfig: cfg.GE_LICENCE_CONFIG } : {}),
     ...(cfg.GE_LICENCE_REQUESTS_CHANNEL
       ? { requestsChannel: cfg.GE_LICENCE_REQUESTS_CHANNEL }

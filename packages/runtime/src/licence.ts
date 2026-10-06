@@ -5,10 +5,12 @@ import {
   licenceBlocksTurn,
   licenceRequestable,
   type Invocation,
+  type LicenceAuditEntry,
   type LicencePrincipalField,
   type LicenceRequest,
   type LicenceStatus,
   type Origin,
+  samePrincipal,
 } from '@ge-slack/contracts';
 import type { TokenSource } from '@ge-slack/gemini-client';
 import type { KeyValueStore } from '@ge-slack/identity';
@@ -26,7 +28,8 @@ export interface LicenceDirectoryPort {
   lookup(
     tokens: TokenSource,
     principal: string,
-  ): Promise<{ status: LicenceStatus; reason?: string }>;
+    field?: LicencePrincipalField,
+  ): Promise<{ status: LicenceStatus; reason?: string; principal?: string }>;
   assign(
     tokens: TokenSource,
     principal: string,
@@ -46,10 +49,15 @@ export interface LicenceOptions {
   requestsChannel?: string;
   /** Slack user ids allowed to decide besides workspace admins/owners. */
   approvers?: readonly string[];
+  /** The admin-plane identity's name, recorded in the audit trail of each assignment. */
+  adminIdentity?: string;
   now?: () => number;
 }
 
-type Cached = { status: LicenceStatus; reason?: string; at: number };
+type Cached = { status: LicenceStatus; reason?: string; found?: string; at: number };
+
+/** Fresh lookups (Request clicks, 403s, diag) reuse a lookup this recent instead (quota). */
+const FRESH_MIN_MS = 30_000;
 
 /** Status cache, open requests and the one-decision lock, all in the shared store. */
 export class LicenceService {
@@ -71,30 +79,62 @@ export class LicenceService {
     return this.opts.requestsChannel;
   }
 
-  principalOf(linked: { email: string; subject: string }): string {
-    return this.opts.principalField === 'subject' ? linked.subject : linked.email;
+  get field(): LicencePrincipalField {
+    return this.opts.principalField ?? 'email';
   }
 
+  principalOf(linked: { email: string; subject: string }): string {
+    return this.field === 'subject' ? linked.subject : linked.email;
+  }
+
+  /**
+   * The person's licence state. `found` is the user store's own spelling of their principal (an
+   * assignment goes to exactly that row, never a new one that differs only in case).
+   */
   async status(
     teamId: string,
     userId: string,
     linked: { email: string; subject: string },
     opts: { fresh?: boolean } = {},
-  ): Promise<{ status: LicenceStatus; reason?: string }> {
+  ): Promise<{ status: LicenceStatus; reason?: string; found?: string }> {
     const key = `licence/${teamId}/${userId}`;
     const principal = this.principalOf(linked);
-    if (!opts.fresh) {
-      const hit = await this.kv.get<Cached & { principal: string }>(key);
-      if (hit && hit.principal === principal)
-        return { status: hit.status, ...(hit.reason ? { reason: hit.reason } : {}) };
+    const hit = await this.kv.get<Cached & { principal: string }>(key);
+    if (hit && hit.principal === principal && (!opts.fresh || this.now() - hit.at < FRESH_MIN_MS)) {
+      return {
+        status: hit.status,
+        ...(hit.reason ? { reason: hit.reason } : {}),
+        ...(hit.found ? { found: hit.found } : {}),
+      };
     }
     const r = await this.opts.directory
-      .lookup(this.opts.tokens, principal)
+      .lookup(this.opts.tokens, principal, this.field)
       .catch(() => ({ status: 'unknown' as const, reason: 'lookup-failed' }));
+    const out = {
+      status: r.status,
+      ...(r.reason ? { reason: r.reason } : {}),
+      ...('principal' in r && r.principal ? { found: r.principal } : {}),
+    };
     const ttl =
       r.status === 'assigned' ? LICENCE_LIMITS.assignedTtlMs : LICENCE_LIMITS.missingTtlMs;
-    await this.kv.set(key, { ...r, principal, at: this.now() }, { ttlMs: ttl });
-    return r;
+    await this.kv.set(key, { ...out, principal, at: this.now() }, { ttlMs: ttl });
+    return out;
+  }
+
+  /** The cached state only (no lookup): used to keep blocked people off the service path. */
+  async cached(teamId: string, userId: string): Promise<LicenceStatus | undefined> {
+    return (await this.kv.get<Cached>(`licence/${teamId}/${userId}`))?.status;
+  }
+
+  audit(e: LicenceAuditEntry) {
+    return this.kv.set(`licaudit/${e.teamId}/${e.at}/${e.requestId}/${e.outcome}`, e);
+  }
+  async auditSince(teamId: string, sinceMs: number): Promise<LicenceAuditEntry[]> {
+    const rows = await this.kv.list<LicenceAuditEntry>(`licaudit/${teamId}/`);
+    return rows
+      .map((r) => r.value)
+      .filter((e) => Date.parse(e.at) >= sinceMs)
+      .sort((a, b) => a.at.localeCompare(b.at));
   }
 
   forget(teamId: string, userId: string): Promise<void> {
@@ -117,6 +157,13 @@ export class LicenceService {
   }
   takeLock(teamId: string, requesterId: string) {
     return this.kv.take<string>(`licopen/${teamId}/${requesterId}`);
+  }
+
+  get licenseConfig(): string | undefined {
+    return this.opts.licenseConfig;
+  }
+  get adminIdentity(): string | undefined {
+    return this.opts.adminIdentity;
   }
 
   assign(principal: string) {
@@ -153,6 +200,26 @@ export async function licenceGate(
 }
 
 /**
+ * A person an admin blocked in Gemini Enterprise doesn't get answers through the Gemini service
+ * either (the service would otherwise route around the block). Uses the cached state only.
+ * Returns false when the turn must not continue.
+ */
+export async function licenceServiceGuard(
+  orch: Orchestrator,
+  origin: Origin,
+  sink: TurnSink,
+): Promise<boolean> {
+  const svc = enabled(orch);
+  if (!svc) return true;
+  if ((await svc.cached(origin.teamId, origin.userId)) !== 'blocked') return true;
+  await sink.notice(
+    'denied',
+    'Your Gemini Enterprise access is blocked by an admin, so Gemini can’t answer for you — as you or as the Gemini service.',
+  );
+  return false;
+}
+
+/**
  * A 403 from Gemini Enterprise on a user turn: look again (the cached status may be stale) and,
  * if the person has no licence, show the licence card instead of a bare error. Returns true when
  * it rendered something.
@@ -183,6 +250,8 @@ async function showLicenceCard(
   offerService: boolean,
 ): Promise<void> {
   const svc = orch.deps.licences!;
+  // An admin blocked this person: the bot must not route them around it via the service (M1).
+  offerService = offerService && status !== 'blocked';
   orch.observe(origin.teamId, { kind: 'licence', outcome: 'missing' });
   if (isUnattended(origin)) {
     // Nobody is there to click: the owner hears about it through the unattended sink.
@@ -245,23 +314,27 @@ export async function requestLicence(
     );
     return;
   }
-  const { status } = await svc.status(origin.teamId, origin.userId, linked, { fresh: true });
-  if (status === 'assigned') {
+  if (await orch.deps.surface.isGuest(origin.userId)) {
     await sink.notice(
-      'info',
-      'You already have a Gemini Enterprise licence — try your request again.',
+      'denied',
+      'Guests and external members can’t request a licence here — ask the admin who invited you.',
     );
     return;
   }
-  if (!licenceRequestable(status)) {
+  // The card names the person and their email: only ever in a private, internal channel (M4).
+  const where = await orch.deps.surface
+    .conversationInfo(svc.requestsChannel)
+    .catch(() => undefined);
+  if (!where || where.isExtShared || !where.isPrivate) {
     await sink.notice(
-      'info',
-      'An admin has blocked Gemini Enterprise access for your account. Ask them directly.',
+      'error',
+      'Licence requests aren’t set up correctly here (the admins’ channel must be private and internal). Ask your Gemini Enterprise admin.',
     );
     return;
   }
   const prior = await svc.getRequest(origin.teamId, origin.userId);
   const now = Date.now();
+  // Open or recently decided requests are answered before any lookup (quota, L9).
   if (prior?.status === 'open') {
     await sink.notice(
       'info',
@@ -283,18 +356,37 @@ export async function requestLicence(
     );
     return;
   }
+  const { status } = await svc.status(origin.teamId, origin.userId, linked, { fresh: true });
+  if (status === 'assigned') {
+    await sink.notice(
+      'info',
+      'You already have a Gemini Enterprise licence — try your request again.',
+    );
+    return;
+  }
+  if (!licenceRequestable(status)) {
+    await sink.notice(
+      'info',
+      'An admin has blocked Gemini Enterprise access for your account. Ask them directly.',
+    );
+    return;
+  }
   const req: LicenceRequest = {
     id: randomBytes(8).toString('hex'),
     teamId: origin.teamId,
     requesterId: origin.userId,
     email: linked.email,
+    principal: svc.principalOf(linked),
     status: 'open',
     at: new Date(now).toISOString(),
   };
+  // Saved before the card is posted, so a double click finds it open and posts nothing (L3).
+  await svc.saveRequest(req);
   const card = await orch.deps.surface
     .licenceRequestCard(svc.requestsChannel, requestView(svc, req))
     .catch(() => undefined);
   if (!card) {
+    await svc.saveRequest({ ...req, status: 'void' });
     await sink.notice(
       'error',
       'Couldn’t reach the admins’ channel. Try again, or ask your admin directly.',
@@ -325,8 +417,9 @@ export function requestView(svc: LicenceService, r: LicenceRequest) {
 
 /**
  * Approve or decline from the admins' channel. Only a workspace admin/owner or a named approver,
- * never the requester, and only once. Approving assigns the licence to the requester's *current*
- * linked identity — refused if it changed since they asked.
+ * never the requester, only on the request's own card, and only once. Approving re-checks the
+ * user store and assigns to the requester's *current* linked principal — refused if it changed
+ * since they asked, or if an admin blocked them meanwhile. Every outcome is audited.
  */
 export async function decideLicence(
   orch: Orchestrator,
@@ -336,6 +429,7 @@ export async function decideLicence(
   approverId: string,
   decision: 'approve' | 'decline',
   sink: TurnSink,
+  clicked?: { channel?: string; ts?: string },
 ): Promise<void> {
   const svc = enabled(orch);
   if (!svc || !svc.requestsChannel) {
@@ -348,7 +442,11 @@ export async function decideLicence(
   }
   const allowed =
     svc.approvers.has(approverId) || (await orch.deps.surface.isWorkspaceAdmin(approverId));
-  if (!allowed || !(await orch.deps.surface.isMember(svc.requestsChannel, approverId))) {
+  // Membership is checked fresh: someone just removed from the channel can't still decide (L7).
+  if (
+    !allowed ||
+    !(await orch.deps.surface.isMember(svc.requestsChannel, approverId, { fresh: true }))
+  ) {
     await sink.notice('denied', 'Only workspace admins and named licence approvers can decide.');
     return;
   }
@@ -357,61 +455,128 @@ export async function decideLicence(
     await sink.notice('info', 'Someone already decided that request.');
     return;
   }
+  // Decisions come from the request's own card (L6).
+  if (clicked && (clicked.channel !== req.card?.channel || clicked.ts !== req.card?.ts)) {
+    await sink.notice('denied', 'Decide licence requests from their card in the admins’ channel.');
+    return;
+  }
   const lock = await svc.takeLock(teamId, requesterId);
   if (lock !== requestId) {
     await sink.notice('info', 'Someone already decided that request.');
     return;
   }
-  const decided = (status: LicenceRequest['status']): LicenceRequest => ({
-    ...req,
-    status,
-    decidedBy: approverId,
-    decidedAt: new Date().toISOString(),
-  });
-  let final: LicenceRequest;
-  let toRequester: string;
-  if (decision === 'decline') {
-    final = decided('declined');
-    toRequester =
-      '✦ Your Gemini Enterprise licence request was declined. Talk to your admin if you need it.';
-  } else if (svc.canAssign) {
-    const linked = await orch.deps.identity.getLinked(teamId, requesterId);
-    if (!linked || linked.email !== req.email) {
-      final = decided('declined');
+  const at = () => new Date().toISOString();
+  const audit = (outcome: LicenceAuditEntry['outcome'], extra: Partial<LicenceAuditEntry> = {}) =>
+    svc.audit({
+      at: at(),
+      teamId,
+      requestId,
+      requesterId,
+      deciderId: approverId,
+      outcome,
+      principal: req.principal,
+      ...extra,
+    });
+  let reopen = true;
+  try {
+    const finish = async (
+      status: LicenceRequest['status'],
+      toRequester: string | undefined,
+    ): Promise<LicenceRequest> => {
+      const final: LicenceRequest = {
+        ...req,
+        status,
+        ...(status === 'void' ? {} : { decidedBy: approverId }),
+        decidedAt: at(),
+      };
       await svc.saveRequest(final);
+      reopen = false;
+      orch.observe(teamId, { kind: 'licence', outcome: status });
       await updateCard(orch, svc, final);
+      if (toRequester) {
+        await orch.deps.surface
+          .notifyUser(requesterId, { text: toRequester })
+          .catch(() => undefined);
+      }
+      return final;
+    };
+
+    if (decision === 'decline') {
+      await audit('declined');
+      await finish(
+        'declined',
+        '✦ Your Gemini Enterprise licence request was declined. Talk to your admin if you need it.',
+      );
+      return;
+    }
+
+    // Approving: the requester must still be the identity that asked (L2).
+    const linked = await orch.deps.identity.getLinked(teamId, requesterId);
+    if (!linked || !samePrincipal(svc.field, svc.principalOf(linked), req.principal)) {
+      await audit('void');
+      await finish('void', undefined);
       await sink.notice(
         'error',
         'The requester disconnected or linked a different account since asking. Nothing was assigned; they can request again.',
       );
       return;
     }
-    const r = await svc.assign(svc.principalOf(linked));
+    // …and the user store must still allow it: never override a block made meanwhile (M2).
+    const now = await svc.status(teamId, requesterId, linked, { fresh: true });
+    if (now.status === 'blocked') {
+      await audit('refused-blocked');
+      await finish('void', undefined);
+      await sink.notice(
+        'error',
+        'An admin has since blocked this person in Gemini Enterprise. Nothing was assigned.',
+      );
+      return;
+    }
+    if (now.status === 'assigned') {
+      await audit('assigned', { code: 'already-assigned' });
+      await finish(
+        'assigned',
+        '✅ You have a Gemini Enterprise licence now. Run your request again.',
+      );
+      return;
+    }
+    if (!svc.canAssign) {
+      await audit('approved');
+      await finish(
+        'approved',
+        '✅ Your Gemini Enterprise licence request was approved. You’ll be able to use Gemini once an admin assigns it.',
+      );
+      await sink.notice(
+        'info',
+        `Approved. Assign a licence to ${req.email} in the Gemini Enterprise console (Manage users → licences), then they can use it.`,
+      );
+      return;
+    }
+    // Assign to the row the user store already has, in its own spelling (L1).
+    const target = now.found ?? req.principal;
+    const r = await svc.assign(target);
+    const assignAudit = {
+      principal: target,
+      ...(svc.licenseConfig ? { licenseConfig: svc.licenseConfig } : {}),
+      ...(svc.adminIdentity ? { adminIdentity: svc.adminIdentity } : {}),
+    };
     if (!r.ok) {
-      await svc.openLock(req); // still open: someone can try again
+      await audit('assign-failed', { ...assignAudit, code: r.code });
       await sink.notice(
         'error',
         `Gemini Enterprise didn’t assign the licence (${r.code}). Nothing changed; try again, or assign it in the Gemini Enterprise console.`,
       );
-      return;
+      return; // `reopen` stays true: someone can try again
     }
+    await audit('assigned', assignAudit);
     await svc.forget(teamId, requesterId);
-    final = decided('assigned');
-    toRequester = '✅ You have a Gemini Enterprise licence now. Run your request again.';
-  } else {
-    final = decided('approved');
-    toRequester =
-      '✅ Your Gemini Enterprise licence request was approved. You’ll be able to use Gemini once an admin assigns it.';
-  }
-  await svc.saveRequest(final);
-  orch.observe(teamId, { kind: 'licence', outcome: final.status });
-  await updateCard(orch, svc, final);
-  await orch.deps.surface.notifyUser(requesterId, { text: toRequester }).catch(() => undefined);
-  if (final.status === 'approved') {
-    await sink.notice(
-      'info',
-      `Approved. Assign a licence to ${req.email} in the Gemini Enterprise console (Manage users → licences), then they can use it.`,
+    await finish(
+      'assigned',
+      '✅ You have a Gemini Enterprise licence now. Run your request again.',
     );
+  } finally {
+    // Anything that didn't reach a final state leaves the request decidable again (L4).
+    if (reopen) await svc.openLock(req).catch(() => undefined);
   }
 }
 

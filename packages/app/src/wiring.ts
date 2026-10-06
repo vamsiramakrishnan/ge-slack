@@ -458,6 +458,9 @@ export function register(app: App, c: Container, botUserId: () => string | undef
       // The card is shared in the admins' channel: notices go privately to the clicker, never
       // through response_url (which would replace the card for everyone).
       const { responseUrl: _drop, ...origin } = clickOrigin(c, b);
+      const msgTs =
+        (b.message as { ts?: string } | undefined)?.ts ??
+        (b.container as { message_ts?: string } | undefined)?.message_ts;
       await decideLicence(
         c.orch,
         team,
@@ -466,6 +469,10 @@ export function register(app: App, c: Container, botUserId: () => string | undef
         b.user.id,
         decision,
         c.sinkFor({ ...origin, entry: 'slash' }),
+        {
+          ...(origin.channelId ? { channel: origin.channelId } : {}),
+          ...(msgTs ? { ts: msgTs } : {}),
+        },
       );
       await publishHome(c, requesterId).catch(() => undefined);
     });

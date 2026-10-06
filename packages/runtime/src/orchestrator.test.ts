@@ -1449,8 +1449,10 @@ describe('licence-aware onboarding (EXPERIENCE §11)', () => {
   ) {
     const s = setup(script);
     const directory = new FakeDirectory();
+    const clock = { t: Date.parse('2026-10-06T10:00:00Z') };
     const licences = new LicenceService(s.kv, {
       directory,
+      now: () => clock.t,
       tokens: { getAccessToken: async () => 'admin-plane' },
       ...(opts.channel === null ? {} : { requestsChannel: opts.channel ?? 'C0LIC' }),
       ...(opts.assign ? { licenseConfig: 'projects/p/locations/eu/licenseConfigs/standard' } : {}),
@@ -1459,8 +1461,15 @@ describe('licence-aware onboarding (EXPERIENCE §11)', () => {
     s.orch.deps.licences = licences;
     s.orch.deps.features = new Set([...(s.orch.deps.features ?? []), 'licences']);
     s.surface.members.set('C0LIC', new Set(['U0ADMIN', 'U0APPROVER', 'U0ALEX']));
+    s.surface.info.set('C0LIC', {
+      id: 'C0LIC',
+      name: 'gemini-licences',
+      isPrivate: true,
+      isIm: false,
+      isExtShared: false,
+    });
     s.surface.admins.add('U0ADMIN');
-    return { ...s, directory, licences };
+    return { ...s, directory, licences, clock };
   }
 
   it('stops a known-unlicensed user before anything is read, and offers request + service', async () => {
@@ -1500,7 +1509,7 @@ describe('licence-aware onboarding (EXPERIENCE §11)', () => {
   });
 
   it('caches the lookup, and a 403 re-checks and shows the card instead of a bare error', async () => {
-    const { orch, directory } = withLicences([
+    const { orch, directory, clock } = withLicences([
       'fine',
       [{ type: 'error', code: 'http_403', message: 'PERMISSION_DENIED licence' }],
     ]);
@@ -1508,6 +1517,7 @@ describe('licence-aware onboarding (EXPERIENCE §11)', () => {
     await run(orch, 'summarize this thread');
     expect(directory.lookups).toHaveLength(1);
     directory.states.set('alex@acme.com', 'unlicensed'); // removed since the cache was filled
+    clock.t += 60_000; // past the fresh-lookup throttle
     // The pre-turn check still trusts the cache; the 403 forces a fresh lookup.
     const sink = await run(orch, 'summarize this thread');
     expect(sink.last<LicenceView>('licence')?.status).toBe('unlicensed');
@@ -1632,5 +1642,166 @@ describe('licence-aware onboarding (EXPERIENCE §11)', () => {
     const sink = await run(orch, 'summarize this thread', origin({ entry: 'schedule' }));
     expect(sink.last('licence')).toBeUndefined();
     expect(sink.last<{ kind: string; text: string }>('notice')).toMatchObject({ kind: 'denied' });
+  });
+});
+
+describe('licence onboarding: security review fixes', () => {
+  class Dir {
+    states = new Map<string, LicenceStatus>();
+    assigned: string[] = [];
+    lookups = 0;
+    async lookup(_t: unknown, principal: string) {
+      this.lookups++;
+      const s = this.states.get(principal.toLowerCase());
+      return s ? { status: s, principal: principal.toUpperCase() } : { status: 'unknown' as const };
+    }
+    async assign(_t: unknown, principal: string) {
+      this.assigned.push(principal);
+      return { ok: true as const };
+    }
+  }
+  function env(opts: { privateChannel?: boolean; extShared?: boolean } = {}) {
+    const s = setup(['ok', 'ok', 'ok']);
+    const dir = new Dir();
+    const clock = { t: Date.parse('2026-10-06T10:00:00Z') };
+    const licences = new LicenceService(s.kv, {
+      directory: dir,
+      now: () => clock.t,
+      tokens: { getAccessToken: async () => 'admin' },
+      requestsChannel: 'C0LIC',
+      licenseConfig: 'projects/p/locations/eu/licenseConfigs/std',
+      adminIdentity: 'lic-admin@p.iam.gserviceaccount.com',
+    });
+    s.orch.deps.licences = licences;
+    s.orch.deps.features = new Set([...(s.orch.deps.features ?? []), 'licences']);
+    s.surface.members.set('C0LIC', new Set(['U0ADMIN']));
+    s.surface.admins.add('U0ADMIN');
+    s.surface.info.set('C0LIC', {
+      id: 'C0LIC',
+      isPrivate: opts.privateChannel ?? true,
+      isIm: false,
+      isExtShared: opts.extShared ?? false,
+    });
+    return { ...s, dir, licences, clock };
+  }
+
+  it('M1: blocked people get no service offer and no service turns', async () => {
+    const { orch, dir, config, gemini } = env();
+    await config.setChannelPolicy('T1', 'C0ENG', {
+      identity: 'user-preferred',
+      serviceGrounds: [],
+      serviceMayRead: true,
+      autoApply: false,
+    });
+    dir.states.set('alex@acme.com', 'blocked');
+    const sink = await run(orch, 'summarize this thread');
+    expect(sink.last<LicenceView>('licence')).toMatchObject({
+      status: 'blocked',
+      offerService: false,
+    });
+    const svc = await run(orch, 'summarize this thread --as service');
+    expect(svc.last<{ kind: string; text: string }>('notice')).toMatchObject({ kind: 'denied' });
+    expect(svc.last<{ text: string }>('notice')!.text).toMatch(/blocked/);
+    expect(gemini.turns).toHaveLength(0);
+  });
+
+  it('M2 + L1: approval re-checks the store, refuses a new block, assigns to the store’s spelling', async () => {
+    const { orch, dir, surface, licences, clock } = env();
+    dir.states.set('alex@acme.com', 'unlicensed');
+    await requestLicence(orch, origin({ entry: 'button' }), new RecordingSink());
+    const id = surface.licenceCards[0]!.view.requestId;
+    clock.t += 60_000;
+    dir.states.set('alex@acme.com', 'blocked');
+    const s = new RecordingSink();
+    await decideLicence(orch, 'T1', 'U0ALEX', id, 'U0ADMIN', 'approve', s);
+    expect(dir.assigned).toEqual([]);
+    expect(s.last<{ text: string }>('notice')!.text).toMatch(/blocked/);
+    expect(surface.licenceCards.at(-1)?.view.status).toBe('void');
+    const audit = await licences.auditSince('T1', 0);
+    expect(audit.map((a) => a.outcome)).toEqual(['refused-blocked']);
+
+    // A fresh request, unblocked: assigned to the row's own spelling, audited with the admin SA.
+    dir.states.set('alex@acme.com', 'unlicensed');
+    clock.t += 60_000;
+    await requestLicence(orch, origin({ entry: 'button' }), new RecordingSink());
+    const id2 = surface.licenceCards.at(-1)!.view.requestId;
+    await decideLicence(orch, 'T1', 'U0ALEX', id2, 'U0ADMIN', 'approve', new RecordingSink());
+    expect(dir.assigned).toEqual(['ALEX@ACME.COM']);
+    expect((await licences.auditSince('T1', 0)).at(-1)).toMatchObject({
+      outcome: 'assigned',
+      deciderId: 'U0ADMIN',
+      requesterId: 'U0ALEX',
+      principal: 'ALEX@ACME.COM',
+      licenseConfig: 'projects/p/locations/eu/licenseConfigs/std',
+      adminIdentity: 'lic-admin@p.iam.gserviceaccount.com',
+    });
+  });
+
+  it('M4: requests are only posted to a private, internal channel; guests cannot request', async () => {
+    for (const bad of [{ privateChannel: false }, { extShared: true }]) {
+      const { orch, dir, surface } = env(bad);
+      dir.states.set('alex@acme.com', 'unlicensed');
+      const s = new RecordingSink();
+      await requestLicence(orch, origin({ entry: 'button' }), s);
+      expect(surface.licenceCards).toHaveLength(0);
+      expect(s.last<{ kind: string }>('notice')?.kind).toBe('error');
+    }
+    const { orch, dir, surface } = env();
+    dir.states.set('alex@acme.com', 'unlicensed');
+    surface.guests.add('U0ALEX');
+    const s = new RecordingSink();
+    await requestLicence(orch, origin({ entry: 'button' }), s);
+    expect(surface.licenceCards).toHaveLength(0);
+    expect(s.last<{ kind: string }>('notice')?.kind).toBe('denied');
+  });
+
+  it('L5 + L6: a changed identity voids (no cooldown); decisions only from the request’s card', async () => {
+    const { orch, dir, surface, identity } = env();
+    dir.states.set('alex@acme.com', 'unlicensed');
+    await requestLicence(orch, origin({ entry: 'button' }), new RecordingSink());
+    const card = surface.licenceCards[0]!;
+    const id = card.view.requestId;
+    const wrong = new RecordingSink();
+    await decideLicence(orch, 'T1', 'U0ALEX', id, 'U0ADMIN', 'approve', wrong, {
+      channel: 'C0OTHER',
+      ts: 'card.1',
+    });
+    expect(wrong.last<{ kind: string }>('notice')?.kind).toBe('denied');
+    identity.linked.delete('U0ALEX');
+    await decideLicence(orch, 'T1', 'U0ALEX', id, 'U0ADMIN', 'approve', new RecordingSink(), {
+      channel: 'C0LIC',
+      ts: 'card.1',
+    });
+    expect(surface.licenceCards.at(-1)?.view).toMatchObject({ status: 'void' });
+    expect(surface.licenceCards.at(-1)?.view.decidedBy).toBeUndefined();
+    identity.linked.add('U0ALEX');
+    const again = new RecordingSink();
+    await requestLicence(orch, origin({ entry: 'button' }), again);
+    expect(again.last<{ text: string }>('notice')!.text).toMatch(/Requested/);
+  });
+
+  it('L4: a store failure after the lock leaves the request decidable', async () => {
+    const { orch, dir, surface, licences } = env();
+    dir.states.set('alex@acme.com', 'unlicensed');
+    await requestLicence(orch, origin({ entry: 'button' }), new RecordingSink());
+    const id = surface.licenceCards[0]!.view.requestId;
+    const save = licences.saveRequest.bind(licences);
+    licences.saveRequest = async () => {
+      throw new Error('store down');
+    };
+    await expect(
+      decideLicence(orch, 'T1', 'U0ALEX', id, 'U0ADMIN', 'decline', new RecordingSink()),
+    ).rejects.toThrow(/store down/);
+    licences.saveRequest = save;
+    const s = new RecordingSink();
+    await decideLicence(orch, 'T1', 'U0ALEX', id, 'U0ADMIN', 'decline', s);
+    expect(surface.licenceCards.at(-1)?.view.status).toBe('declined');
+  });
+
+  it('L9: fresh lookups are throttled per person', async () => {
+    const { orch, dir } = env();
+    dir.states.set('alex@acme.com', 'unlicensed');
+    for (let i = 0; i < 5; i++) await runDiagnostics(orch, origin({ entry: 'slash' }), undefined);
+    expect(dir.lookups).toBe(1);
   });
 });

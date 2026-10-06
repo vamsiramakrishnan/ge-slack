@@ -60,7 +60,8 @@ export const LICENCE_LIMITS = {
   requestRetainMs: 30 * 86_400_000,
 } as const;
 
-export type LicenceRequestStatus = 'open' | 'approved' | 'assigned' | 'declined';
+/** `void`: closed without a decision (the requester's identity changed, or they were blocked). */
+export type LicenceRequestStatus = 'open' | 'approved' | 'assigned' | 'declined' | 'void';
 
 export interface LicenceRequest {
   id: string;
@@ -68,6 +69,8 @@ export interface LicenceRequest {
   requesterId: string;
   /** The verified email of the requester's linked identity at request time. */
   email: string;
+  /** The user-store principal (email or IdP subject) at request time; approval must match it. */
+  principal: string;
   status: LicenceRequestStatus;
   at: string;
   decidedBy?: string;
@@ -76,10 +79,33 @@ export interface LicenceRequest {
   card?: { channel: string; ts: string };
 }
 
+/** Who did what to a licence request — the audit trail for an admin-plane write (no content). */
+export interface LicenceAuditEntry {
+  at: string;
+  teamId: string;
+  requestId: string;
+  requesterId: string;
+  deciderId: string;
+  outcome: 'assigned' | 'approved' | 'declined' | 'void' | 'refused-blocked' | 'assign-failed';
+  principal: string;
+  licenseConfig?: string;
+  /** The admin-plane identity that made the call (assignments only). */
+  adminIdentity?: string;
+  code?: string;
+}
+
 /** Which principal string Gemini Enterprise's user store keys this person by. */
 export type LicencePrincipalField = 'email' | 'subject';
 
 /** `user_principal = "…"` with the value quoted and escaped (the filter is a small grammar). */
+/**
+ * Do two user-store principals name the same person? Emails compare case-insensitively; IdP
+ * subjects are case-sensitive and compare exactly.
+ */
+export function samePrincipal(field: LicencePrincipalField, a: string, b: string): boolean {
+  return field === 'subject' ? a === b : a.toLowerCase() === b.toLowerCase();
+}
+
 export function licenceFilter(principal: string): string {
   if (!principal || /[\p{Cc}]/u.test(principal) || principal.length > 320) {
     throw new Error('Invalid licence principal');

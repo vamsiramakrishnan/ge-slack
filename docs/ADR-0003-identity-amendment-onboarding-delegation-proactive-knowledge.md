@@ -66,6 +66,19 @@ to an admin.
     `userStores:batchUpdateUserLicenses` for the requester's **current** linked principal. This is
     refused if they unlinked or relinked as someone else since asking.
   - A failed assignment leaves the request open.
+- **Blocked means blocked.** A person an admin blocked is not offered the service and gets no
+  service turns while the cached state says blocked. The bot never routes them around the block.
+- **Assignment needs its own identity.** `GE_LICENCE_CONFIG` requires a dedicated
+  `GE_LICENCE_ADMIN_SERVICE_ACCOUNT`, different from `GE_SERVICE_ACCOUNT`, in `GE_PROJECT` and
+  `GE_LOCATION`. Approval looks the person up fresh:
+  - blocked → nothing is assigned;
+  - already assigned → no API call;
+  - otherwise → the assignment goes to the user store's own spelling of their row.
+- **Where requests go.** Requests are posted only to a private, internal channel, because the card
+  shows the person's email. Guests can't request. A decision must come from the request's own card,
+  and the decider's membership is checked fresh.
+- **Audit.** Every decision is recorded: decider, requester, principal, licence config and admin
+  identity. Admins get it as a CSV with the ledger export.
 - **Unattended runs** of an unlicensed owner are denied and reported to the owner, never prompted.
 
 ### 2. Assistant pane first

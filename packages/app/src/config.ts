@@ -187,6 +187,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
         'GE_LICENCE_CONFIG needs GE_LICENCE_REQUESTS_CHANNEL (approvals happen there).',
       );
     }
+    const project = c.GE_LICENCE_CONFIG.split('/')[1];
+    if (project !== c.GE_PROJECT && !/^\d+$/.test(project ?? '')) {
+      throw new Error(
+        `GE_LICENCE_CONFIG is in project ${project}, not GE_PROJECT=${c.GE_PROJECT}.`,
+      );
+    }
+    // Licence assignment never rides on the identity that answers service turns (ADR-0003 §1).
+    if (
+      !c.GE_LICENCE_ADMIN_SERVICE_ACCOUNT ||
+      c.GE_LICENCE_ADMIN_SERVICE_ACCOUNT === c.GE_SERVICE_ACCOUNT
+    ) {
+      throw new Error(
+        'GE_LICENCE_CONFIG needs its own GE_LICENCE_ADMIN_SERVICE_ACCOUNT (not GE_SERVICE_ACCOUNT).',
+      );
+    }
   }
   if (c.NODE_ENV === 'production') {
     if (c.GE_SLACK_VAULT_KEY) {

@@ -659,7 +659,10 @@ describe('LicenceDirectory (userStores.userLicenses)', () => {
       }),
     );
     const d = new LicenceDirectory(cfg, 'default_user_store', fetchImpl as unknown as typeof fetch);
-    expect(await d.lookup(tokens, 'alex@acme.com')).toEqual({ status: 'unlicensed' });
+    expect(await d.lookup(tokens, 'alex@acme.com')).toEqual({
+      status: 'unlicensed',
+      principal: 'ALEX@acme.com',
+    });
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     expect(
       url.startsWith(
@@ -677,12 +680,12 @@ describe('LicenceDirectory (userStores.userLicenses)', () => {
       await mk({
         userLicenses: [{ userPrincipal: 'alex@acme.com', licenseAssignmentState: 'ASSIGNED' }],
       }).lookup(tokens, 'alex@acme.com'),
-    ).toEqual({ status: 'assigned' });
+    ).toEqual({ status: 'assigned', principal: 'alex@acme.com' });
     expect(
       await mk({
         userLicenses: [{ userPrincipal: 'alex@acme.com', licenseAssignmentState: 'BLOCKED' }],
       }).lookup(tokens, 'alex@acme.com'),
-    ).toEqual({ status: 'blocked' });
+    ).toEqual({ status: 'blocked', principal: 'alex@acme.com' });
     expect(
       await mk({
         userLicenses: [{ userPrincipal: 'maya@acme.com', licenseAssignmentState: 'ASSIGNED' }],
@@ -728,5 +731,26 @@ describe('LicenceDirectory (userStores.userLicenses)', () => {
         updateMask: 'licenseConfig',
       },
     });
+  });
+});
+
+describe('LicenceDirectory subject principals', () => {
+  it('compares IdP subjects exactly (case-sensitive)', async () => {
+    const d = new LicenceDirectory(
+      cfg,
+      undefined,
+      (async () =>
+        new Response(
+          JSON.stringify({
+            userLicenses: [{ userPrincipal: 'AbC', licenseAssignmentState: 'ASSIGNED' }],
+          }),
+        )) as typeof fetch,
+    );
+    const tokens: TokenSource = { getAccessToken: async () => 't' };
+    expect(await d.lookup(tokens, 'abc', 'subject')).toEqual({
+      status: 'unknown',
+      reason: 'not-found',
+    });
+    expect(await d.lookup(tokens, 'AbC', 'subject')).toMatchObject({ status: 'assigned' });
   });
 });

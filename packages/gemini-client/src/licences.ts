@@ -1,9 +1,17 @@
-import { licenceFilter, licenceStatusFrom, type LicenceStatus } from '@ge-slack/contracts';
+import {
+  licenceFilter,
+  licenceStatusFrom,
+  samePrincipal,
+  type LicencePrincipalField,
+  type LicenceStatus,
+} from '@ge-slack/contracts';
 import { discoveryEngineHost, proxyBase, type GeminiClientConfig } from './config.js';
 import { safeText, type TokenSource } from './token-source.js';
 
 export interface LicenceLookup {
   status: LicenceStatus;
+  /** The user store's own spelling of the principal, when a row was found (assign to exactly it). */
+  principal?: string;
   /** Why the status is `unknown` (`not-found`, `http_403`, `network`, …); never a provider body. */
   reason?: string;
 }
@@ -31,12 +39,18 @@ export class LicenceDirectory {
   }
 
   private base(): string {
-    if (this.config.proxyUrl) return `${proxyBase(this.config.proxyUrl)}/user-licenses`;
+    // Through the proxy, the store stays in the path; the proxy must pin project and region.
+    if (this.config.proxyUrl)
+      return `${proxyBase(this.config.proxyUrl)}/user-stores/${this.userStore}`;
     const a = this.config.assistant;
     return `${discoveryEngineHost(a.location)}/v1alpha/projects/${a.project}/locations/${a.location}/userStores/${this.userStore}`;
   }
 
-  async lookup(tokens: TokenSource, principal: string): Promise<LicenceLookup> {
+  async lookup(
+    tokens: TokenSource,
+    principal: string,
+    field: LicencePrincipalField = 'email',
+  ): Promise<LicenceLookup> {
     const url = `${this.base()}/userLicenses?pageSize=5&filter=${encodeURIComponent(licenceFilter(principal))}`;
     let res: Response;
     try {
@@ -60,15 +74,18 @@ export class LicenceDirectory {
       return { status: 'unknown', reason: 'bad_reply' };
     }
     // The filter is exact, but match again: never take another person's row as this one's.
-    const want = principal.toLowerCase();
     const row = (body.userLicenses ?? []).find(
-      (r) => typeof r.userPrincipal === 'string' && r.userPrincipal.toLowerCase() === want,
+      (r) =>
+        typeof r.userPrincipal === 'string' && samePrincipal(field, r.userPrincipal, principal),
     );
     if (!row) return { status: 'unknown', reason: 'not-found' };
+    const found = String(row.userPrincipal);
     const status = licenceStatusFrom(
       typeof row.licenseAssignmentState === 'string' ? row.licenseAssignmentState : undefined,
     );
-    return status === 'unknown' ? { status, reason: 'unspecified' } : { status };
+    return status === 'unknown'
+      ? { status, reason: 'unspecified', principal: found }
+      : { status, principal: found };
   }
 
   async assign(

@@ -543,7 +543,9 @@ export function licenceRequestBlocks(r: LicenceRequestView): Block[] {
         ? '✅ Licence assigned'
         : r.status === 'approved'
           ? '✅ Approved — assign it in the Gemini Enterprise console'
-          : '✖️ Declined';
+          : r.status === 'void'
+            ? '➖ Closed without a decision (the requester’s identity or access changed)'
+            : '✖️ Declined';
     blocks.push({
       type: 'context',
       elements: [mrkdwn(`${what}${r.decidedBy ? ` by <@${r.decidedBy}>` : ''}.`)],

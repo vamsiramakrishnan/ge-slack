@@ -75,7 +75,7 @@ export interface ConversationInfo {
 export interface SurfacePort {
   conversationInfo(channel: string): Promise<ConversationInfo>;
   /** Is this human a member of the conversation? (Bot membership is never authority.) */
-  isMember(channel: string, userId: string): Promise<boolean>;
+  isMember(channel: string, userId: string, opts?: { fresh?: boolean }): Promise<boolean>;
   capture(
     scope: ResolvedScope,
     opts: {
@@ -310,7 +310,7 @@ export interface LicenceRequestView {
   requestId: string;
   requesterId: string;
   email: string;
-  status: 'open' | 'approved' | 'assigned' | 'declined';
+  status: 'open' | 'approved' | 'assigned' | 'declined' | 'void';
   at: string;
   /** Approving assigns the licence directly (`GE_LICENCE_CONFIG`). */
   assignOnApprove: boolean;

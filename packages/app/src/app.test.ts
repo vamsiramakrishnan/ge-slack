@@ -115,18 +115,37 @@ describe('config', () => {
     expect(() =>
       loadConfig(
         env({
-          GE_LICENCE_CONFIG: 'projects/p/locations/us/licenseConfigs/std',
+          GE_LICENCE_CONFIG: 'projects/p1/locations/us/licenseConfigs/std',
           GE_LICENCE_REQUESTS_CHANNEL: 'C0LIC',
         }),
       ),
     ).toThrow(/residency/);
     expect(() =>
-      loadConfig(env({ GE_LICENCE_CONFIG: 'projects/p/locations/eu/licenseConfigs/std' })),
+      loadConfig(env({ GE_LICENCE_CONFIG: 'projects/p1/locations/eu/licenseConfigs/std' })),
     ).toThrow(/GE_LICENCE_REQUESTS_CHANNEL/);
     expect(() => loadConfig(env({ GE_LICENCE_APPROVERS: 'U1,not-a-user' }))).toThrow();
+    // Assignment needs its own admin-plane SA, never the licensed service account (M3).
+    expect(() =>
+      loadConfig(
+        env({
+          GE_LICENCE_CONFIG: 'projects/p1/locations/eu/licenseConfigs/std',
+          GE_LICENCE_REQUESTS_CHANNEL: 'C0LIC',
+        }),
+      ),
+    ).toThrow(/GE_LICENCE_ADMIN_SERVICE_ACCOUNT/);
+    expect(() =>
+      loadConfig(
+        env({
+          GE_LICENCE_CONFIG: 'projects/other/locations/eu/licenseConfigs/std',
+          GE_LICENCE_ADMIN_SERVICE_ACCOUNT: 'lic-admin@p.iam.gserviceaccount.com',
+          GE_LICENCE_REQUESTS_CHANNEL: 'C0LIC',
+        }),
+      ),
+    ).toThrow(/GE_PROJECT/);
     const ok = loadConfig(
       env({
-        GE_LICENCE_CONFIG: 'projects/p/locations/eu/licenseConfigs/std',
+        GE_LICENCE_CONFIG: 'projects/p1/locations/eu/licenseConfigs/std',
+        GE_LICENCE_ADMIN_SERVICE_ACCOUNT: 'lic-admin@p.iam.gserviceaccount.com',
         GE_LICENCE_REQUESTS_CHANNEL: 'C0LIC',
         GE_LICENCE_APPROVERS: 'U0A, U0B',
       }),

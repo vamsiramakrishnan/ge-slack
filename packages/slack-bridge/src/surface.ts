@@ -116,10 +116,14 @@ export class SlackSurface implements SurfacePort {
     return v;
   }
 
-  async isMember(channel: string, userId: string): Promise<boolean> {
+  async isMember(
+    channel: string,
+    userId: string,
+    opts: { fresh?: boolean } = {},
+  ): Promise<boolean> {
     const key = `${channel}:${userId}`;
     const hit = this.memberCache.get(key);
-    if (hit && this.now() - hit.at < MEMBER_TTL_MS) return hit.ok;
+    if (!opts.fresh && hit && this.now() - hit.at < MEMBER_TTL_MS) return hit.ok;
     let ok = false;
     try {
       let cursor: string | undefined;

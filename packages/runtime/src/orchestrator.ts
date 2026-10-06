@@ -77,7 +77,12 @@ import { notesFor } from './memory.js';
 import { observingSink } from './insights.js';
 import { runAsJob, type JobStore } from './jobs.js';
 import { handleControl } from './controls.js';
-import { licenceGate, licenceOnForbidden, type LicenceService } from './licence.js';
+import {
+  licenceGate,
+  licenceOnForbidden,
+  licenceServiceGuard,
+  type LicenceService,
+} from './licence.js';
 
 export interface OrchestratorDeps {
   surface: SurfacePort;
@@ -411,6 +416,9 @@ export class Orchestrator {
       !opts.resume &&
       !(await licenceGate(this, inv, origin, sink, serviceFallback))
     ) {
+      return undefined;
+    }
+    if (principal.kind === 'service' && !(await licenceServiceGuard(this, origin, sink))) {
       return undefined;
     }
 
