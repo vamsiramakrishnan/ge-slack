@@ -16,6 +16,7 @@ import type {
   ResearchUnit,
   SourceRef,
   TaskUpdate,
+  TelemetryEvent,
   Trigger,
   WriteProvenance,
 } from '@ge-slack/contracts';
@@ -121,6 +122,11 @@ export interface WorkspaceConfigPort {
   agents(teamId: string): Promise<AgentEntry[]>;
 }
 
+/** Admin insights sink (EXPERIENCE §10). Records carry no content and no user identities. */
+export interface TelemetryPort {
+  record(teamId: string, e: TelemetryEvent): Promise<void>;
+}
+
 export interface AutomationPort {
   create(a: Omit<Automation, 'id' | 'createdAt'>): Promise<Automation>;
   list(teamId: string, ownerId?: string): Promise<Automation[]>;
@@ -154,6 +160,24 @@ export interface AnswerView {
   via?: string;
   /** Some connectors were skipped for lack of authorization: link to Gemini Enterprise. */
   authorizeUrl?: string;
+  /** Channel notes that grounded this answer (EXPERIENCE §10). */
+  memoryNotes?: number;
+}
+
+/** `/gemini memory`: the channel's notes, each with Forget (EXPERIENCE §10). */
+export interface MemoryView {
+  channel: string;
+  notes: Array<{
+    n: number;
+    id: string;
+    text: string;
+    author: string;
+    at: string;
+    permalink?: string;
+    sourceUser?: string;
+  }>;
+  forgotten: { count: number; lastBy?: string; lastAt?: string };
+  limit: number;
 }
 
 /** An agent paused for the invoker: start a research plan, answer a question, or authorize. */
@@ -254,6 +278,8 @@ export interface TurnSink {
   retire(text: string): Promise<void>;
   /** An agent is waiting on the invoker (Deep Research plan, A2A input or authorization). */
   awaiting(a: AwaitingView): Promise<void>;
+  /** The channel's memory, privately to the person who asked. */
+  memory(m: MemoryView): Promise<void>;
 }
 
 export interface LinkStarter {

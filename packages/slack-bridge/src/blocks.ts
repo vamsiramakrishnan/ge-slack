@@ -11,6 +11,7 @@ import type {
   AnswerView,
   AutomationPlanView,
   AwaitingView,
+  MemoryView,
   ConnectView,
   IdentityBadge,
   LandedView,
@@ -105,7 +106,7 @@ export function answerBlocks(a: AnswerView, opts: { includeText: boolean }): Blo
     type: 'context',
     elements: [
       mrkdwn(
-        `${identityLine(a.identity)}${a.via ? ` · via ${esc(a.via)}` : ''} · ${a.sources.length} source${a.sources.length === 1 ? '' : 's'} · ${a.grounded ? 'grounded' : '*ungrounded* — no sources backed this answer'}`,
+        `${identityLine(a.identity)}${a.via ? ` · via ${esc(a.via)}` : ''}${a.memoryNotes ? ` · 📌 ${a.memoryNotes} channel note${a.memoryNotes === 1 ? '' : 's'}` : ''} · ${a.sources.length} source${a.sources.length === 1 ? '' : 's'} · ${a.grounded ? 'grounded' : '*ungrounded* — no sources backed this answer'}`,
       ),
     ],
   });
@@ -468,6 +469,45 @@ const NOTICE_ICON: Record<NoticeKind, string> = {
   denied: '🔒',
   clarify: '❓',
 };
+
+/** `/gemini memory` (EXPERIENCE §10): every note, who added it, and Forget. Private. */
+export function memoryBlocks(m: MemoryView): Block[] {
+  const blocks: Block[] = [
+    {
+      type: 'section',
+      text: mrkdwn(
+        `*📌 Channel memory for <#${m.channel}>* · ${m.notes.length} of ${m.limit} notes\n` +
+          'Answers in this channel use these notes as background. Add one with `/gemini remember "…"` or *Remember this* on a message.',
+      ),
+    },
+  ];
+  if (!m.notes.length) {
+    blocks.push({ type: 'context', elements: [mrkdwn('_No notes yet._')] });
+  }
+  for (const n of m.notes.slice(0, 45)) {
+    const source =
+      n.permalink && /^https:\/\/[^\s|<>]+$/.test(n.permalink)
+        ? ` · <${n.permalink}|from a message>`
+        : '';
+    const by = n.sourceUser ? `<@${n.author}> (said by <@${n.sourceUser}>)` : `<@${n.author}>`;
+    blocks.push({
+      type: 'section',
+      text: mrkdwn(`*${n.n}.* ${esc(n.text)}\n_${by} · ${n.at.slice(0, 10)}${source}_`),
+      accessory: button('Forget', ACTIONS.memoryForget, `${m.channel}:${n.id}`),
+    });
+  }
+  if (m.forgotten.count) {
+    blocks.push({
+      type: 'context',
+      elements: [
+        mrkdwn(
+          `${m.forgotten.count} forgotten in the last 30 days${m.forgotten.lastBy ? ` · latest by <@${m.forgotten.lastBy}> on ${(m.forgotten.lastAt ?? '').slice(0, 10)}` : ''}`,
+        ),
+      ],
+    });
+  }
+  return blocks.slice(0, MAX_BLOCKS);
+}
 
 /**
  * An agent paused for its invoker (ADR-0002). The card is private to the invoker; the runtime

@@ -14,6 +14,7 @@ import {
   policyModal,
   type ComposerPrefill,
 } from '@ge-slack/slack-bridge';
+import { rememberNote } from '@ge-slack/runtime';
 import type { Container } from './container.js';
 
 /**
@@ -443,4 +444,38 @@ export async function openAgentReply(
 function withResponseUrl(origin: Origin, responseUrl: string | undefined): Origin {
   const { responseUrl: _stale, ...rest } = origin;
   return responseUrl ? { ...rest, responseUrl } : rest;
+}
+
+/**
+ * "Remember this" (EXPERIENCE §10): add a message to the channel's memory, with a link back to
+ * it. Membership is checked by the runtime like any memory change.
+ */
+export async function rememberFromMessage(
+  c: Container,
+  p: {
+    teamId: string;
+    userId: string;
+    channelId: string;
+    messageTs: string;
+    text: string;
+    sourceUser?: string;
+    responseUrl?: string;
+  },
+): Promise<void> {
+  const origin: Origin = {
+    entry: 'message-shortcut',
+    teamId: p.teamId,
+    userId: p.userId,
+    channelId: p.channelId,
+    messageTs: p.messageTs,
+    ...(p.responseUrl ? { responseUrl: p.responseUrl } : {}),
+  };
+  const link = await c.api
+    .call('chat.getPermalink', { channel: p.channelId, message_ts: p.messageTs })
+    .then((r) => (typeof r.permalink === 'string' ? r.permalink : undefined))
+    .catch(() => undefined);
+  await rememberNote(c.orch, origin, p.text, c.sinkFor(origin), {
+    ...(link ? { permalink: link } : {}),
+    ...(p.sourceUser ? { sourceUser: p.sourceUser } : {}),
+  });
 }

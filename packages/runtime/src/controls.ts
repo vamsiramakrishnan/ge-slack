@@ -8,6 +8,7 @@ import {
   type Origin,
 } from '@ge-slack/contracts';
 import { runDiagnostics } from './diag.js';
+import { forgetNote, rememberNote, showMemory } from './memory.js';
 import type { Orchestrator } from './orchestrator.js';
 import type { TurnSink } from './ports.js';
 
@@ -34,6 +35,18 @@ export async function handleControl(
   switch (verb) {
     case 'help':
       await sink.notice('info', HELP_TEXT);
+      return;
+
+    case 'remember':
+      await rememberNote(orch, origin, args.join(' '), sink);
+      return;
+
+    case 'memory':
+      await showMemory(orch, origin, sink);
+      return;
+
+    case 'forget':
+      await forgetNote(orch, origin, { n: Number(args[0]) }, sink);
       return;
 
     case 'diag': {

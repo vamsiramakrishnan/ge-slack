@@ -26,6 +26,8 @@ export const ACTIONS = {
   agentReply: 'ge_agent_reply',
   agentRetry: 'ge_agent_retry',
   agentAuthorize: 'ge_agent_authorize',
+  /** Forget one channel note; value `<channel>:<noteId>`. */
+  memoryForget: 'ge_memory_forget',
 } as const;
 
 export const CALLBACKS = {
@@ -37,6 +39,7 @@ export const CALLBACKS = {
   messageDraftReply: 'ge_msg_draft_reply',
   messageReview: 'ge_msg_review',
   messageCanvas: 'ge_msg_canvas',
+  messageRemember: 'ge_msg_remember',
   globalNew: 'ge_global_new',
   agentReply: 'ge_agent_reply_modal',
 } as const;

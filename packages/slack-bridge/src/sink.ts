@@ -2,6 +2,7 @@ import { toSlackMetadata, type TaskUpdate } from '@ge-slack/contracts';
 import type {
   AnswerView,
   AwaitingView,
+  MemoryView,
   AutomationPlanView,
   ConnectView,
   LandedView,
@@ -12,6 +13,7 @@ import type {
 import {
   answerBlocks,
   awaitingBlocks,
+  memoryBlocks,
   automationPlanBlocks,
   connectBlocks,
   landedBlocks,
@@ -207,6 +209,16 @@ export class SlackTurnSink implements TurnSink {
     await this.closeStreamWith([]);
     // Connect prompts are always private to the person who has to act on them.
     await this.private(connectBlocks(c), 'Connect Gemini Enterprise');
+    await this.idle();
+  }
+
+  async memory(m: MemoryView): Promise<void> {
+    await this.closeStreamWith([]);
+    const text = `Channel memory: ${m.notes.length} notes`;
+    if (this.target.mode === 'unattended') return;
+    if (this.target.mode === 'ephemeral')
+      await this.ephemeral(memoryBlocks(m), text, !this.target.card);
+    else await this.private(memoryBlocks(m), text);
     await this.idle();
   }
 

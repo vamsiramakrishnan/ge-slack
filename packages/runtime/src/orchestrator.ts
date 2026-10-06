@@ -19,7 +19,9 @@ import {
   type Invocation,
   type Origin,
   type AssistEvent,
+  type ChannelNote,
   type Feature,
+  type TelemetryEvent,
   type ParsedCommand,
   type Principal,
   type SourceRef,
@@ -61,9 +63,11 @@ import type {
   PlanView,
   ResolvedScope,
   SurfacePort,
+  TelemetryPort,
   TurnSink,
   WorkspaceConfigPort,
 } from './ports.js';
+import { notesFor } from './memory.js';
 import { handleControl } from './controls.js';
 
 export interface OrchestratorDeps {
@@ -86,6 +90,7 @@ export interface OrchestratorDeps {
   features?: ReadonlySet<Feature>;
   /** Build identifier shown by `/gemini diag` (e.g. the git sha / Cloud Run revision). */
   version?: string;
+  telemetry?: TelemetryPort;
 }
 
 type Turn = {
@@ -103,6 +108,8 @@ type Turn = {
   agent?: AgentEntry;
   /** False when captured Slack content must not be sent (A2A agent, scope not named). */
   forwardContext: boolean;
+  /** Channel notes grounding this turn (EXPERIENCE §10). */
+  memory: ChannelNote[];
   /** Aborted by Slack's stop button (`agent_session_stopped`). */
   signal?: AbortSignal;
 };
@@ -130,6 +137,15 @@ export class Orchestrator {
   constructor(readonly deps: OrchestratorDeps) {
     this.now = deps.now ?? (() => new Date());
     this.newId = deps.newId ?? (() => randomUUID().replace(/-/g, '').slice(0, 20));
+  }
+
+  /**
+   * Admin insights (no content, no user identities). Best effort: telemetry never fails a turn,
+   * and only runs with the `analytics` feature.
+   */
+  observe(teamId: string, e: TelemetryEvent): void {
+    if (!this.deps.features?.has('analytics') || !this.deps.telemetry) return;
+    void this.deps.telemetry.record(teamId, e).catch(() => undefined);
   }
 
   async handle(
@@ -405,6 +421,7 @@ export class Orchestrator {
         ctx: undefined,
         allowedChannels: new Set(),
         forwardContext,
+        memory: [],
         ...(agent ? { agent } : {}),
       };
     }
@@ -462,6 +479,19 @@ export class Orchestrator {
     const allowedChannels = new Set<string>(
       [origin.channelId, scopeChannel(scope), inv.flags.to].filter((c): c is string => Boolean(c)),
     );
+    // Channel memory grounds turns that read a channel — never search hits, never an A2A agent
+    // the invoker didn't point at the conversation (EXPERIENCE §10).
+    const memory =
+      forwardContext && scope.kind !== 'none' && scope.kind !== 'search'
+        ? await notesFor(this, origin.teamId, scopeChannel(scope))
+        : [];
+    if (memory.length) {
+      await sink.task({
+        id: 'memory',
+        title: `Using ${memory.length} channel note${memory.length === 1 ? '' : 's'}`,
+        status: 'complete',
+      });
+    }
     // Reads (executor `read <permalink>`) stay inside the admitted scope only (M3).
     const readChannels = new Set<string>(
       [scopeChannel(scope), ...canvasChannels].filter((c): c is string => Boolean(c)),
@@ -478,6 +508,7 @@ export class Orchestrator {
       ctx,
       allowedChannels,
       forwardContext,
+      memory,
       ...(agent ? { agent } : {}),
     };
   }
@@ -545,7 +576,9 @@ export class Orchestrator {
       ? `${agent.title} ${asWho(turn.principal)}`
       : `Gemini Enterprise ${asWho(turn.principal)}`;
     await sink.task({ id: 'ask', title: `Asking ${who}`, status: 'in_progress' });
-    const text = resume?.text ?? composeChatPrompt(inv, turn.forwardContext ? turn.ctx : undefined);
+    const text =
+      resume?.text ??
+      composeChatPrompt(inv, turn.forwardContext ? turn.ctx : undefined, turn.memory);
     // Deep Research needs its session for phase 2; A2A agents continue their context/task.
     const session = resume?.handle.session;
     const events = this.deps.gemini.stream(turn.tokens, {
@@ -694,6 +727,7 @@ export class Orchestrator {
       ...(unauthorized.length && turn.principal.kind === 'user' && this.deps.appUrl
         ? { authorizeUrl: this.deps.appUrl }
         : {}),
+      ...(turn.memory.length && !resume ? { memoryNotes: turn.memory.length } : {}),
     });
     if (awaiting && agent) await this.pauseAgent(awaiting, agent, inv, origin, sink, turn);
   }
@@ -912,7 +946,7 @@ export class Orchestrator {
     await sink.task({ id: 'plan', title: 'Planning', status: 'in_progress' });
     const r = await collectStream(
       this.deps.gemini.stream(turn.tokens, {
-        text: composePlannerPrompt(inv, turn.ctx),
+        text: composePlannerPrompt(inv, turn.ctx, turn.memory),
         route: 'planner',
         sessionless: true,
         identity: turn.identity,
@@ -991,6 +1025,7 @@ export class Orchestrator {
             ...(feedback ? { feedback } : {}),
             now: this.now(),
             timeZone: this.deps.timeZone ?? 'UTC',
+            memory: turn.memory,
             targets: [...turn.allowedChannels].map((id) => ({
               id,
               label: id === origin.channelId ? 'here' : 'named',

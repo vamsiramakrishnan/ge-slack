@@ -13,3 +13,5 @@ export * from './cmd.js';
 export * from './plan.js';
 export * from './agents.js';
 export * from './features.js';
+export * from './memory.js';
+export * from './telemetry.js';

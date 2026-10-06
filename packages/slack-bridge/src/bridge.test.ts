@@ -4,6 +4,7 @@ import { SlackSurface } from './surface.js';
 import { SlackTurnSink, defaultResponsePoster } from './sink.js';
 import {
   agentReplyModal,
+  memoryBlocks,
   answerBlocks,
   awaitingBlocks,
   markdownBlocks,
@@ -886,5 +887,41 @@ describe('agent blocks (ADR-0002)', () => {
       reason: 'input-required',
     });
     expect(modal.private_metadata).toBe('k1');
+  });
+});
+
+describe('memory blocks (stage 3)', () => {
+  it('escapes note text, links only https permalinks, and keys Forget by channel and id', () => {
+    const json = JSON.stringify(
+      memoryBlocks({
+        channel: 'C1',
+        notes: [
+          {
+            n: 1,
+            id: 'abc123',
+            text: '<!here> & <b>',
+            author: 'U1',
+            at: '2026-10-06T00:00:00Z',
+            permalink: 'javascript:x',
+          },
+          {
+            n: 2,
+            id: 'def456',
+            text: 'ok',
+            author: 'U1',
+            at: '2026-10-06T00:00:00Z',
+            sourceUser: 'U2',
+            permalink: 'https://acme.slack.com/archives/C1/p1',
+          },
+        ],
+        forgotten: { count: 1, lastBy: 'U3', lastAt: '2026-10-05T00:00:00Z' },
+        limit: 50,
+      }),
+    );
+    expect(json).toContain('&lt;!here&gt; &amp; &lt;b&gt;');
+    expect(json).not.toContain('javascript');
+    expect(json).toContain('"value":"C1:abc123"');
+    expect(json).toContain('said by <@U2>');
+    expect(json).toContain('1 forgotten');
   });
 });

@@ -342,6 +342,9 @@ export class OutcomeSink implements TurnSink {
   retire(text: string) {
     return this.inner.retire(text);
   }
+  memory(m: Parameters<TurnSink['memory']>[0]) {
+    return this.inner.memory(m);
+  }
   awaiting(a: Parameters<TurnSink['awaiting']>[0]) {
     // Unattended runs can't continue a paused agent (admission refuses those agents anyway).
     this.outcome = 'failed';

@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { App, BlockAction } from '@slack/bolt';
 import type { Origin } from '@ge-slack/contracts';
 import { ACTIONS, CALLBACKS, WORKFLOW_STEPS } from '@ge-slack/slack-bridge';
-import { safeMessage } from '@ge-slack/runtime';
+import { forgetNote, safeMessage } from '@ge-slack/runtime';
 import { runWorkflowStep } from '@ge-slack/automations';
 import type { Container } from './container.js';
 import {
@@ -16,6 +16,7 @@ import {
   suggestedPrompts,
   viewedChannel,
   continueAgent,
+  rememberFromMessage,
   openAgentReply,
   openPlanEditor,
   openPolicy,
@@ -260,6 +261,20 @@ export function register(app: App, c: Container, botUserId: () => string | undef
   messageShortcut(CALLBACKS.messageDraftReply, 'draft', 'a reply to this message');
   messageShortcut(CALLBACKS.messageReview, 'review');
   messageShortcut(CALLBACKS.messageCanvas, 'draft', 'turn this thread into a canvas');
+  app.shortcut(CALLBACKS.messageRemember, async ({ shortcut, ack }) => {
+    await ack();
+    if (shortcut.type !== 'message_action') return;
+    const msg = shortcut.message as { ts: string; text?: string; user?: string };
+    await guard('remember', rememberFromMessage)(c, {
+      teamId: team,
+      userId: shortcut.user.id,
+      channelId: shortcut.channel.id,
+      messageTs: msg.ts,
+      text: msg.text ?? '',
+      ...(msg.user ? { sourceUser: msg.user } : {}),
+      responseUrl: shortcut.response_url,
+    });
+  });
 
   app.shortcut(CALLBACKS.globalNew, async ({ shortcut, ack }) => {
     await ack();
@@ -363,6 +378,12 @@ export function register(app: App, c: Container, botUserId: () => string | undef
   onAction(ACTIONS.agentReply, async (b) => {
     const err = await openAgentReply(c, b.trigger_id, actionValue(b), b.user.id);
     if (err) await c.sinkFor(clickOrigin(c, b)).notice('denied', err);
+  });
+  onAction(ACTIONS.memoryForget, async (b) => {
+    const [channel, id] = actionValue(b).split(':');
+    if (!channel || !id) return;
+    const origin: Origin = { ...clickOrigin(c, b), channelId: channel };
+    await forgetNote(c.orch, origin, { id }, c.sinkFor(origin));
   });
   onAction(ACTIONS.agentAuthorize, async () => {
     /* URL button: Slack opens Gemini Enterprise; nothing to do server-side. */

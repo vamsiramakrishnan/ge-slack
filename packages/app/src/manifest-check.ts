@@ -83,6 +83,7 @@ export function checkManifest(manifest: unknown, facts: ManifestFacts): string[]
     CALLBACKS.messageDraftReply,
     CALLBACKS.messageReview,
     CALLBACKS.messageCanvas,
+    CALLBACKS.messageRemember,
   ];
   for (const id of expectedShortcuts) {
     if (!shortcutIds.includes(id)) errors.push(`shortcut ${id} is wired but not declared`);

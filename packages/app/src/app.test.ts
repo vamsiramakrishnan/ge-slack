@@ -13,7 +13,12 @@ import {
 import { loadConfig } from './config.js';
 import { buildContainer, type Container } from './container.js';
 import { GoogleIdTokenVerifier } from './google-id-token.js';
-import { invocationFromComposer, onPolicySubmit, onSlash } from './handlers.js';
+import {
+  invocationFromComposer,
+  onPolicySubmit,
+  onSlash,
+  rememberFromMessage,
+} from './handlers.js';
 import { routes } from './wiring.js';
 
 const ENV = {
@@ -49,6 +54,9 @@ class FakeSlack implements SlackApi {
     this.calls.push({ method, args });
     if (method === 'conversations.info') return { ok: true, channel: { name: 'eng' } };
     if (method === 'conversations.members') return { ok: true, members: ['U0ALEX'] };
+    if (method === 'chat.getPermalink') {
+      return { ok: true, permalink: 'https://acme.slack.com/archives/C0ENG/p1700000000000100' };
+    }
     if (method === 'users.info')
       return {
         ok: true,
@@ -411,3 +419,25 @@ function fakeGoogle() {
   };
   return { fetchImpl, sign, key, otherKey };
 }
+
+describe('channel memory (app)', () => {
+  it('"Remember this" stores the message with a link back and its author', async () => {
+    const { c, api } = await container();
+    await rememberFromMessage(c, {
+      teamId: String(ENV.SLACK_TEAM_ID),
+      userId: 'U0ALEX',
+      channelId: 'C0ENG',
+      messageTs: '1700000000.000100',
+      text: 'Rollback runbook lives in <!channel> the wiki',
+      sourceUser: 'U0MAYA',
+    });
+    const [note] = await c.stores.notes(String(ENV.SLACK_TEAM_ID), 'C0ENG');
+    expect(note).toMatchObject({
+      text: 'Rollback runbook lives in the wiki',
+      author: 'U0ALEX',
+      sourceUser: 'U0MAYA',
+      permalink: 'https://acme.slack.com/archives/C0ENG/p1700000000000100',
+    });
+    expect(api.calls.some((x) => x.method === 'chat.getPermalink')).toBe(true);
+  });
+});

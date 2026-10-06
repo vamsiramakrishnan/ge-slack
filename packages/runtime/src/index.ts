@@ -6,3 +6,5 @@ export * from './stores.js';
 export * from './controls.js';
 export * from './orchestrator.js';
 export * from './workspace-config.js';
+export * from './memory.js';
+export * from './diag.js';

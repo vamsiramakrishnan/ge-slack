@@ -5,7 +5,7 @@
   },
   "display_information": {
     "name": "Gemini",
-    "description": "Gemini Enterprise in Slack \u2014 grounded on your sources, acting as you, every change reviewable.",
+    "description": "Gemini Enterprise in Slack — grounded on your sources, acting as you, every change reviewable.",
     "long_description": "Ask, summarize, explain, rewrite, review, draft and take notes with Gemini Enterprise from any conversation. Answers run as you (your Gemini Enterprise licence and access) or, where your admins allow it, as a licensed Gemini service identity limited to shared sources. Anything Gemini wants to post is shown as a plan you approve first; every change is attributed and can be undone from App Home.",
     "background_color": "#1d1c2b"
   },
@@ -26,8 +26,8 @@
       {
         "command": "/gemini",
         "url": "https://ge-slack.example.com/slack/events",
-        "description": "Ask \u00b7 summarize \u00b7 explain \u00b7 rewrite \u00b7 review \u00b7 draft \u00b7 notes \u2014 grounded and reviewable",
-        "usage_hint": "summarize #channel --since 7d @unit  \u00b7  draft \"an update\" --to #team  \u00b7  help",
+        "description": "Ask · summarize · explain · rewrite · review · draft · notes — grounded and reviewable",
+        "usage_hint": "summarize #channel --since 7d @unit  ·  draft \"an update\" --to #team  ·  help",
         "should_escape": true
       }
     ],
@@ -67,6 +67,12 @@
         "type": "message",
         "callback_id": "ge_msg_canvas",
         "description": "Draft a canvas from this thread"
+      },
+      {
+        "name": "Remember this",
+        "type": "message",
+        "callback_id": "ge_msg_remember",
+        "description": "Add to this channel's Gemini memory"
       }
     ]
   },

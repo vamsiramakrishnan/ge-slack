@@ -7,6 +7,7 @@ import type {
 } from '@ge-slack/contracts';
 import type { AssistTurn, TokenSource } from '@ge-slack/gemini-client';
 import type {
+  MemoryView,
   AwaitingView,
   AnswerView,
   AutomationPlanView,
@@ -61,6 +62,9 @@ export class RecordingSink implements TurnSink {
   }
   async awaiting(a: AwaitingView) {
     this.events.push({ type: 'awaiting', value: a });
+  }
+  async memory(m: MemoryView) {
+    this.events.push({ type: 'memory', value: m });
   }
   last<T = unknown>(type: string): T | undefined {
     return [...this.events].reverse().find((e) => e.type === type)?.value as T | undefined;

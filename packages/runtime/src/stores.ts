@@ -1,4 +1,5 @@
 import type {
+  ChannelNote,
   AgentHandle,
   AwaitingReason,
   ActuationKind,
@@ -139,6 +140,18 @@ export class RuntimeStores {
   }
   takeResume(id: string) {
     return this.kv.take<{ origin: Origin; invocation: Invocation }>(`resume/${id}`);
+  }
+
+  /** One key per note, so concurrent `remember`s never overwrite each other. */
+  saveNote(teamId: string, n: ChannelNote) {
+    // Forgotten notes stay visible (who/when) for 30 days, then disappear.
+    return this.kv.set(`memory/${teamId}/${n.channel}/${n.id}`, n, {
+      ...(n.forgottenAt ? { ttlMs: 30 * 24 * 3_600_000 } : {}),
+    });
+  }
+  async notes(teamId: string, channel: string): Promise<ChannelNote[]> {
+    const all = await this.kv.list<ChannelNote>(`memory/${teamId}/${channel}/`);
+    return all.map((x) => x.value).sort((a, b) => a.at.localeCompare(b.at));
   }
 
   saveContinuation(c: AgentContinuation, now: number) {

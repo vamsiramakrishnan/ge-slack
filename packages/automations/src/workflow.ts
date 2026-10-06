@@ -59,6 +59,9 @@ export class CollectingSink implements TurnSink {
   async executing() {}
   async landed() {}
   async retire() {}
+  async memory() {
+    this.error = 'Channel memory can’t be listed from a workflow step.';
+  }
   async awaiting() {
     this.error = 'That agent needs a person to respond, so it can’t run in a workflow step.';
   }
