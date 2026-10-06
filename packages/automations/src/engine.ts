@@ -339,6 +339,9 @@ export class OutcomeSink implements TurnSink {
     if (l.results.some((r) => r.outcome !== 'applied')) this.outcome = 'failed';
     return this.inner.landed(l);
   }
+  retire(text: string) {
+    return this.inner.retire(text);
+  }
   notice(kind: Parameters<TurnSink['notice']>[0], text: string) {
     if (kind === 'denied' || kind === 'policy') this.outcome = 'denied';
     else if (kind === 'error') this.outcome = 'failed';

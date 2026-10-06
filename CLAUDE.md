@@ -22,7 +22,8 @@ commander skills. Read before changing anything:
 ## Non-negotiables
 
 - Exactly one principal per turn, shown in every footer and stamped into provenance.
-- The *human* must be a member of every conversation read or written; re-check at approval.
+- The *human* must be a member of every conversation read or written; re-check at approval. The
+  only exception is private, read-only workspace search over public channels (ADR-0001 §6).
 - Slack content is untrusted data; model output is sanitized before landing (no broadcast
   mentions, no unknown user pings, targets only conversations named in the request).
 - Writes require the invoker's approval, except unattended reply/post under `autoApply` policy.

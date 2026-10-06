@@ -229,6 +229,26 @@ export class Orchestrator {
     }
     const policy = await config.channelPolicy(origin.teamId, channel ?? '');
 
+    if (scope.kind === 'search' && opts.actionToken) {
+      // Workspace search reads public channels the person may not have joined, so its results
+      // are private-only, read-only, never in shared channels, and never for guests/externals.
+      const publicDelivery = origin.entry === 'mention' || inv.flags.visibility === 'public';
+      if (externallyShared || publicDelivery || isActuating(inv.verb)) {
+        await sink.notice(
+          'denied',
+          externallyShared
+            ? "Workspace search isn't available in externally shared conversations."
+            : isActuating(inv.verb)
+              ? 'Workspace search is read-only. Ask or summarize with it, then draft from the conversation you want to change.'
+              : 'Workspace search answers are private — ask in your Gemini DM (Messages tab).',
+        );
+        return undefined;
+      }
+      if (await surface.isGuest(origin.userId)) {
+        await sink.notice('denied', "Guests and external members can't search the workspace.");
+        return undefined;
+      }
+    }
     const resolved = await identity.resolve({
       teamId: origin.teamId,
       userId: origin.userId,
@@ -266,6 +286,20 @@ export class Orchestrator {
         return undefined;
       }
     }
+    if (principal.kind === 'service' && scope.kind === 'canvas') {
+      // The canvas's own conversations decide, not the one the request came from (M7).
+      let allowed = false;
+      for (const c of canvasChannels) {
+        if ((await config.channelPolicy(origin.teamId, c)).serviceMayRead) allowed = true;
+      }
+      if (!allowed) {
+        await sink.notice(
+          'denied',
+          "The Gemini service isn't allowed to read that canvas. Connect your account to run this as you.",
+        );
+        return undefined;
+      }
+    }
     const readChannel = scopeChannel(scope) ?? canvasChannels[0];
     if (principal.kind === 'service' && readChannel && !policy.serviceMayRead) {
       await sink.notice(
@@ -287,13 +321,6 @@ export class Orchestrator {
     };
 
     await sink.begin(this.title(inv, scope, info?.name));
-    if (scope.kind === 'search' && opts.actionToken && (await surface.isGuest(origin.userId))) {
-      await sink.notice(
-        'denied',
-        "Guests can't search the workspace. Ask in a channel you're in instead.",
-      );
-      return undefined;
-    }
     await sink.task({
       id: 'capture',
       title: scope.kind === 'search' ? 'Searching Slack' : 'Reading the conversation',
@@ -484,6 +511,7 @@ export class Orchestrator {
       text,
       ...(provenance ? { provenance } : {}),
       principal: turn.identity,
+      shareable: turn.scope.kind !== 'search',
     };
     await this.deps.stores.saveAnswer(stored);
     await sink.answer({
@@ -495,6 +523,7 @@ export class Orchestrator {
       related,
       warnings,
       shareable:
+        turn.scope.kind !== 'search' &&
         Boolean(origin.channelId) &&
         (origin.entry === 'slash' ||
           origin.entry === 'message-shortcut' ||
@@ -522,8 +551,10 @@ export class Orchestrator {
     inv: Invocation,
     origin: Origin,
   ): Set<string> {
+    // Authors of workspace-search hits are not people of this conversation (no pings/DMs).
+    const fromCtx = inv.scope?.kind === 'search' ? [] : (ctx?.messages ?? []);
     return new Set<string>([
-      ...(ctx?.messages ?? []).flatMap((m) => (m.user ? [m.user] : [])),
+      ...fromCtx.flatMap((m) => (m.user ? [m.user] : [])),
       ...inv.people,
       ...inv.from,
       origin.userId,
@@ -743,12 +774,7 @@ export class Orchestrator {
           readResults.push(await this.serveRead(line, ctx, turn));
         }
       }
-      const knownUsers = new Set<string>([
-        ...ctx.messages.flatMap((m) => (m.user ? [m.user] : [])),
-        ...inv.people,
-        ...inv.from,
-        origin.userId,
-      ]);
+      const knownUsers = this.knownUsers(ctx, inv, origin);
       const knownMessages = new Set<string>([
         ...ctx.messages.map((m) => `${m.channel ?? ctx.channel ?? ''}:${m.ts}`),
         ...(turn.scope.kind === 'thread' || turn.scope.kind === 'message'
@@ -958,7 +984,7 @@ export class Orchestrator {
       return;
     }
     if (p.dryRun) {
-      await sink.notice('info', 'That was a dry run; nothing was applied.');
+      await sink.retire('Dry run closed — nothing was applied.');
       return;
     }
     // Re-admit at click time: identity and membership may have changed since the card rendered.
@@ -989,7 +1015,11 @@ export class Orchestrator {
       );
       return;
     }
-    for (const c of targets) {
+    // The scope the content was read from must still be readable by the approver.
+    for (const c of new Set([
+      ...targets,
+      ...(scopeChannel(p.scope) ? [scopeChannel(p.scope)!] : []),
+    ])) {
       if (!(await this.deps.surface.isMember(c, userId))) {
         await sink.notice('denied', `You're no longer a member of <#${c}>; nothing was applied.`);
         return;
@@ -1044,19 +1074,27 @@ export class Orchestrator {
     userId: string,
     sink: TurnSink,
   ): Promise<void> {
-    const p = await this.deps.stores.getPlan(planId);
-    if (!p || p.expiresAt < this.now().getTime()) {
-      await sink.notice('info', 'This plan expired — run it again.');
+    const peek = await this.deps.stores.getPlan(planId);
+    if (!peek || peek.expiresAt < this.now().getTime()) {
+      await sink.notice('info', 'This plan expired or was already handled.');
       return;
     }
-    if (p.invokerId !== userId) {
-      await sink.notice('denied', `Only <@${p.invokerId}> can change this plan.`);
+    if (peek.invokerId !== userId) {
+      await sink.notice('denied', `Only <@${peek.invokerId}> can change this plan.`);
       return;
     }
-    if (!p.effects.some((e) => e.changeId === changeId)) return;
+    // Take (atomic) → modify → save, so a concurrent Approve can never see a plan that a toggle
+    // later resurrects; whichever takes it first wins (M3).
+    const p = await this.deps.stores.takePlan(planId);
+    if (!p) {
+      await sink.notice('info', 'This plan was already handled.');
+      return;
+    }
     const skipped = new Set(p.skipped ?? []);
-    if (skipped.has(changeId)) skipped.delete(changeId);
-    else skipped.add(changeId);
+    if (p.effects.some((e) => e.changeId === changeId)) {
+      if (skipped.has(changeId)) skipped.delete(changeId);
+      else skipped.add(changeId);
+    }
     const next = { ...p, skipped: [...skipped] };
     await this.deps.stores.savePlan(next, this.now().getTime());
     const kind = p.identity.startsWith('service:') ? 'service' : 'user';
@@ -1071,8 +1109,9 @@ export class Orchestrator {
       await sink.notice('denied', `Only <@${peek.invokerId}> can cancel this plan.`);
       return;
     }
-    await this.deps.stores.takePlan(planId);
-    await sink.notice('info', 'Cancelled — nothing was changed.');
+    const taken = await this.deps.stores.takePlan(planId);
+    if (taken) await sink.retire('Cancelled — nothing was changed.');
+    else await sink.notice('info', 'This plan was already handled.');
   }
 
   private async apply(
@@ -1198,7 +1237,7 @@ export class Orchestrator {
   /** "Share to channel": post exactly the private answer that was shown, with provenance. */
   async share(turnId: string, userId: string, sink: TurnSink): Promise<void> {
     const a = await this.deps.stores.getAnswer(turnId);
-    if (!a || a.invokerId !== userId) {
+    if (!a || a.invokerId !== userId || a.shareable === false) {
       await sink.notice('info', 'That answer is no longer available to share.');
       return;
     }
@@ -1409,6 +1448,8 @@ function mergeSources(a: SourceRef[], b: SourceRef[]): SourceRef[] {
 
 function targetChannels(p: ActuationParams): string[] {
   switch (p.kind) {
+    case 'action-items':
+      return [p.channel];
     case 'reply':
     case 'post':
     case 'schedule':

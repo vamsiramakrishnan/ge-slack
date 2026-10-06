@@ -344,7 +344,9 @@ message, because streaming needs a thread. The roadmap for richer native renderi
 - *`notes` action items* land as a Slack List, or as a checklist where Lists are unavailable (the
   receipt says which).
 - *Canvas rewrites* target a section by its heading and refuse to guess between several matches.
-- *`scope:search("…")`* searches public channels with Slack's Real-time Search when started from
-  `@Gemini` or the agent DM (Slack issues the per-event `action_token` there). From a slash
-  command it falls back to a keyword filter of the current channel and says so. Guests can't
-  search. The Gemini service only sees results from channels allow-listed for it.
+- *`scope:search("…")`* searches public channels with Slack's Real-time Search. It is **private and
+  read-only**: it is answered in your Gemini DM and can't be shared or used to post, react, or
+  remind. A public `@Gemini` mention, `--public`, or a Slack Connect conversation is refused with
+  a pointer to the DM. Guests and external members can't search. The Gemini service only sees hits
+  from channels allow-listed for it. From a slash command (which carries no `action_token`) it
+  falls back to a keyword filter of the current channel and says so.

@@ -228,7 +228,15 @@ export class SlackTurnSink implements TurnSink {
   async notice(kind: NoticeKind, text: string): Promise<void> {
     const t = this.target;
     const blocks = noticeBlocks(kind, text);
-    if (t.mode === 'stream' && (this.streamTs || this.fallbackTs)) {
+    if (t.mode === 'ephemeral' && t.card && t.responseUrl) {
+      // Never replace a (possibly shared) card with a notice: the clicker alone sees it (M5).
+      await this.postResponse(t.responseUrl, {
+        response_type: 'ephemeral',
+        replace_original: false,
+        text: text.slice(0, 3000),
+        blocks,
+      });
+    } else if (t.mode === 'stream' && (this.streamTs || this.fallbackTs)) {
       await this.flush();
       await this.closeStreamWith(blocks);
     } else if (t.mode === 'unattended') {
@@ -238,6 +246,15 @@ export class SlackTurnSink implements TurnSink {
     }
     await this.idle();
     this.finished = true;
+  }
+
+  async retire(text: string): Promise<void> {
+    const t = this.target;
+    if (t.mode === 'ephemeral' && t.card && t.responseUrl) {
+      await this.ephemeral(noticeBlocks('info', text), text, true);
+      return;
+    }
+    await this.notice('info', text);
   }
 
   // ------------------------------------------------------------------ streaming internals

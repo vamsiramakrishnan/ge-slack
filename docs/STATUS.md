@@ -49,6 +49,23 @@ shared secret header (L8; Cloud Scheduler OIDC is a follow-up); Firestore region
 setting (L7). M7 (Firestore prefix query) was a false positive — the upper bound is U+F8FF, now
 written as an explicit escape.
 
+## Security review — stage 2 (2026-10-06)
+
+No criticals. All findings fixed with regression tests:
+
+| Finding | Fix |
+|---|---|
+| H1 search results posted publicly | search is private-only (agent DM), not shareable, refused in Slack Connect |
+| H2 writes to search-hit conversations | search turns are read-only; permalink replies/reactions must target conversations named in the request |
+| M1 undocumented membership exception | ADR-0001 §6 + CLAUDE.md state the bounded search exception |
+| M2 action items skipped re-checks | list conversation and scope re-checked at approval |
+| M3 toggle could resurrect an approved plan | toggles take → modify → save (atomic with approval) |
+| M4 Slack Connect users passed the guest check | `is_stranger` / other-team users refused |
+| M5 notices wiped shared plan cards | notices go only to the clicker; only the invoker's cancel retires a card |
+| M6 list landed but reported failed | announcement failure keeps `applied` + undo + note |
+| M7 canvas gated on origin policy | service needs `serviceMayRead` on the canvas's own conversations |
+| L1–L4 | search authors not "known users"; hits verified public; names/labels neutralized; list share failure and provenance reported honestly |
+
 ## Next live checks
 
 1. Install the manifest in a sandbox workspace; confirm `chat.startStream` plan/task rendering and

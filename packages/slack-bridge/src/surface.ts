@@ -144,8 +144,19 @@ export class SlackSurface implements SurfacePort {
   async isGuest(userId: string): Promise<boolean> {
     try {
       const r = await must(this.api, 'users.info', { user: userId });
-      const u = r.user as { is_restricted?: boolean; is_ultra_restricted?: boolean };
-      return Boolean(u.is_restricted || u.is_ultra_restricted);
+      const u = r.user as {
+        is_restricted?: boolean;
+        is_ultra_restricted?: boolean;
+        is_stranger?: boolean;
+        team_id?: string;
+      };
+      // Guests, and members of another org reaching us through Slack Connect (M4).
+      return Boolean(
+        u.is_restricted ||
+        u.is_ultra_restricted ||
+        u.is_stranger ||
+        (u.team_id && u.team_id !== this.opts.teamId),
+      );
     } catch {
       return true;
     }
@@ -450,31 +461,53 @@ export class SlackSurface implements SurfacePort {
       throw err;
     }
 
-    await must(this.writeApi, 'slackLists.access.set', {
+    // Write access so the conversation can tick items done; the announcement carries provenance.
+    const shared = await must(this.writeApi, 'slackLists.access.set', {
       list_id: listId,
       access_level: 'write',
       channel_ids: [p.channel],
-    }).catch(() => undefined);
+    })
+      .then(() => true)
+      .catch(() => false);
     const file = await must(this.api, 'files.info', { file: listId }).catch(() => undefined);
     const listLink = (file?.file as { permalink?: string } | undefined)?.permalink;
     const announce = `✅ *${p.title}* — ${p.items.length} action item${p.items.length === 1 ? '' : 's'}${listLink ? ` · <${listLink}|Open the list>` : ''}\n${p.items.map((i) => `• ${line(i)}`).join('\n')}`;
-    const r = await must(this.writeApi, 'chat.postMessage', {
-      channel: p.channel,
-      ...thread,
-      ...messageBody(announce),
-    });
-    const ts = r.ts as string;
+    const shareNote = shared
+      ? undefined
+      : 'The list was created but could not be shared to the conversation.';
+    let ts: string | undefined;
+    try {
+      const r = await must(this.writeApi, 'chat.postMessage', {
+        channel: p.channel,
+        ...thread,
+        ...messageBody(announce),
+      });
+      ts = r.ts as string;
+    } catch (err) {
+      // The list exists now: never report "nothing landed" — keep the undo for its items (M6).
+      if (!slackErrorCode(err)) throw err;
+    }
+    const note = [shareNote, ts ? undefined : 'The announcement could not be posted.']
+      .filter(Boolean)
+      .join(' ');
     return {
       ...base,
       outcome: 'applied',
-      location: { channel: p.channel, ts, listId, ...(listLink ? { permalink: listLink } : {}) },
+      location: {
+        channel: p.channel,
+        ...(ts ? { ts } : {}),
+        listId,
+        ...(listLink ? { permalink: listLink } : {}),
+      },
       inverse: {
         op: 'delete-list-items',
         listId,
         itemIds,
-        announcement: { channel: p.channel, ts },
+        ...(ts ? { announcement: { channel: p.channel, ts } } : {}),
       },
-      provenancePersisted: req.provenance !== undefined,
+      // Provenance lives in the announcement's metadata; without it there is none.
+      provenancePersisted: Boolean(ts) && req.provenance !== undefined,
+      ...(note ? { note } : {}),
     };
   }
 
@@ -493,7 +526,14 @@ export class SlackSurface implements SurfacePort {
       limit: 20,
       sort: 'score',
     });
-    const results = (r.results as { messages?: SearchHit[] } | undefined)?.messages ?? [];
+    const raw = (r.results as { messages?: SearchHit[] } | undefined)?.messages ?? [];
+    // Trust but verify: keep only hits from public, non-DM conversations (L2).
+    const publicChannel = new Map<string, boolean>();
+    for (const c of new Set(raw.map((m) => m.channel_id).filter((c): c is string => Boolean(c)))) {
+      const info = await this.conversationInfo(c).catch(() => undefined);
+      publicChannel.set(c, Boolean(info && !info.isPrivate && !info.isIm));
+    }
+    const results = raw.filter((m) => m.channel_id && publicChannel.get(m.channel_id));
     const names = new Map<string, string>();
     const messages: CapturedMessage[] = results
       .filter(

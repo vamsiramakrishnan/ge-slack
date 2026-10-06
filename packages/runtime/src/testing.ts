@@ -52,6 +52,9 @@ export class RecordingSink implements TurnSink {
   async landed(l: LandedView) {
     this.events.push({ type: 'landed', value: l });
   }
+  async retire(text: string) {
+    this.events.push({ type: 'notice', value: { kind: 'info', text } });
+  }
   async notice(kind: NoticeKind, text: string) {
     this.events.push({ type: 'notice', value: { kind, text } });
   }

@@ -61,6 +61,8 @@ export interface StoredAnswer {
   text: string;
   provenance?: AnswerProvenance;
   principal: string;
+  /** False for answers that must stay private (e.g. workspace search). */
+  shareable?: boolean;
 }
 
 export interface LedgerEntry {

@@ -749,3 +749,86 @@ describe('next stage: rich cards, Lists, canvas sections, search', () => {
     expect(await s.isGuest('U1')).toBe(true);
   });
 });
+
+describe('stage-2 security regressions', () => {
+  it('treats Slack Connect strangers and other-team users as guests (M4)', async () => {
+    const mk = (user: Record<string, unknown>) =>
+      new SlackSurface(new FakeSlack({ 'users.info': () => ({ ok: true, user }) }), {
+        teamId: 'T1',
+      });
+    expect(await mk({ is_stranger: true }).isGuest('U1')).toBe(true);
+    expect(await mk({ team_id: 'T9' }).isGuest('U1')).toBe(true);
+    expect(await mk({ team_id: 'T1' }).isGuest('U1')).toBe(false);
+  });
+
+  it('notices on a clicked card go only to the clicker; cancel retires the card (M5)', async () => {
+    const posts: Array<Record<string, unknown>> = [];
+    const sink = new SlackTurnSink(
+      new FakeSlack(),
+      {
+        mode: 'ephemeral',
+        channel: 'C1',
+        userId: 'U9',
+        responseUrl: 'https://hooks.slack.com/x',
+        card: true,
+      },
+      async (_u, b) => {
+        posts.push(b);
+      },
+    );
+    await sink.notice('denied', 'Only <@U0ALEX> can approve this plan.');
+    expect(posts[0]).toMatchObject({ response_type: 'ephemeral', replace_original: false });
+    await sink.retire('Cancelled — nothing was changed.');
+    expect(posts[1]).toMatchObject({ replace_original: true });
+    expect(posts[1]!.response_type).toBeUndefined();
+  });
+
+  it('keeps undo when the list exists but the announcement fails (M6)', async () => {
+    const api = new FakeSlack({
+      'slackLists.create': () => ({
+        ok: true,
+        list_id: 'F0L',
+        list_metadata: { schema: [{ key: 'task', id: 'C1x' }] },
+      }),
+      'slackLists.items.create': () => ({ ok: true, item: { id: 'Rec1' } }),
+      'slackLists.access.set': () => ({ ok: false, error: 'restricted_action' }),
+      'chat.postMessage': () => ({ ok: false, error: 'not_in_channel' }),
+    });
+    const r = await new SlackSurface(api, { teamId: 'T1' }).actuate({
+      changeId: 'chg_list00002',
+      params: { kind: 'action-items', title: 'AI', items: [{ text: 'x' }], channel: 'C1A' },
+      provenance: prov,
+    });
+    expect(r).toMatchObject({
+      outcome: 'applied',
+      provenancePersisted: false,
+      inverse: { op: 'delete-list-items', itemIds: ['Rec1'] },
+    });
+    expect(r.inverse).not.toHaveProperty('announcement');
+    expect(r.note).toContain('could not be shared');
+    expect(r.note).toContain('announcement could not be posted');
+  });
+
+  it('drops search hits from private or DM conversations (L2)', async () => {
+    const api = new FakeSlack({
+      'assistant.search.context': () => ({
+        ok: true,
+        results: {
+          messages: [
+            { channel_id: 'C0PUB', message_ts: '1700000000.000001', content: 'public' },
+            { channel_id: 'G0PRIV', message_ts: '1700000000.000002', content: 'private' },
+          ],
+        },
+      }),
+      'conversations.info': (a) => ({
+        ok: true,
+        channel: { name: String(a.channel), is_private: a.channel === 'G0PRIV' },
+      }),
+    });
+    const ctx = await new SlackSurface(api, { teamId: 'T1' }).capture(
+      { kind: 'search', channel: 'C1', query: 'q', sinceMs: 1 },
+      { from: [], maxMessages: 10, actionToken: 't' },
+    );
+    expect(ctx.messages.map((m) => m.text)).toEqual(['public']);
+  });
+});

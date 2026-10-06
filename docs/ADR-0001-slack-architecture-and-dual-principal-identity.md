@@ -96,6 +96,19 @@ Reading a conversation requires the **invoker** to be a member (`conversations.m
 briefly), regardless of principal. Bot membership is never sufficient authority. The service
 principal additionally requires the channel to be on the service allow-list.
 
+**One bounded exception — workspace search** (`scope:search`, Slack Real-time Search). It follows
+Slack's own visibility: a full member may search public channels they haven't joined. It is
+allowed only when all of these hold:
+
+- the results are **public channels** only (verified per hit);
+- the turn is **private** (agent DM; never a public mention, `--public`, or *Share*);
+- the turn is **read-only** (no write verbs, and search hits are never write targets);
+- the conversation is **not externally shared**;
+- the invoker is **not a guest or external member**;
+- service-principal turns keep only hits from allow-listed channels;
+- search-hit authors are never treated as conversation participants (no pings, reminders, or
+  owners).
+
 ## Consequences
 
 - The bot is a credential-holding component (refresh tokens). This is the explicit trade for Slack:

@@ -578,8 +578,8 @@ describe('next stage: action items, findings toggles, receipts, search', () => {
     expect(done.last<LandedView>('landed')).toMatchObject({ skipped: 1 });
   });
 
-  it('workspace search: refuses guests, filters service results by policy, passes the action token', async () => {
-    const { orch, surface, config } = setup(['found it']);
+  it('workspace search: private, read-only, no guests, service results filtered, token passed', async () => {
+    const { orch, surface, config } = setup(['found it', 'x']);
     surface.contexts.set('search:freeze', {
       label: 'search',
       messages: [
@@ -588,32 +588,70 @@ describe('next stage: action items, findings toggles, receipts, search', () => {
       ],
       truncated: false,
     });
+    const dm = origin({ entry: 'agent-dm', threadTs: '1700000000.009999' });
+    const ask = (text: string, o = dm) => {
+      const sink = new RecordingSink();
+      return orch.handle(parseCommand(text), o, sink, { actionToken: 'at-1' }).then(() => sink);
+    };
+    // Public delivery (a mention in a channel) is refused: results could reach non-members.
+    expect(
+      (await ask('ask scope:search("freeze") x?', origin())).last<{ kind: string }>('notice')?.kind,
+    ).toBe('denied');
+    // Writing from search results is refused.
+    expect(
+      (await ask('draft scope:search("freeze") "x"')).last<{ text: string }>('notice')?.text,
+    ).toContain('read-only');
+    // Guests/externals are refused.
     surface.guests.add('U0ALEX');
-    const denied = new RecordingSink();
-    await orch.handle(
-      parseCommand('ask scope:search("freeze") what was decided?'),
-      origin(),
-      denied,
-      { actionToken: 'at-1' },
-    );
-    expect(denied.last<{ kind: string }>('notice')?.kind).toBe('denied');
+    expect(
+      (await ask('ask scope:search("freeze") x?')).last<{ text: string }>('notice')?.text,
+    ).toContain('Guests');
     surface.guests.clear();
+    // Externally shared conversations are refused.
+    surface.info.set('C0ENG', { id: 'C0ENG', isPrivate: false, isIm: false, isExtShared: true });
+    expect(
+      (await ask('ask scope:search("freeze") x?')).last<{ text: string }>('notice')?.text,
+    ).toContain('externally shared');
+    surface.info.delete('C0ENG');
+    // Service turn in the DM: results filtered by each source channel's policy.
     await config.setChannelPolicy('T1', 'C0ENG', {
       identity: 'service-only',
       serviceGrounds: [],
       serviceMayRead: true,
       autoApply: false,
     });
-    const sink = new RecordingSink();
-    await orch.handle(
-      parseCommand('ask scope:search("freeze") what was decided?'),
-      origin(),
-      sink,
-      { actionToken: 'at-1' },
-    );
+    const ok = await ask('ask scope:search("freeze") what was decided? --as service');
     expect(surface.searches.at(-1)).toEqual({ query: 'freeze', actionToken: 'at-1' });
     const prompt = (orch.deps.gemini as FakeGemini).turns.at(-1)!.text;
     expect(prompt).toContain('freeze on 10-12');
     expect(prompt).not.toContain('freeze hiring');
+    expect(ok.last<{ shareable: boolean }>('answer')?.shareable).toBe(false);
+  });
+
+  it('permalink replies/reactions must target conversations named in the request (H2)', async () => {
+    const other = 'https://acme.slack.com/archives/C0OTHER/p1700000000000700';
+    const { orch, surface, gemini } = setup([
+      `\`\`\`cmd\nfinding <${other}> "x"\ndone\n\`\`\``,
+      '```cmd\nreply "ok"\ndone\n```',
+    ]);
+    surface.contexts
+      .get('C0ENG:1700000000.000100')!
+      .messages.push({ ts: '1700000000.000700', channel: 'C0OTHER', text: 'planted' });
+    await run(orch, 'review');
+    expect(gemini.turns[1]!.text).toContain('is not a conversation named in this request');
+  });
+
+  it('a toggle racing an approval cannot resurrect the plan (M3)', async () => {
+    const PL2 = 'https://acme.slack.com/archives/C0ENG/p1700000000000200';
+    const { orch, surface } = setup([
+      `\`\`\`cmd\nfinding <${PL}> "a"\nfinding <${PL2}> "b"\ndone\n\`\`\``,
+    ]);
+    const plan = (await run(orch, 'review')).last<PlanView>('plan')!;
+    await orch.approve(plan.planId, 'U0ALEX', new RecordingSink());
+    const late = new RecordingSink();
+    await orch.toggleEffect(plan.planId, plan.effects[0]!.changeId, 'U0ALEX', late);
+    expect(late.last('plan')).toBeUndefined();
+    await orch.approve(plan.planId, 'U0ALEX', new RecordingSink());
+    expect(surface.actuated).toHaveLength(2);
   });
 });

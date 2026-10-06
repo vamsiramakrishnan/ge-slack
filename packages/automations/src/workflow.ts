@@ -58,6 +58,7 @@ export class CollectingSink implements TurnSink {
   }
   async executing() {}
   async landed() {}
+  async retire() {}
   async notice(kind: Parameters<TurnSink['notice']>[0], text: string) {
     if (kind !== 'info') this.error = text.slice(0, 500);
     else if (!this.text) this.text = text;

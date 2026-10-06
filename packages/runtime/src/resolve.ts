@@ -125,6 +125,8 @@ export function resolveGrounds(
 
 /** Which write kinds each verb may use (the per-turn capability signature). */
 export function kindsFor(verb: Intent, scope: ResolvedScope): ActuationKind[] {
+  // Workspace search is read-only: nothing may be written from its results.
+  if (scope.kind === 'search') return [];
   switch (verb) {
     case 'review':
       return ['reply', 'react'];

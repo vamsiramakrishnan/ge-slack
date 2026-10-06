@@ -232,6 +232,8 @@ export interface TurnSink {
   executing(p: PlanView): Promise<void>;
   landed(l: LandedView): Promise<void>;
   notice(kind: NoticeKind, text: string): Promise<void>;
+  /** The invoker closed the card (cancel / dry run): replace it with a final line. */
+  retire(text: string): Promise<void>;
 }
 
 export interface LinkStarter {

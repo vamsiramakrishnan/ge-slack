@@ -165,6 +165,9 @@ export function compileEffect(effect: CmdEffect, line: string, ctx: CompileConte
         if (!msgOk(effect.target.channel, effect.target.ts)) {
           return err('that permalink is not a message from the captured context');
         }
+        if (!channelOk(effect.target.channel)) {
+          return err(`<#${effect.target.channel}> is not a conversation named in this request`);
+        }
         const sev = effect.severity ? ` · ${effect.severity}` : '';
         const body =
           effect.severity !== undefined || line.trimStart().startsWith('finding')
@@ -239,6 +242,9 @@ export function compileEffect(effect: CmdEffect, line: string, ctx: CompileConte
     case 'react':
       if (!msgOk(effect.target.channel, effect.target.ts)) {
         return err('that permalink is not a message from the captured context');
+      }
+      if (!channelOk(effect.target.channel)) {
+        return err(`<#${effect.target.channel}> is not a conversation named in this request`);
       }
       params = {
         kind: 'react',
