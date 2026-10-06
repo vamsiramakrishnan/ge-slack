@@ -10,6 +10,7 @@ import {
   renderInvocation,
   type ActuationParams,
   type ActuationRequest,
+  type CmdEffect,
   type CmdLine,
   type CommandPlan,
   type Invocation,
@@ -23,6 +24,7 @@ import { collectStream, contentHash, type TokenSource } from '@ge-slack/gemini-c
 import { IdentityRevokedError } from '@ge-slack/identity';
 import {
   StreamSanitizer,
+  compileActionItems,
   compileEffect,
   sanitizeOutbound,
   type CompiledEffect,
@@ -86,6 +88,8 @@ type Turn = {
 
 export interface RunOptions {
   signal?: AbortSignal;
+  /** Slack's per-event action token (enables Real-time Search). Never persisted. */
+  actionToken?: string;
 }
 
 export type HandleResult = { kind: 'compose' } | { kind: 'done' };
@@ -140,7 +144,7 @@ export class Orchestrator {
     opts: RunOptions = {},
   ): Promise<void> {
     try {
-      const turn = await this.admit(inv, origin, sink);
+      const turn = await this.admit(inv, origin, sink, opts);
       if (!turn) return;
       if (opts.signal) turn.signal = opts.signal;
       warnings.push(...turn.grounds.warnings);
@@ -177,7 +181,12 @@ export class Orchestrator {
 
   // ------------------------------------------------------------------ admission
 
-  private async admit(inv: Invocation, origin: Origin, sink: TurnSink): Promise<Turn | undefined> {
+  private async admit(
+    inv: Invocation,
+    origin: Origin,
+    sink: TurnSink,
+    opts: RunOptions = {},
+  ): Promise<Turn | undefined> {
     const { surface, config, identity } = this.deps;
     const scope = resolveScope(inv, origin);
     if ('error' in scope) {
@@ -278,14 +287,38 @@ export class Orchestrator {
     };
 
     await sink.begin(this.title(inv, scope, info?.name));
-    await sink.task({ id: 'capture', title: 'Reading the conversation', status: 'in_progress' });
+    if (scope.kind === 'search' && opts.actionToken && (await surface.isGuest(origin.userId))) {
+      await sink.notice(
+        'denied',
+        "Guests can't search the workspace. Ask in a channel you're in instead.",
+      );
+      return undefined;
+    }
+    await sink.task({
+      id: 'capture',
+      title: scope.kind === 'search' ? 'Searching Slack' : 'Reading the conversation',
+      status: 'in_progress',
+    });
     let ctx: CapturedContext | undefined;
     if (scope.kind !== 'none') {
       ctx = await surface.capture(scope, {
         from: inv.from,
         maxMessages: this.deps.maxMessages ?? 200,
-        ...(inv.scope?.kind === 'search' ? { search: inv.scope.query } : {}),
+        ...(scope.kind === 'search' ? { search: scope.query } : {}),
+        ...(scope.kind === 'search' && opts.actionToken ? { actionToken: opts.actionToken } : {}),
       });
+      if (scope.kind === 'search' && principal.kind === 'service') {
+        // The service may only read channels allow-listed for it, wherever search found them.
+        const allowed = new Map<string, boolean>();
+        const kept = [];
+        for (const m of ctx.messages) {
+          const c = m.channel ?? ctx.channel ?? '';
+          if (!allowed.has(c))
+            allowed.set(c, (await config.channelPolicy(origin.teamId, c)).serviceMayRead);
+          if (allowed.get(c)) kept.push(m);
+        }
+        ctx = { ...ctx, messages: kept };
+      }
       await sink.task({
         id: 'capture',
         title: `Read ${ctx.messages.length} message${ctx.messages.length === 1 ? '' : 's'}${ctx.truncated ? ' (most recent)' : ''}`,
@@ -724,6 +757,18 @@ export class Orchestrator {
       ]);
       const errors = [...program.errors];
       const effects: CompiledEffect[] = [];
+      const compileCtx = {
+        scope: turn.scope,
+        ...(origin.channelId ? { originChannel: origin.channelId } : {}),
+        allowedChannels: turn.allowedChannels,
+        knownUsers,
+        knownMessages,
+        now: this.now(),
+      };
+      const actionItems: Array<{
+        effect: Extract<CmdEffect, { kind: 'action-item' }>;
+        line: string;
+      }> = [];
       for (const line of program.lines) {
         if (line.verb !== 'effect') continue;
         if (!kinds.includes(effectKind(line.effect))) {
@@ -732,14 +777,16 @@ export class Orchestrator {
           );
           continue;
         }
-        const c = compileEffect(line.effect, line.line, {
-          scope: turn.scope,
-          ...(origin.channelId ? { originChannel: origin.channelId } : {}),
-          allowedChannels: turn.allowedChannels,
-          knownUsers,
-          knownMessages,
-          now: this.now(),
-        });
+        if (line.effect.kind === 'action-item') {
+          actionItems.push({ effect: line.effect, line: line.line });
+          continue;
+        }
+        const c = compileEffect(line.effect, line.line, compileCtx);
+        if (c.ok) effects.push(c.effect);
+        else errors.push(c.error);
+      }
+      if (actionItems.length) {
+        const c = compileActionItems(actionItems, compileCtx, `Action items — ${ctx.label}`);
         if (c.ok) effects.push(c.effect);
         else errors.push(c.error);
       }
@@ -862,8 +909,11 @@ export class Orchestrator {
         ? 'Dry run — nothing will be applied'
         : `Gemini wants to make ${p.effects.length} change${p.effects.length === 1 ? '' : 's'}`,
       grammar: renderInvocation(p.invocation),
+      verb: p.invocation.verb,
       effects: p.effects.map((e, index) => ({
         index: index + 1,
+        changeId: e.changeId,
+        skipped: (p.skipped ?? []).includes(e.changeId),
         kind: e.params.kind,
         label: e.label,
         preview: e.preview,
@@ -978,7 +1028,41 @@ export class Orchestrator {
       kind: resolved.principal.kind,
       label: principalLabel(resolved.principal),
     };
+    const skipped = new Set(p.skipped ?? []);
+    if (skipped.size >= p.effects.length) {
+      await sink.notice('info', 'Every change was skipped — nothing was applied.');
+      return;
+    }
+    await sink.executing(this.planView(p, badge));
     await this.apply(p, resolved.identity, badge, sink, { approval: 'human', approvedBy: userId });
+  }
+
+  /** Tick/untick one change on a pending plan (review findings). Invoker only; re-renders the card. */
+  async toggleEffect(
+    planId: string,
+    changeId: string,
+    userId: string,
+    sink: TurnSink,
+  ): Promise<void> {
+    const p = await this.deps.stores.getPlan(planId);
+    if (!p || p.expiresAt < this.now().getTime()) {
+      await sink.notice('info', 'This plan expired — run it again.');
+      return;
+    }
+    if (p.invokerId !== userId) {
+      await sink.notice('denied', `Only <@${p.invokerId}> can change this plan.`);
+      return;
+    }
+    if (!p.effects.some((e) => e.changeId === changeId)) return;
+    const skipped = new Set(p.skipped ?? []);
+    if (skipped.has(changeId)) skipped.delete(changeId);
+    else skipped.add(changeId);
+    const next = { ...p, skipped: [...skipped] };
+    await this.deps.stores.savePlan(next, this.now().getTime());
+    const kind = p.identity.startsWith('service:') ? 'service' : 'user';
+    await sink.plan(
+      this.planView(next, { kind, label: p.identity.replace(/^(user|service):/, '') }),
+    );
   }
 
   async cancel(planId: string, userId: string, sink: TurnSink): Promise<void> {
@@ -999,10 +1083,12 @@ export class Orchestrator {
     approval: { approval: 'human' | 'auto'; approvedBy?: string },
   ): Promise<void> {
     const results: LandedView['results'] = [];
+    const skipped = new Set(p.skipped ?? []);
     const sources = p.sources
       .slice(0, 20)
       .map((s) => ({ title: s.title, ...(s.uri ? { uri: s.uri } : {}) }));
     for (const e of p.effects) {
+      if (skipped.has(e.changeId)) continue;
       const provenance: WriteProvenance = {
         changeId: e.changeId,
         agentId: p.agentId,
@@ -1050,6 +1136,7 @@ export class Orchestrator {
       });
       results.push({
         changeId: e.changeId,
+        kind: e.params.kind,
         label: e.label,
         outcome: res.outcome,
         ...(res.location?.permalink ? { permalink: res.location.permalink } : {}),
@@ -1058,9 +1145,16 @@ export class Orchestrator {
           res.inverse !== undefined &&
           res.inverse.op !== 'not-reversible',
         ...(res.error ? { error: res.error.message } : {}),
+        ...(res.note ? { note: res.note } : {}),
       });
     }
-    await sink.landed({ planId: p.id, results, identity: badge });
+    await sink.landed({
+      planId: p.id,
+      title: renderInvocation(p.invocation),
+      results,
+      identity: badge,
+      skipped: skipped.size,
+    });
   }
 
   /** Undo one landed change. Only its invoker or approver may; inverses are host-specific. */
@@ -1305,7 +1399,7 @@ function asWho(p: Principal): string {
 }
 
 function effectKind(e: { kind: string }): ActuationParams['kind'] {
-  return e.kind as ActuationParams['kind'];
+  return (e.kind === 'action-item' ? 'action-items' : e.kind) as ActuationParams['kind'];
 }
 
 function mergeSources(a: SourceRef[], b: SourceRef[]): SourceRef[] {

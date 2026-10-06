@@ -332,6 +332,9 @@ export class OutcomeSink implements TurnSink {
     this.lastMessage = c.message;
     return this.inner.connect(c);
   }
+  executing(p: Parameters<TurnSink['executing']>[0]) {
+    return this.inner.executing(p);
+  }
   landed(l: Parameters<TurnSink['landed']>[0]) {
     if (l.results.some((r) => r.outcome !== 'applied')) this.outcome = 'failed';
     return this.inner.landed(l);

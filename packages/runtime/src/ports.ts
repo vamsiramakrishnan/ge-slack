@@ -6,6 +6,7 @@ import type {
   Automation,
   ChannelPolicy,
   GroundSource,
+  Intent,
   Inverse,
   Invocation,
   Origin,
@@ -53,6 +54,8 @@ export type ResolvedScope =
   | { kind: 'message'; channel: string; ts: string }
   | { kind: 'canvas'; id: string; channel?: string }
   | { kind: 'dm'; channel: string }
+  /** Workspace search (Real-time Search) when an action token exists; else a keyword filter of `channel`. */
+  | { kind: 'search'; channel: string; query: string; sinceMs: number }
   | { kind: 'none' };
 
 export interface ConversationInfo {
@@ -70,8 +73,16 @@ export interface SurfacePort {
   isMember(channel: string, userId: string): Promise<boolean>;
   capture(
     scope: ResolvedScope,
-    opts: { from: string[]; maxMessages: number; search?: string },
+    opts: {
+      from: string[];
+      maxMessages: number;
+      search?: string;
+      /** Slack's per-event `action_token`, required for Real-time Search with a bot token. */
+      actionToken?: string;
+    },
   ): Promise<CapturedContext>;
+  /** Guests (single/multi-channel) can't search the workspace. */
+  isGuest(userId: string): Promise<boolean>;
   actuate(req: ActuationRequest): Promise<ActuationResult>;
   undo(inverse: Inverse): Promise<{ ok: boolean; message: string }>;
   /** Is this file a canvas, and which conversations is it shared in? (canvas membership gate) */
@@ -139,6 +150,9 @@ export interface AnswerView {
 
 export interface PlanEffectView {
   index: number;
+  changeId: string;
+  /** Unticked by the approver (review findings can be posted selectively). */
+  skipped: boolean;
   kind: ActuationRequest['params']['kind'];
   label: string;
   /** Short human preview of what will land. */
@@ -150,6 +164,7 @@ export interface PlanEffectView {
 
 export interface PlanView {
   planId: string;
+  verb: Intent;
   title: string;
   grammar: string;
   effects: PlanEffectView[];
@@ -183,15 +198,20 @@ export interface ConnectView {
 
 export interface LandedView {
   planId: string;
+  title: string;
   results: Array<{
     changeId: string;
+    kind: ActuationRequest['params']['kind'];
     label: string;
     outcome: ActuationResult['outcome'];
     permalink?: string;
     undoable: boolean;
     error?: string;
+    note?: string;
   }>;
   identity: IdentityBadge;
+  /** Findings the approver chose not to post. */
+  skipped: number;
 }
 
 export type NoticeKind = 'info' | 'warning' | 'error' | 'policy' | 'denied' | 'clarify';
@@ -208,6 +228,8 @@ export interface TurnSink {
   plan(p: PlanView): Promise<void>;
   automationPlan(p: AutomationPlanView): Promise<void>;
   connect(c: ConnectView): Promise<void>;
+  /** Approved: the card switches to a live receipt (every change in progress). */
+  executing(p: PlanView): Promise<void>;
   landed(l: LandedView): Promise<void>;
   notice(kind: NoticeKind, text: string): Promise<void>;
 }

@@ -444,9 +444,12 @@ describe('blocks', () => {
       planId: 'p1',
       title: 'Gemini wants to make 1 change',
       grammar: 'draft "x"',
+      verb: 'draft',
       effects: [
         {
           index: 1,
+          changeId: 'chg_x1234567',
+          skipped: false,
           kind: 'reply',
           label: 'Reply in thread',
           preview: 'hi',
@@ -466,5 +469,283 @@ describe('blocks', () => {
     expect(s).toContain('only <@U0ALEX> can approve');
     expect(s).toContain('ge_approve');
     expect(s).toContain('ge_edit');
+  });
+});
+
+describe('next stage: rich cards, Lists, canvas sections, search', () => {
+  const view = (verb: 'review' | 'draft', n = 2) => ({
+    planId: 'p1',
+    verb,
+    title: 't',
+    grammar: 'review',
+    effects: Array.from({ length: n }, (_, i) => ({
+      index: i + 1,
+      changeId: `chg_${i}aaaaaaaa`,
+      skipped: i === 1,
+      kind: 'reply' as const,
+      label: 'Reply in thread',
+      preview: `🔎 *Finding · ${i ? 'low' : 'high'}* issue ${i}`,
+      approvalClass: 'in-conversation' as const,
+      reversible: true,
+      line: `finding <x> "issue ${i}"`,
+    })),
+    identity: { kind: 'user' as const, label: 'alex@acme.com' },
+    invokerId: 'U0ALEX',
+    steps: [],
+    dryRun: false,
+    expiresAt: '2026-10-05T10:30:00Z',
+    sources: [],
+  });
+
+  it('renders review findings as a data_table with per-row toggles, and a classic fallback', async () => {
+    const { planBlocks } = await import('./blocks.js');
+    const rich = planBlocks(view('review'), { rich: true });
+    const table = rich.find((b) => b.type === 'data_table') as {
+      rows: Array<Array<Record<string, unknown>>>;
+    };
+    expect(table.rows).toHaveLength(3);
+    expect(table.rows[1]![1]).toEqual({ type: 'raw_text', text: 'high' });
+    expect(table.rows[2]![3]).toMatchObject({
+      type: 'action_cell',
+      element: { action_id: 'ge_finding_toggle_2', value: 'p1:chg_1aaaaaaaa' },
+    });
+    expect(JSON.stringify(rich)).toContain('Post 1 finding');
+    const classic = planBlocks(view('review'), { rich: false });
+    expect(JSON.stringify(classic)).not.toContain('data_table');
+    expect(JSON.stringify(classic)).toContain('ge_finding_toggle_1');
+  });
+
+  it('retries with classic blocks when Slack rejects rich ones', async () => {
+    const { withRichFallback } = await import('./sink.js');
+    const sent: boolean[] = [];
+    await withRichFallback(
+      (o) => [{ rich: o.rich }],
+      async (blocks) => {
+        sent.push(Boolean((blocks[0] as { rich: boolean }).rich));
+        if (sent.length === 1) throw new Error('response_url failed (400): invalid_blocks');
+      },
+    );
+    expect(sent).toEqual([true, false]);
+    await expect(
+      withRichFallback(
+        () => [],
+        async () => Promise.reject(new Error('channel_not_found')),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('clicked cards become a live plan-block receipt without changing visibility', async () => {
+    const posts: Array<Record<string, unknown>> = [];
+    const sink = new SlackTurnSink(
+      new FakeSlack(),
+      {
+        mode: 'ephemeral',
+        channel: 'C1',
+        userId: 'U0ALEX',
+        responseUrl: 'https://hooks.slack.com/x',
+        card: true,
+      },
+      async (_u, b) => {
+        posts.push(b);
+      },
+    );
+    await sink.executing(view('draft', 1));
+    await sink.landed({
+      planId: 'p1',
+      title: 'draft "x"',
+      results: [
+        {
+          changeId: 'chg_0aaaaaaaa',
+          kind: 'reply',
+          label: 'Reply in thread',
+          outcome: 'applied',
+          permalink: 'https://acme.slack.com/archives/C1/p1',
+          undoable: true,
+        },
+      ],
+      identity: { kind: 'user', label: 'alex@acme.com' },
+      skipped: 0,
+    });
+    expect(posts).toHaveLength(2);
+    for (const p of posts) {
+      expect(p.response_type).toBeUndefined();
+      expect(p.replace_original).toBe(true);
+    }
+    const plan = (posts[1]!.blocks as Array<Record<string, unknown>>).find(
+      (b) => b.type === 'plan',
+    ) as { tasks: Array<Record<string, unknown>> };
+    expect(plan.tasks[0]).toMatchObject({ status: 'complete', output: { type: 'rich_text' } });
+    expect(JSON.stringify(posts[1])).toContain('ge_undo');
+  });
+
+  const items = {
+    changeId: 'chg_list00001',
+    params: {
+      kind: 'action-items' as const,
+      title: 'Action items — thread',
+      items: [{ text: 'Raise TTL', owner: 'U0MAYA', due: '2026-10-09' }, { text: 'Postmortem' }],
+      channel: 'C1A',
+      threadTs: '1700000000.000100',
+    },
+    provenance: prov,
+  };
+
+  it('creates a Slack List with typed fields, shares and announces it, with an undo inverse', async () => {
+    let n = 0;
+    const api = new FakeSlack({
+      'slackLists.create': () => ({
+        ok: true,
+        list_id: 'F0LIST',
+        list_metadata: {
+          schema: [
+            { key: 'task', id: 'Col1' },
+            { key: 'owner', id: 'Col2' },
+            { key: 'due', id: 'Col3' },
+            { key: 'done', id: 'Col4' },
+          ],
+        },
+      }),
+      'slackLists.items.create': () => ({ ok: true, item: { id: `Rec${++n}` } }),
+      'files.info': () => ({
+        ok: true,
+        file: { permalink: 'https://acme.slack.com/lists/T1/F0LIST' },
+      }),
+      'chat.postMessage': () => ({ ok: true, ts: '1800000000.000001' }),
+    });
+    const s = new SlackSurface(api, { teamId: 'T1', domain: 'acme' });
+    const r = await s.actuate(items);
+    expect(r).toMatchObject({
+      outcome: 'applied',
+      location: { listId: 'F0LIST', permalink: 'https://acme.slack.com/lists/T1/F0LIST' },
+      inverse: {
+        op: 'delete-list-items',
+        listId: 'F0LIST',
+        itemIds: ['Rec1', 'Rec2'],
+        announcement: { channel: 'C1A', ts: '1800000000.000001' },
+      },
+    });
+    const first = api.calls.find((c) => c.method === 'slackLists.items.create')!.args
+      .initial_fields as Array<Record<string, unknown>>;
+    expect(first).toEqual([
+      {
+        column_id: 'Col1',
+        rich_text: [
+          {
+            type: 'rich_text',
+            elements: [
+              { type: 'rich_text_section', elements: [{ type: 'text', text: 'Raise TTL' }] },
+            ],
+          },
+        ],
+      },
+      { column_id: 'Col2', user: ['U0MAYA'] },
+      { column_id: 'Col3', date: ['2026-10-09'] },
+    ]);
+    expect(api.methods()).toContain('slackLists.access.set');
+    const undo = await s.undo(r.inverse!);
+    expect(undo.ok).toBe(true);
+    expect(api.methods().slice(-2)).toEqual(['slackLists.items.deleteMultiple', 'chat.delete']);
+  });
+
+  it('falls back to a checklist (and says so) when Lists is unavailable', async () => {
+    const api = new FakeSlack({
+      'slackLists.create': () => ({ ok: false, error: 'lists_disabled_user_team' }),
+      'chat.postMessage': () => ({ ok: true, ts: '1800000000.000002' }),
+    });
+    const r = await new SlackSurface(api, { teamId: 'T1', domain: 'acme' }).actuate(items);
+    expect(r).toMatchObject({ outcome: 'applied', inverse: { op: 'delete-message' } });
+    expect(r.note).toContain('checklist');
+    expect(String(api.calls.at(-1)!.args.text)).toContain('☐ <@U0MAYA> Raise TTL — due 2026-10-09');
+  });
+
+  it('canvas edits by heading resolve exactly one section or change nothing', async () => {
+    const req = (heading: string) => ({
+      changeId: 'chg_canvas001',
+      params: {
+        kind: 'canvas-edit' as const,
+        canvasId: 'F1',
+        markdown: '## Status\nDone',
+        heading,
+      },
+    });
+    const one = new FakeSlack({
+      'canvases.sections.lookup': () => ({ ok: true, sections: [{ id: 'temp:C:1' }] }),
+    });
+    await new SlackSurface(one, { teamId: 'T1' }).actuate(req('Status'));
+    expect(one.calls.at(-1)).toMatchObject({
+      method: 'canvases.edit',
+      args: { changes: [{ operation: 'replace', section_id: 'temp:C:1' }] },
+    });
+    const two = new FakeSlack({
+      'canvases.sections.lookup': () => ({ ok: true, sections: [{ id: 'a' }, { id: 'b' }] }),
+    });
+    const r2 = await new SlackSurface(two, { teamId: 'T1' }).actuate(req('S'));
+    expect(r2).toMatchObject({ outcome: 'failed', error: { code: 'heading_ambiguous' } });
+    expect(two.methods()).not.toContain('canvases.edit');
+  });
+
+  it('reads full canvas markdown via canvases.getContent', async () => {
+    const api = new FakeSlack({
+      'canvases.getContent': () => ({ ok: true, content: '# Plan\n- [ ] ship' }),
+      'files.info': () => ({ ok: true, file: { title: 'Plan' } }),
+    });
+    const ctx = await new SlackSurface(api, { teamId: 'T1' }).capture(
+      { kind: 'canvas', id: 'F1' },
+      { from: [], maxMessages: 10 },
+    );
+    expect(ctx.canvas).toMatchObject({ title: 'Plan', markdown: '# Plan\n- [ ] ship' });
+    expect(ctx.truncated).toBe(false);
+  });
+
+  it('uses Real-time Search with the action token, else a labelled channel keyword filter', async () => {
+    const api = new FakeSlack({
+      'assistant.search.context': () => ({
+        ok: true,
+        results: {
+          messages: [
+            {
+              channel_id: 'C9',
+              channel_name: 'eng',
+              message_ts: '1700000000.000900',
+              content: 'freeze 10-12',
+              author_user_id: 'U1',
+              author_name: 'Maya',
+              permalink: 'https://acme.slack.com/archives/C9/p1700000000000900',
+            },
+          ],
+        },
+      }),
+      'conversations.history': () => ({
+        ok: true,
+        messages: [
+          { ts: '1700000000.000100', user: 'U1', text: 'the freeze' },
+          { ts: '1700000000.000200', user: 'U1', text: 'lunch' },
+        ],
+      }),
+      'conversations.info': () => ({ ok: true, channel: { name: 'general' } }),
+    });
+    const s = new SlackSurface(api, { teamId: 'T1', domain: 'acme' });
+    const scope = { kind: 'search' as const, channel: 'C1', query: 'freeze', sinceMs: 86_400_000 };
+    const found = await s.capture(scope, { from: [], maxMessages: 50, actionToken: 'tok' });
+    expect(api.calls[0]).toMatchObject({
+      method: 'assistant.search.context',
+      args: { action_token: 'tok', channel_types: ['public_channel'] },
+    });
+    expect(found.messages[0]).toMatchObject({
+      channel: 'C9',
+      ts: '1700000000.000900',
+      author: 'Maya in #eng',
+    });
+    const fallback = await s.capture(scope, { from: [], maxMessages: 50 });
+    expect(fallback.messages.map((m) => m.text)).toEqual(['the freeze']);
+    expect(fallback.label).toContain('workspace search works from @Gemini');
+  });
+
+  it('treats lookup failures as guests (fail closed)', async () => {
+    const s = new SlackSurface(
+      new FakeSlack({ 'users.info': () => ({ ok: false, error: 'user_not_found' }) }),
+      { teamId: 'T1' },
+    );
+    expect(await s.isGuest('U1')).toBe(true);
   });
 });

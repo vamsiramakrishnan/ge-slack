@@ -14,6 +14,7 @@ export const ActuationKindSchema = z.enum([
   'remind',
   'bookmark',
   'react',
+  'action-items',
 ]);
 export type ActuationKind = z.infer<typeof ActuationKindSchema>;
 
@@ -36,6 +37,8 @@ export const ActuationParamsSchema = z.discriminatedUnion('kind', [
     canvasId: z.string().min(1),
     markdown: z.string().min(1).max(100_000),
     sectionId: z.string().optional(),
+    /** Target the one section whose header contains this text (resolved by the bridge). */
+    heading: z.string().min(1).max(200).optional(),
   }),
   z.object({
     kind: z.literal('schedule'),
@@ -61,6 +64,30 @@ export const ActuationParamsSchema = z.discriminatedUnion('kind', [
     channel: Channel,
     ts: Ts,
     emoji: z.string().regex(/^[a-z0-9_+'-]{1,80}$/),
+  }),
+  z.object({
+    /** Owned action items → a Slack List (paid plans) or, failing that, a checklist reply. */
+    kind: z.literal('action-items'),
+    title: z.string().min(1).max(150),
+    items: z
+      .array(
+        z.object({
+          text: z.string().min(1).max(500),
+          owner: z
+            .string()
+            .regex(/^[UW][A-Z0-9]{2,}$/)
+            .optional(),
+          due: z
+            .string()
+            .regex(/^\d{4}-\d{2}-\d{2}$/)
+            .optional(),
+        }),
+      )
+      .min(1)
+      .max(50),
+    /** Conversation the list is shared to and where the fallback checklist lands. */
+    channel: Channel,
+    threadTs: Ts.optional(),
   }),
 ]);
 export type ActuationParams = z.infer<typeof ActuationParamsSchema>;
@@ -89,6 +116,13 @@ export const InverseSchema = z.discriminatedUnion('op', [
     ts: z.string(),
     emoji: z.string(),
   }),
+  z.object({
+    op: z.literal('delete-list-items'),
+    listId: z.string(),
+    itemIds: z.array(z.string()).min(1),
+    /** The thread message announcing the list, deleted with it. */
+    announcement: z.object({ channel: z.string(), ts: z.string() }).optional(),
+  }),
   z.object({ op: z.literal('not-reversible'), reason: z.string() }),
 ]);
 export type Inverse = z.infer<typeof InverseSchema>;
@@ -105,12 +139,15 @@ export const ActuationResultSchema = z.object({
       channel: z.string().optional(),
       ts: z.string().optional(),
       canvasId: z.string().optional(),
+      listId: z.string().optional(),
       permalink: z.string().optional(),
     })
     .optional(),
   inverse: InverseSchema.optional(),
   /** Was durable provenance actually attached (message metadata)? Never assumed. */
   provenancePersisted: z.boolean(),
+  /** Applied differently than planned, said plainly (e.g. "Lists unavailable — posted as a checklist"). */
+  note: z.string().max(300).optional(),
   error: z.object({ code: z.string(), message: z.string() }).optional(),
 });
 export type ActuationResult = z.infer<typeof ActuationResultSchema>;
@@ -132,6 +169,8 @@ export function approvalClassOf(p: ActuationParams, originChannel?: string): App
       return p.channel === originChannel ? 'in-conversation' : 'external';
     case 'remind':
       return 'personal';
+    case 'action-items':
+      return p.channel === originChannel ? 'in-conversation' : 'external';
     case 'canvas':
     case 'canvas-edit':
     case 'schedule':
@@ -148,6 +187,7 @@ export const KIND_LABELS: Record<ActuationKind, { emoji: string; label: string; 
   remind: { emoji: '🔔', label: 'Remind', undo: 'Cancel' },
   bookmark: { emoji: '🔖', label: 'Add bookmark', undo: 'Undo' },
   react: { emoji: '😀', label: 'Add reaction', undo: 'Undo' },
+  'action-items': { emoji: '✅', label: 'Add action items', undo: 'Undo' },
 };
 
 export interface AutoApplyContext {

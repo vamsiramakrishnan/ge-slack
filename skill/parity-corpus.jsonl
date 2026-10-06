@@ -19,3 +19,7 @@
 {"id": "two-fences", "program": "```cmd\ndone\n```\n```cmd\ndone\n```", "ok": false, "kinds": [], "reads": 0, "errors": 1, "done": false, "fenceError": "multiple-fences"}
 {"id": "unclosed-fence", "program": "```cmd\nreply \"x\"\ndone", "ok": false, "kinds": [], "reads": 0, "errors": 1, "done": false, "fenceError": "unclosed-fence"}
 {"id": "prose-around-fence", "program": "Here you go:\n```cmd\nreply \"hi\"\ndone\n```\nThanks", "ok": true, "kinds": ["reply"], "reads": 0, "errors": 0, "done": true}
+{"id": "notes-action-items", "program": "```cmd\nread thread\nreply \"Decisions: roll back TTL\"\naction <@U0MAYA> \"Raise cache TTL to 300s\" due=2026-10-09\naction \"Write the postmortem\"\ndone\n```", "ok": true, "kinds": ["reply", "action-item", "action-item"], "reads": 1, "errors": 0, "done": true}
+{"id": "action-bad-due", "program": "```cmd\naction <@U0MAYA> \"x\" due=next-week\naction\ndone\n```", "ok": false, "kinds": [], "reads": 0, "errors": 2, "done": true}
+{"id": "canvas-edit-heading", "program": "```cmd\ncanvas-edit F07ABC123 \"\"\"## Status\nShipped\"\"\" heading=\"Status\"\ndone\n```", "ok": true, "kinds": ["canvas-edit"], "reads": 0, "errors": 0, "done": true}
+{"id": "canvas-edit-both", "program": "```cmd\ncanvas-edit F07ABC123 \"\"\"x\"\"\" section=temp:C:1 heading=\"Status\"\ndone\n```", "ok": false, "kinds": [], "reads": 0, "errors": 1, "done": true}

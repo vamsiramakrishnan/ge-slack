@@ -56,6 +56,8 @@ export async function onSlash(c: Container, s: SlashInput): Promise<void> {
 }
 
 export interface MessageEventInput {
+  /** Slack's per-event `action_token` (enables Real-time Search). Used for this turn only. */
+  actionToken?: string;
   teamId: string;
   userId: string;
   channelId: string;
@@ -86,7 +88,10 @@ export async function onMention(
   if (parsed.kind === 'compose') return;
   const inv =
     parsed.kind === 'invoke' || parsed.kind === 'automate' ? parsed.invocation : undefined;
-  await c.orch.handle(parsed, origin, c.sinkFor(origin, inv), signal ? { signal } : {});
+  await c.orch.handle(parsed, origin, c.sinkFor(origin, inv), {
+    ...(signal ? { signal } : {}),
+    ...(e.actionToken ? { actionToken: e.actionToken } : {}),
+  });
 }
 
 /**
@@ -168,7 +173,10 @@ export async function onDirectMessage(
     contextual.kind === 'invoke' || contextual.kind === 'automate'
       ? contextual.invocation
       : undefined;
-  await c.orch.handle(contextual, origin, c.sinkFor(origin, inv), signal ? { signal } : {});
+  await c.orch.handle(contextual, origin, c.sinkFor(origin, inv), {
+    ...(signal ? { signal } : {}),
+    ...(e.actionToken ? { actionToken: e.actionToken } : {}),
+  });
 }
 
 // ------------------------------------------------------------------ composer

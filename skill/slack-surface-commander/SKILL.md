@@ -40,7 +40,8 @@ effects  reply "text"                     reply <permalink> "text"
          finding <permalink> "text" [severity=high|medium|low]
          post <#C…> "text"
          canvas "Title" """markdown"""
-         canvas-edit <canvas-id> """markdown""" [section=<id>]
+         canvas-edit <canvas-id> """markdown""" [section=<id> | heading="text"]
+         action <@U…> "item" [due=YYYY-MM-DD]      (one per item; all items become ONE list)
          schedule <#C…> <ISO-8601 with offset> "text"
          remind <@U…> <ISO-8601 with offset> "text"
          bookmark "Title" <https://…>
@@ -74,9 +75,9 @@ edge cases: [references/algebra.md](references/algebra.md).
 | Intent | Program shape |
 |---|---|
 | `review` | one `finding <permalink> "…" severity=…` per distinct issue, anchored on the message that contains it — see [patterns/review-findings.md](patterns/review-findings.md) |
-| `notes` | one `reply """…"""` with decisions + a markdown checklist `- [ ] <@U…> task — due …`; add `remind <@U…> <ISO> "…"` only when a due time is explicit — see [patterns/thread-to-notes.md](patterns/thread-to-notes.md) |
+| `notes` | one `reply """…"""` with the summary and decisions, then one `action <@U…> "task" [due=YYYY-MM-DD]` line per action item (they land together as a Slack List, or a checklist where Lists are unavailable — do not repeat them as a checklist in the reply); add `remind <@U…> <ISO> "…"` only when a due *time* is explicit — see [patterns/thread-to-notes.md](patterns/thread-to-notes.md) |
 | `draft` | `reply`, `post <#C…>`, `canvas`, or `schedule` — exactly as the plan says — see [patterns/digest-post.md](patterns/digest-post.md) |
-| `rewrite` | a `reply` containing the rewritten text (staged for the user to copy/approve); `canvas-edit <id> """…"""` when the scope is a canvas |
+| `rewrite` | a `reply` containing the rewritten text (staged for the user to copy/approve); `canvas-edit <id> """…""" heading="…"` when the scope is a canvas — target the section by a heading that appears in the canvas, never a guessed section id |
 | `ask` / `summarize` / `explain` | normally answered without this skill; if routed here, one `reply "…"` |
 
 ## Example
@@ -89,10 +90,9 @@ thread.
 reply """*Notes — cache incident*
 *Decisions*
 • Lower the cache TTL from 24h to 1h
-*Action items*
-- [ ] <@U0MAYA> change the cache TTL — due Fri 10-09 17:00 PT
-- [ ] <@U0LI> route cache alerts to #eng-oncall
 """
+action <@U0MAYA> "Change the cache TTL" due=2026-10-09
+action <@U0LI> "Route cache alerts to #eng-oncall"
 remind <@U0MAYA> 2026-10-09T17:00:00-07:00 "Cache TTL change (from #eng thread)"
 done
 ```

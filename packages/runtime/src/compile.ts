@@ -203,8 +203,12 @@ export function compileEffect(effect: CmdEffect, line: string, ctx: CompileConte
         canvasId: effect.canvasId,
         markdown: clean(effect.markdown),
         ...(effect.sectionId ? { sectionId: effect.sectionId } : {}),
+        ...(effect.heading ? { heading: effect.heading } : {}),
       };
       break;
+    case 'action-item':
+      // Single items are aggregated by compileActionItems(); never compiled alone.
+      return err('internal: action items are compiled together');
     case 'schedule': {
       if (!channelOk(effect.channel))
         return err(`<#${effect.channel}> is not a conversation named in this request`);
@@ -266,6 +270,8 @@ export function compileEffect(effect: CmdEffect, line: string, ctx: CompileConte
 function describe(p: ActuationParams): string {
   const l = KIND_LABELS[p.kind].label;
   switch (p.kind) {
+    case 'action-items':
+      return `${l} (${p.items.length}) “${mrkdwnEscape(p.title)}”`;
     case 'post':
       return `${l} in <#${p.channel}>`;
     case 'canvas':
@@ -297,5 +303,80 @@ function previewOf(p: ActuationParams): string {
       return p.link;
     case 'react':
       return `:${p.emoji}:`;
+    case 'action-items':
+      return preview(
+        p.items
+          .map(
+            (i) => `${i.owner ? `<@${i.owner}> ` : ''}${i.text}${i.due ? ` (due ${i.due})` : ''}`,
+          )
+          .join(' · '),
+      );
   }
+}
+
+/**
+ * `action` lines become ONE action-items effect (one list, one approval, one undo). Owners must be
+ * people who appeared in the turn; due dates must be real calendar dates.
+ */
+export function compileActionItems(
+  lines: Array<{ effect: Extract<CmdEffect, { kind: 'action-item' }>; line: string }>,
+  ctx: CompileContext,
+  title: string,
+): CompileResult {
+  const first = lines[0];
+  if (!first) return { ok: false, error: 'no action items' };
+  const errors: string[] = [];
+  const items = lines.flatMap(({ effect, line }) => {
+    if (effect.owner && !ctx.knownUsers.has(effect.owner)) {
+      errors.push(`${line}: <@${effect.owner}> did not appear in this conversation`);
+      return [];
+    }
+    if (effect.due && Number.isNaN(Date.parse(`${effect.due}T00:00:00Z`))) {
+      errors.push(`${line}: ${effect.due} is not a real date`);
+      return [];
+    }
+    return [
+      {
+        text: sanitizeOutbound(effect.text, ctx.knownUsers).slice(0, 500),
+        ...(effect.owner ? { owner: effect.owner } : {}),
+        ...(effect.due ? { due: effect.due } : {}),
+      },
+    ];
+  });
+  if (errors.length) return { ok: false, error: errors.join('\n') };
+  const s = ctx.scope;
+  const channel =
+    s.kind === 'thread' ||
+    s.kind === 'message' ||
+    s.kind === 'channel' ||
+    s.kind === 'dm' ||
+    s.kind === 'search'
+      ? s.channel
+      : ctx.originChannel;
+  if (!channel || !ctx.allowedChannels.has(channel)) {
+    return { ok: false, error: `${first.line}: action items need a conversation to attach to` };
+  }
+  const threadTs = s.kind === 'thread' || s.kind === 'message' ? s.ts : undefined;
+  const parsed = ActuationParamsSchema.safeParse({
+    kind: 'action-items',
+    title: sanitizeOutbound(title, ctx.knownUsers).slice(0, 150),
+    items,
+    channel,
+    ...(threadTs ? { threadTs } : {}),
+  });
+  if (!parsed.success)
+    return { ok: false, error: `${first.line}: ${parsed.error.issues[0]?.message ?? 'invalid'}` };
+  const p = parsed.data;
+  return {
+    ok: true,
+    effect: {
+      changeId: (ctx.newChangeId ?? (() => `chg_${randomUUID()}`))(),
+      params: p,
+      line: lines.map((l) => l.line).join('\n'),
+      label: describe(p),
+      preview: previewOf(p),
+      approvalClass: approvalClassOf(p, ctx.originChannel),
+      reversible: true,
+    },
+  };
 }

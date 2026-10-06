@@ -11,8 +11,19 @@ import type {
   ResolvedScope,
   SurfacePort,
 } from '@ge-slack/runtime';
-import { must, slackErrorCode, type SlackApi } from './slack-api.js';
+import { SlackApiError, must, slackErrorCode, type SlackApi } from './slack-api.js';
 import { provenanceFooter, markdownBlocks } from './blocks.js';
+
+interface SearchHit {
+  channel_id?: string;
+  channel_name?: string;
+  message_ts?: string;
+  content?: string;
+  author_user_id?: string;
+  author_name?: string;
+  is_author_bot?: boolean;
+  permalink?: string;
+}
 
 interface SlackMessage {
   ts: string;
@@ -129,6 +140,17 @@ export class SlackSurface implements SurfacePort {
     return ok;
   }
 
+  /** Guests (single/multi-channel) can't search the workspace. Fails closed. */
+  async isGuest(userId: string): Promise<boolean> {
+    try {
+      const r = await must(this.api, 'users.info', { user: userId });
+      const u = r.user as { is_restricted?: boolean; is_ultra_restricted?: boolean };
+      return Boolean(u.is_restricted || u.is_ultra_restricted);
+    } catch {
+      return true;
+    }
+  }
+
   async userEmail(userId: string): Promise<string | undefined> {
     const r = await must(this.api, 'users.info', { user: userId });
     const user = r.user as { profile?: { email?: string }; deleted?: boolean; is_bot?: boolean };
@@ -215,7 +237,7 @@ export class SlackSurface implements SurfacePort {
 
   async capture(
     scope: ResolvedScope,
-    opts: { from: string[]; maxMessages: number; search?: string },
+    opts: { from: string[]; maxMessages: number; search?: string; actionToken?: string },
   ): Promise<CapturedContext> {
     const filter = (ms: CapturedMessage[]) =>
       ms.filter(
@@ -227,6 +249,23 @@ export class SlackSurface implements SurfacePort {
     switch (scope.kind) {
       case 'none':
         return { label: 'no conversation', messages: [], truncated: false };
+      case 'search': {
+        if (opts.actionToken) {
+          const found = await this.search(scope.query, opts.actionToken, opts.from).catch(
+            () => undefined,
+          );
+          if (found) return found;
+        }
+        // No action token (slash commands) or search unavailable: keyword filter of this channel.
+        const inner = await this.capture(
+          { kind: 'channel', channel: scope.channel, sinceMs: scope.sinceMs },
+          { ...opts, search: scope.query },
+        );
+        return {
+          ...inner,
+          label: `${inner.label} · keyword “${scope.query.slice(0, 60)}” (workspace search works from @Gemini or the Gemini DM)`,
+        };
+      }
       case 'thread':
       case 'message': {
         const { messages, truncated } = await this.page(
@@ -282,7 +321,11 @@ export class SlackSurface implements SurfacePort {
         };
       }
       case 'canvas': {
-        // The Web API exposes canvas metadata, not its rendered markdown; capture what we can and say so.
+        // Full markdown via canvases.getContent; fall back to file metadata/preview if unavailable.
+        const content = await must(this.api, 'canvases.getContent', {
+          canvas_id: scope.id,
+          content_type: 'markdown',
+        }).catch(() => undefined);
         const r = await must(this.api, 'files.info', { file: scope.id });
         const f = r.file as {
           title?: string;
@@ -297,12 +340,186 @@ export class SlackSurface implements SurfacePort {
           canvas: {
             id: scope.id,
             title: f.title ?? f.name ?? 'Canvas',
-            markdown: f.plain_text ?? f.preview ?? '',
+            markdown:
+              typeof content?.content === 'string'
+                ? content.content
+                : (f.plain_text ?? f.preview ?? ''),
           },
-          truncated: !(f.plain_text ?? f.preview),
+          truncated: typeof content?.content !== 'string' && !(f.plain_text ?? f.preview),
         };
       }
     }
+  }
+
+  /**
+   * Action items → a Slack List (owner, due, done), shared to the conversation and announced in
+   * the thread. Lists are paid-plan only: on a definite Slack refusal we post the same items as a
+   * checklist and say so on the receipt. Undo deletes the items and the announcement (Slack has
+   * no list delete, so an empty list remains — stated plainly).
+   */
+  private async actionItems(
+    req: ActuationRequest,
+    base: { changeId: string; kind: 'action-items' },
+    messageBody: (text: string) => Record<string, unknown>,
+  ): Promise<ActuationResult> {
+    const p = req.params as Extract<ActuationRequest['params'], { kind: 'action-items' }>;
+    const thread = p.threadTs ? { thread_ts: p.threadTs } : {};
+    const line = (i: (typeof p.items)[number]) =>
+      `${i.owner ? `<@${i.owner}> ` : ''}${i.text}${i.due ? ` — due ${i.due}` : ''}`;
+
+    const postChecklist = async (note: string): Promise<ActuationResult> => {
+      const text = [`*${p.title}*`, ...p.items.map((i) => `☐ ${line(i)}`)].join('\n');
+      const r = await must(this.writeApi, 'chat.postMessage', {
+        channel: p.channel,
+        ...thread,
+        ...messageBody(text),
+      });
+      const ts = r.ts as string;
+      await this.ensureDomain();
+      const permalink = this.permalink(p.channel, ts, p.threadTs);
+      return {
+        ...base,
+        outcome: 'applied',
+        location: { channel: p.channel, ts, ...(permalink ? { permalink } : {}) },
+        inverse: { op: 'delete-message', channel: p.channel, ts },
+        provenancePersisted: req.provenance !== undefined,
+        note,
+      };
+    };
+
+    let listId: string;
+    const columns = new Map<string, string>();
+    try {
+      const created = await must(this.writeApi, 'slackLists.create', {
+        name: p.title,
+        schema: [
+          { key: 'task', name: 'Task', type: 'text', is_primary_column: true },
+          { key: 'owner', name: 'Owner', type: 'user', options: { format: 'single_entity' } },
+          { key: 'due', name: 'Due', type: 'date' },
+          { key: 'done', name: 'Done', type: 'checkbox' },
+        ],
+      });
+      listId = created.list_id as string;
+      const schema =
+        (created.list_metadata as { schema?: Array<{ key: string; id: string }> } | undefined)
+          ?.schema ?? [];
+      for (const c of schema) columns.set(c.key, c.id);
+      if (!listId || !columns.get('task'))
+        throw new SlackApiError('slackLists.create', 'missing_list_metadata');
+    } catch (err) {
+      if (slackErrorCode(err))
+        return postChecklist('Slack Lists isn’t available here — posted as a checklist instead.');
+      throw err;
+    }
+
+    const itemIds: string[] = [];
+    try {
+      for (const item of p.items) {
+        const fields: Array<Record<string, unknown>> = [
+          {
+            column_id: columns.get('task'),
+            rich_text: [
+              {
+                type: 'rich_text',
+                elements: [
+                  { type: 'rich_text_section', elements: [{ type: 'text', text: item.text }] },
+                ],
+              },
+            ],
+          },
+        ];
+        if (item.owner && columns.get('owner'))
+          fields.push({ column_id: columns.get('owner'), user: [item.owner] });
+        if (item.due && columns.get('due'))
+          fields.push({ column_id: columns.get('due'), date: [item.due] });
+        const r = await must(this.writeApi, 'slackLists.items.create', {
+          list_id: listId,
+          initial_fields: fields,
+        });
+        itemIds.push((r.item as { id: string }).id);
+      }
+    } catch (err) {
+      if (itemIds.length) {
+        await must(this.writeApi, 'slackLists.items.deleteMultiple', {
+          list_id: listId,
+          ids: itemIds,
+        }).catch(() => undefined);
+      }
+      if (slackErrorCode(err))
+        return postChecklist('Couldn’t fill the Slack List — posted as a checklist instead.');
+      throw err;
+    }
+
+    await must(this.writeApi, 'slackLists.access.set', {
+      list_id: listId,
+      access_level: 'write',
+      channel_ids: [p.channel],
+    }).catch(() => undefined);
+    const file = await must(this.api, 'files.info', { file: listId }).catch(() => undefined);
+    const listLink = (file?.file as { permalink?: string } | undefined)?.permalink;
+    const announce = `✅ *${p.title}* — ${p.items.length} action item${p.items.length === 1 ? '' : 's'}${listLink ? ` · <${listLink}|Open the list>` : ''}\n${p.items.map((i) => `• ${line(i)}`).join('\n')}`;
+    const r = await must(this.writeApi, 'chat.postMessage', {
+      channel: p.channel,
+      ...thread,
+      ...messageBody(announce),
+    });
+    const ts = r.ts as string;
+    return {
+      ...base,
+      outcome: 'applied',
+      location: { channel: p.channel, ts, listId, ...(listLink ? { permalink: listLink } : {}) },
+      inverse: {
+        op: 'delete-list-items',
+        listId,
+        itemIds,
+        announcement: { channel: p.channel, ts },
+      },
+      provenancePersisted: req.provenance !== undefined,
+    };
+  }
+
+  /** Real-time Search over public channels (bot token + the event's action_token). Never stored. */
+  private async search(
+    query: string,
+    actionToken: string,
+    from: string[],
+  ): Promise<CapturedContext> {
+    const r = await must(this.api, 'assistant.search.context', {
+      query: query.slice(0, 500),
+      action_token: actionToken,
+      channel_types: ['public_channel'],
+      content_types: ['messages'],
+      include_bots: false,
+      limit: 20,
+      sort: 'score',
+    });
+    const results = (r.results as { messages?: SearchHit[] } | undefined)?.messages ?? [];
+    const names = new Map<string, string>();
+    const messages: CapturedMessage[] = results
+      .filter(
+        (m) =>
+          m.channel_id &&
+          m.message_ts &&
+          (!from.length || (m.author_user_id && from.includes(m.author_user_id))),
+      )
+      .map((m) => {
+        if (m.author_user_id && m.author_name) names.set(m.author_user_id, m.author_name);
+        return {
+          ts: m.message_ts!,
+          channel: m.channel_id!,
+          ...(m.author_user_id ? { user: m.author_user_id } : {}),
+          ...(m.author_name
+            ? { author: `${m.author_name}${m.channel_name ? ` in #${m.channel_name}` : ''}` }
+            : {}),
+          text: m.content ?? '',
+          ...(m.permalink ? { permalink: m.permalink } : {}),
+        };
+      });
+    return {
+      label: `Slack search “${query.slice(0, 60)}” · ${messages.length} result${messages.length === 1 ? '' : 's'} (public channels)`,
+      messages,
+      truncated: Boolean(r.response_metadata?.next_cursor),
+    };
   }
 
   private async page(
@@ -418,13 +635,36 @@ export class SlackSurface implements SurfacePort {
             provenancePersisted: false,
           };
         }
-        case 'canvas-edit':
+        case 'canvas-edit': {
+          let sectionId = p.sectionId;
+          if (p.heading) {
+            // Resolve the heading to exactly one section; never guess between several.
+            const found = await must(this.api, 'canvases.sections.lookup', {
+              canvas_id: p.canvasId,
+              criteria: { section_types: ['any_header'], contains_text: p.heading },
+            });
+            const sections = (found.sections as Array<{ id: string }> | undefined) ?? [];
+            if (sections.length !== 1) {
+              return {
+                ...base,
+                outcome: 'failed',
+                provenancePersisted: false,
+                error: {
+                  code: sections.length ? 'heading_ambiguous' : 'heading_not_found',
+                  message: sections.length
+                    ? `${sections.length} sections match “${p.heading}”; nothing was changed.`
+                    : `No section heading contains “${p.heading}”; nothing was changed.`,
+                },
+              };
+            }
+            sectionId = sections[0]!.id;
+          }
           await must(this.writeApi, 'canvases.edit', {
             canvas_id: p.canvasId,
             changes: [
               {
                 operation: 'replace',
-                ...(p.sectionId ? { section_id: p.sectionId } : {}),
+                ...(sectionId ? { section_id: sectionId } : {}),
                 document_content: { type: 'markdown', markdown: p.markdown },
               },
             ],
@@ -439,6 +679,13 @@ export class SlackSurface implements SurfacePort {
             },
             provenancePersisted: false,
           };
+        }
+        case 'action-items':
+          return await this.actionItems(
+            req,
+            { changeId: req.changeId, kind: 'action-items' },
+            messageBody,
+          );
         case 'schedule':
         case 'remind': {
           let channel: string;
@@ -535,6 +782,18 @@ export class SlackSurface implements SurfacePort {
             name: inverse.emoji,
           });
           return { ok: true, message: 'Removed the reaction.' };
+        case 'delete-list-items':
+          await must(this.writeApi, 'slackLists.items.deleteMultiple', {
+            list_id: inverse.listId,
+            ids: inverse.itemIds,
+          });
+          if (inverse.announcement) {
+            await must(this.writeApi, 'chat.delete', inverse.announcement).catch(() => undefined);
+          }
+          return {
+            ok: true,
+            message: 'Removed the action items (the empty list remains; Slack has no list delete).',
+          };
         case 'not-reversible':
           return { ok: false, message: `Can't undo: ${inverse.reason}.` };
       }

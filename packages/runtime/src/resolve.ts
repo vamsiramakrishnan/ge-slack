@@ -45,8 +45,8 @@ export function resolveScope(inv: Invocation, origin: Origin): ResolvedScope | {
         if (!ch) return { error: 'scope:dm only works inside a DM.' };
         return { kind: 'dm', channel: ch };
       case 'search':
-        if (!ch) return { error: 'scope:search needs a channel to search in.' };
-        return { kind: 'channel', channel: ch, sinceMs: since };
+        if (!ch) return { error: 'scope:search needs a conversation to run from.' };
+        return { kind: 'search', channel: ch, query: s.query, sinceMs: since };
     }
   }
   if (origin.entry === 'agent-dm' || origin.entry === 'global-shortcut') return { kind: 'none' };
@@ -129,7 +129,7 @@ export function kindsFor(verb: Intent, scope: ResolvedScope): ActuationKind[] {
     case 'review':
       return ['reply', 'react'];
     case 'notes':
-      return ['reply', 'post', 'canvas', 'remind'];
+      return ['reply', 'post', 'canvas', 'remind', 'action-items'];
     case 'rewrite':
       return scope.kind === 'canvas' ? ['canvas-edit', 'reply'] : ['reply', 'post'];
     case 'draft':

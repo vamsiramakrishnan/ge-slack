@@ -542,3 +542,78 @@ describe('stop button', () => {
     expect(sink.last('answer')).toBeUndefined();
   });
 });
+
+describe('next stage: action items, findings toggles, receipts, search', () => {
+  it('aggregates action lines into ONE action-items effect with known owners only', async () => {
+    const { orch, gemini } = setup([
+      '```cmd\nreply "Decisions"\naction <@U0STRANGER> "x"\ndone\n```',
+      '```cmd\nreply "Decisions"\naction <@U0MAYA> "Raise TTL" due=2026-10-09\naction "Postmortem"\ndone\n```',
+    ]);
+    const sink = await run(orch, 'notes');
+    expect(gemini.turns[1]!.text).toContain('did not appear in this conversation');
+    const plan = sink.last<PlanView>('plan')!;
+    expect(plan.effects.map((e) => e.kind)).toEqual(['reply', 'action-items']);
+    expect(plan.effects[1]!.label).toContain('(2)');
+  });
+
+  it('lets only the invoker skip findings; approval applies the rest and reports skipped', async () => {
+    const PL2 = 'https://acme.slack.com/archives/C0ENG/p1700000000000200';
+    const { orch, surface } = setup([
+      `\`\`\`cmd\nfinding <${PL}> "No rollback" severity=high\nfinding <${PL2}> "Typo" severity=low\ndone\n\`\`\``,
+    ]);
+    const sink = await run(orch, 'review');
+    const plan = sink.last<PlanView>('plan')!;
+    expect(plan.verb).toBe('review');
+    const typo = plan.effects[1]!.changeId;
+    const other = new RecordingSink();
+    await orch.toggleEffect(plan.planId, typo, 'U0MAYA', other);
+    expect(other.last<{ kind: string }>('notice')?.kind).toBe('denied');
+    const s = new RecordingSink();
+    await orch.toggleEffect(plan.planId, typo, 'U0ALEX', s);
+    expect(s.last<PlanView>('plan')!.effects[1]!.skipped).toBe(true);
+    const done = new RecordingSink();
+    await orch.approve(plan.planId, 'U0ALEX', done);
+    expect(done.events.map((e) => e.type)).toContain('executing');
+    expect(surface.actuated).toHaveLength(1);
+    expect(done.last<LandedView>('landed')).toMatchObject({ skipped: 1 });
+  });
+
+  it('workspace search: refuses guests, filters service results by policy, passes the action token', async () => {
+    const { orch, surface, config } = setup(['found it']);
+    surface.contexts.set('search:freeze', {
+      label: 'search',
+      messages: [
+        { ts: '1700000000.000500', channel: 'C0ENG', user: 'U0MAYA', text: 'freeze on 10-12' },
+        { ts: '1700000000.000600', channel: 'C0HR', user: 'U0LI', text: 'freeze hiring' },
+      ],
+      truncated: false,
+    });
+    surface.guests.add('U0ALEX');
+    const denied = new RecordingSink();
+    await orch.handle(
+      parseCommand('ask scope:search("freeze") what was decided?'),
+      origin(),
+      denied,
+      { actionToken: 'at-1' },
+    );
+    expect(denied.last<{ kind: string }>('notice')?.kind).toBe('denied');
+    surface.guests.clear();
+    await config.setChannelPolicy('T1', 'C0ENG', {
+      identity: 'service-only',
+      serviceGrounds: [],
+      serviceMayRead: true,
+      autoApply: false,
+    });
+    const sink = new RecordingSink();
+    await orch.handle(
+      parseCommand('ask scope:search("freeze") what was decided?'),
+      origin(),
+      sink,
+      { actionToken: 'at-1' },
+    );
+    expect(surface.searches.at(-1)).toEqual({ query: 'freeze', actionToken: 'at-1' });
+    const prompt = (orch.deps.gemini as FakeGemini).turns.at(-1)!.text;
+    expect(prompt).toContain('freeze on 10-12');
+    expect(prompt).not.toContain('freeze hiring');
+  });
+});

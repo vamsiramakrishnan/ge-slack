@@ -18,6 +18,8 @@ export const ACTIONS = {
   disconnect: 'ge_disconnect',
   quickStart: 'ge_quick_start',
   related: 'ge_related',
+  /** Per-row Post/Skip on a review findings table; suffixed `_<n>` (unique per block). */
+  findingToggle: 'ge_finding_toggle',
   openPolicy: 'ge_open_policy',
 } as const;
 

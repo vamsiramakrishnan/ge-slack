@@ -259,6 +259,8 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
         userId: origin.userId,
         ...(origin.threadTs ? { threadTs: origin.threadTs } : {}),
         ...(origin.responseUrl ? { responseUrl: origin.responseUrl } : {}),
+        // Button clicks update the card they came from (approval card → live receipt).
+        ...(origin.entry === 'button' ? { card: true } : {}),
       },
       postResponse,
     );

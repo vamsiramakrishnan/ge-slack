@@ -31,6 +31,8 @@ export interface PendingPlan {
   contentHash: string;
   /** Principal that drafted the content (`user:…` / `service:…`). Approval must match it. */
   identity: string;
+  /** changeIds the approver unticked (review findings). */
+  skipped?: string[];
   /** Unattended run awaiting the owner (automation gate). */
   automationId?: string;
   dryRun: boolean;
@@ -82,8 +84,11 @@ export interface LedgerEntry {
 export class RuntimeStores {
   constructor(private readonly kv: KeyValueStore) {}
 
-  savePlan(p: PendingPlan) {
-    return this.kv.set(`plan/${p.id}`, p, { ttlMs: Math.max(1, p.expiresAt - p.createdAt) });
+  savePlan(p: PendingPlan, now = p.createdAt) {
+    // TTL counts from now so a re-save (e.g. a finding toggle) never extends the plan's life.
+    return this.kv.set(`plan/${p.id}`, p, {
+      ttlMs: Math.max(1, p.expiresAt - Math.min(now, p.expiresAt - 1)),
+    });
   }
   getPlan(id: string) {
     return this.kv.get<PendingPlan>(`plan/${id}`);

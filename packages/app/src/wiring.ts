@@ -33,6 +33,12 @@ function guard<T extends unknown[]>(name: string, fn: (...a: T) => Promise<void>
   };
 }
 
+/** Slack's per-event action token (Real-time Search). Read, never logged or stored. */
+function actionTokenOf(event: unknown): string | undefined {
+  const t = (event as { action_token?: unknown } | undefined)?.action_token;
+  return typeof t === 'string' && t.length > 0 ? t : undefined;
+}
+
 function actionValue(body: BlockAction): string {
   const a = body.actions[0] as { value?: string; selected_option?: { value: string } } | undefined;
   return a?.value ?? a?.selected_option?.value ?? '';
@@ -100,6 +106,7 @@ export function register(app: App, c: Container, botUserId: () => string | undef
           ts: event.ts,
           ...(event.thread_ts ? { threadTs: event.thread_ts } : {}),
           text: event.text,
+          ...(actionTokenOf(event) ? { actionToken: actionTokenOf(event)! } : {}),
         },
         botUserId(),
         signal,
@@ -138,6 +145,7 @@ export function register(app: App, c: Container, botUserId: () => string | undef
             ...(m.thread_ts ? { threadTs: m.thread_ts } : {}),
             text: m.text ?? '',
             ...(view ? { viewing: view } : {}),
+            ...(actionTokenOf(message) ? { actionToken: actionTokenOf(message)! } : {}),
           },
           signal,
         ),
@@ -306,6 +314,11 @@ export function register(app: App, c: Container, botUserId: () => string | undef
   onAction(ACTIONS.approve, (b) =>
     c.orch.approve(actionValue(b), b.user.id, c.sinkFor(clickOrigin(c, b))),
   );
+  onAction(new RegExp(`^${ACTIONS.findingToggle}_\\d+$`), (b) => {
+    const [planId, changeId] = actionValue(b).split(':');
+    if (!planId || !changeId) return Promise.resolve();
+    return c.orch.toggleEffect(planId, changeId, b.user.id, c.sinkFor(clickOrigin(c, b)));
+  });
   onAction(ACTIONS.cancel, (b) =>
     c.orch.cancel(actionValue(b), b.user.id, c.sinkFor(clickOrigin(c, b))),
   );

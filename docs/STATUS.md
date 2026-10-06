@@ -19,7 +19,8 @@ against live Slack or a live Gemini Enterprise engine.**
 | Automations: cron (TZ/DST), reaction + keyword triggers, auto-suspend, Workflow Builder steps | Implemented | unit-tested |
 | Bolt wiring, OAuth callback, cron endpoint, Firestore store | Implemented | handlers + routes unit-tested; Bolt event delivery and Firestore not exercised |
 | Skill bundles (planner + commander) + Python parity parsers | Implemented | Python tests + TS/Python parity corpus |
-| Canvas *reading* | Limited | Slack's Web API exposes canvas metadata, not full markdown; capture says when it's truncated |
+| Live receipts, findings `data_table`, Lists, canvas sections, Real-time Search | Implemented | unit-tested against a recording Slack API; `plan`/`data_table` acceptance via `chat.postMessage`/`response_url` is unverified live, so every rich card retries with classic blocks on `invalid_blocks` |
+| Canvas *reading* | Implemented | `canvases.getContent` (markdown); falls back to file preview |
 | `canvas-edit` undo | Not reversible | Slack doesn't expose prior section content; shown as such |
 
 ## Security review (2026-10-05)
@@ -56,4 +57,7 @@ written as an explicit escape.
 3. Configure the licensed service account; confirm a `service-only` channel answer.
 4. Mount both skills; run `draft` and `notes` end to end, then approve, undo, and check the App Home
    ledger.
+5. Confirm `plan` and `data_table` blocks render in `chat.postMessage` and `response_url` updates
+   (or that the classic fallback fires); create a List on a paid workspace and check the checklist
+   fallback on a free one; run `@Gemini ask scope:search("…")` and confirm guests are refused.
 5. Cloud Scheduler → `/cron/tick`; reaction and keyword triggers; a Workflow Builder step.

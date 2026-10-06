@@ -36,6 +36,7 @@ CMD_EFFECT_VERBS = (
     "remind",
     "bookmark",
     "react",
+    "action",
 )
 CMD_CONTROL_VERBS = ("done", "help")
 CMD_VERBS = CMD_READ_VERBS + CMD_EFFECT_VERBS + CMD_CONTROL_VERBS
@@ -51,7 +52,10 @@ EFFECT_VERB_TO_KIND = {
     "remind": "remind",
     "bookmark": "bookmark",
     "react": "react",
+    "action": "action-items",
 }
+
+_DUE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 
 # JS `\d` is ASCII-only; spell digits out so Python does not accept other Unicode digits.
 ISO = re.compile(
@@ -352,11 +356,31 @@ def parse_statement(line: str, toks: list) -> dict:
         cid = _at(pos, 0)
         markdown = _str(pos, 1)
         if not cid or cid["kind"] != "word" or not markdown:
-            return err('canvas-edit <canvas-id> """markdown""" [section=<id>]')
-        eff = {"kind": "canvas-edit", "canvasId": cid["text"], "markdown": markdown}
+            return err('canvas-edit <canvas-id> """markdown""" [section=<id> | heading="text"]')
         section = _prop(args, "section")
+        heading = _prop(args, "heading")
+        if section and heading:
+            return err("canvas-edit takes section= or heading=, not both")
+        eff = {"kind": "canvas-edit", "canvasId": cid["text"], "markdown": markdown}
         if section:
             eff["sectionId"] = section
+        if heading:
+            eff["heading"] = heading
+        return _effect(eff, line)
+
+    if verb == "action":
+        owner = _user_ref(_at(pos, 0))
+        text = _str(pos, 1) if owner else _str(pos, 0)
+        if not text:
+            return err('action <@person> "item" [due=YYYY-MM-DD]')
+        due = _prop(args, "due")
+        if due and not _DUE.match(due):
+            return err(f'action: due "{due}" must be YYYY-MM-DD')
+        eff = {"kind": "action-item", "text": text}
+        if owner:
+            eff["owner"] = owner
+        if due:
+            eff["due"] = due
         return _effect(eff, line)
 
     if verb == "schedule":

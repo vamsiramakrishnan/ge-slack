@@ -149,7 +149,89 @@ const CLASS_BADGE: Record<string, string> = {
   personal: ' · _personal_',
 };
 
-export function planBlocks(p: PlanView): Block[] {
+export interface RenderOptions {
+  /**
+   * Use Slack's newest blocks (`data_table`, `plan`). Senders retry with `rich: false` if Slack
+   * rejects them (`invalid_blocks`), so older clients/workspaces still get a usable card.
+   */
+  rich: boolean;
+}
+
+const isFindingsPlan = (p: PlanView) =>
+  p.verb === 'review' && p.effects.length > 1 && p.effects.every((e) => e.kind === 'reply');
+
+function richText(text: string, url?: string): Block {
+  return {
+    type: 'rich_text',
+    elements: [
+      {
+        type: 'rich_text_section',
+        elements: [url ? { type: 'link', url, text } : { type: 'text', text }],
+      },
+    ],
+  };
+}
+
+function findingText(preview: string): { severity: string; text: string } {
+  const m = /^🔎 \*Finding(?: · (high|medium|low))?\*\s*/.exec(preview);
+  return {
+    severity: m?.[1] ?? '—',
+    text: (m ? preview.slice(m[0].length) : preview).slice(0, 300) || '—',
+  };
+}
+
+/** Review findings as a sortable table, one Post/Skip toggle per row. */
+function findingsTable(p: PlanView, rich: boolean): Block[] {
+  if (rich) {
+    const header = ['#', 'Severity', 'Finding', 'Post?'].map((t) => ({
+      type: 'raw_text',
+      text: t,
+    }));
+    const rows = p.effects.slice(0, 200).map((e) => {
+      const f = findingText(e.preview);
+      return [
+        { type: 'raw_number', value: e.index, text: String(e.index) },
+        { type: 'raw_text', text: f.severity },
+        { type: 'raw_text', text: f.text },
+        {
+          type: 'action_cell',
+          element: {
+            type: 'button',
+            text: plain(e.skipped ? '✗ Skipped' : '✓ Post'),
+            action_id: `${ACTIONS.findingToggle}_${e.index}`,
+            value: `${p.planId}:${e.changeId}`,
+            ...(e.skipped ? {} : { style: 'primary' }),
+          },
+          fallback: { type: 'raw_text', text: e.skipped ? 'Skipped' : 'Post' },
+        },
+      ];
+    });
+    return [
+      {
+        type: 'data_table',
+        caption: `Review findings — tap a row's button to skip or include it`,
+        page_size: 10,
+        rows: [header, ...rows],
+      },
+    ];
+  }
+  return p.effects.slice(0, 20).map((e) => {
+    const f = findingText(e.preview);
+    return {
+      type: 'section',
+      text: mrkdwn(
+        `${e.skipped ? '~' : ''}*${e.index}.* _${f.severity}_ · ${esc(f.text)}${e.skipped ? '~' : ''}`,
+      ),
+      accessory: button(
+        e.skipped ? 'Include' : 'Skip',
+        `${ACTIONS.findingToggle}_${e.index}`,
+        `${p.planId}:${e.changeId}`,
+      ),
+    };
+  });
+}
+
+export function planBlocks(p: PlanView, opts: RenderOptions = { rich: true }): Block[] {
   const blocks: Block[] = [
     {
       type: 'section',
@@ -163,13 +245,17 @@ export function planBlocks(p: PlanView): Block[] {
     });
   }
   blocks.push({ type: 'divider' });
-  for (const e of p.effects.slice(0, 12)) {
-    blocks.push({
-      type: 'section',
-      text: mrkdwn(
-        `*${e.index}.* ${e.label}${CLASS_BADGE[e.approvalClass] ?? ''} · ${e.reversible ? 'reversible ↺' : '*not reversible*'}\n>${esc(e.preview)}`,
-      ),
-    });
+  if (isFindingsPlan(p)) {
+    blocks.push(...findingsTable(p, opts.rich));
+  } else {
+    for (const e of p.effects.slice(0, 12)) {
+      blocks.push({
+        type: 'section',
+        text: mrkdwn(
+          `*${e.index}.* ${e.label}${CLASS_BADGE[e.approvalClass] ?? ''} · ${e.reversible ? 'reversible ↺' : '*not reversible*'}\n>${esc(e.preview)}`,
+        ),
+      });
+    }
   }
   const program = p.effects.map((e) => e.line).join('\n');
   blocks.push({ type: 'section', text: mrkdwn(`\`\`\`${esc(program).slice(0, 2800)}\`\`\``) });
@@ -182,17 +268,18 @@ export function planBlocks(p: PlanView): Block[] {
       ),
     ],
   });
+  const included = p.effects.filter((e) => !e.skipped).length;
+  const approveLabel = isFindingsPlan(p)
+    ? `Post ${included} finding${included === 1 ? '' : 's'}`
+    : p.effects.length === 1
+      ? 'Approve'
+      : 'Approve all';
   blocks.push({
     type: 'actions',
     elements: p.dryRun
       ? [button('Close', ACTIONS.cancel, p.planId)]
       : [
-          button(
-            p.effects.length === 1 ? 'Approve' : 'Approve all',
-            ACTIONS.approve,
-            p.planId,
-            'primary',
-          ),
+          ...(included > 0 ? [button(approveLabel, ACTIONS.approve, p.planId, 'primary')] : []),
           button('Edit…', ACTIONS.edit, p.planId),
           button('Cancel', ACTIONS.cancel, p.planId, 'danger'),
         ],
@@ -200,32 +287,115 @@ export function planBlocks(p: PlanView): Block[] {
   return blocks.slice(0, MAX_BLOCKS);
 }
 
-export function landedBlocks(l: LandedView, invokerId: string): Block[] {
-  const lines = l.results.map((r) => {
-    const icon = r.outcome === 'applied' ? '✅' : r.outcome === 'uncertain' ? '❓' : '❌';
-    const where = r.permalink ? ` · <${r.permalink}|view>` : '';
-    const note =
-      r.outcome === 'uncertain'
-        ? ' — outcome unknown; check before retrying'
-        : r.error
-          ? ` — ${esc(r.error)}`
-          : '';
-    return { r, text: `${icon} ${r.label}${where}${note}` };
-  });
-  const blocks: Block[] = lines.map(({ r, text }) => ({
-    type: 'section',
-    text: mrkdwn(text),
-    ...(r.undoable ? { accessory: button('Undo', ACTIONS.undo, r.changeId) } : {}),
-  }));
-  blocks.push({
-    type: 'context',
-    elements: [
-      mrkdwn(
-        `✦ Applied by Gemini for <@${invokerId}> · ${identityLine(l.identity)} · see App Home → Recent changes`,
-      ),
-    ],
-  });
+type TaskStatus = 'pending' | 'in_progress' | 'complete' | 'error';
+
+/** The approval card, turned into a live receipt with Slack's native `plan` block. */
+function receipt(
+  planId: string,
+  phase: string,
+  title: string,
+  tasks: Array<{
+    id: string;
+    title: string;
+    status: TaskStatus;
+    output?: { text: string; url?: string };
+  }>,
+  footer: string,
+  undo: Array<{ changeId: string; label: string }>,
+  opts: RenderOptions,
+): Block[] {
+  const blocks: Block[] = [];
+  if (opts.rich) {
+    blocks.push({
+      type: 'plan',
+      // A new block_id per iteration, as Slack asks for updated plan blocks.
+      block_id: `ge_plan_${planId}_${phase}`.slice(0, 255),
+      title: title.slice(0, 200),
+      tasks: tasks.slice(0, 50).map((t) => ({
+        task_id: t.id,
+        title:
+          t.title
+            .replace(/<[^>]*\|([^>]*)>/g, '$1')
+            .replace(/<[^>]+>/g, '')
+            .slice(0, 200) || 'Change',
+        status: t.status,
+        ...(t.output ? { output: richText(t.output.text, t.output.url) } : {}),
+      })),
+    });
+  } else {
+    const icon: Record<TaskStatus, string> = {
+      pending: '○',
+      in_progress: '◐',
+      complete: '✅',
+      error: '❌',
+    };
+    blocks.push({ type: 'section', text: mrkdwn(`*✦ ${esc(title)}*`) });
+    for (const t of tasks.slice(0, 20)) {
+      blocks.push({
+        type: 'section',
+        text: mrkdwn(
+          `${icon[t.status]} ${t.title}${t.output ? ` · ${t.output.url ? `<${t.output.url}|${esc(t.output.text)}>` : esc(t.output.text)}` : ''}`,
+        ),
+      });
+    }
+  }
+  if (undo.length) {
+    blocks.push({
+      type: 'actions',
+      elements: undo.slice(0, 25).map((u, i) => button(`Undo ${i + 1}`, ACTIONS.undo, u.changeId)),
+    });
+  }
+  blocks.push({ type: 'context', elements: [mrkdwn(footer)] });
   return blocks.slice(0, MAX_BLOCKS);
+}
+
+export function executingBlocks(p: PlanView, opts: RenderOptions = { rich: true }): Block[] {
+  return receipt(
+    p.planId,
+    'executing',
+    `Applying ${p.effects.filter((e) => !e.skipped).length} change(s)…`,
+    p.effects
+      .filter((e) => !e.skipped)
+      .map((e) => ({ id: e.changeId, title: e.label, status: 'in_progress' as const })),
+    `${identityLine(p.identity)} · approved by <@${p.invokerId}>`,
+    [],
+    opts,
+  );
+}
+
+export function landedBlocks(
+  l: LandedView,
+  invokerId: string,
+  opts: RenderOptions = { rich: true },
+): Block[] {
+  const applied = l.results.filter((r) => r.outcome === 'applied').length;
+  const tasks = l.results.map((r) => ({
+    id: r.changeId,
+    title: r.label,
+    status: (r.outcome === 'applied' ? 'complete' : 'error') as TaskStatus,
+    output:
+      r.outcome === 'applied'
+        ? {
+            text: r.note ?? (r.permalink ? 'View' : 'Done'),
+            ...(r.permalink ? { url: r.permalink } : {}),
+          }
+        : {
+            text:
+              r.outcome === 'uncertain'
+                ? 'Outcome unknown — check before retrying'
+                : (r.error ?? 'Failed'),
+          },
+  }));
+  const skipped = l.skipped ? ` · ${l.skipped} skipped` : '';
+  return receipt(
+    l.planId,
+    'landed',
+    `Applied ${applied}/${l.results.length}${skipped} · ${l.title}`,
+    tasks,
+    `✦ Applied by Gemini for <@${invokerId}> · ${identityLine(l.identity)} · App Home → Recent changes`,
+    l.results.filter((r) => r.undoable).map((r) => ({ changeId: r.changeId, label: r.label })),
+    opts,
+  );
 }
 
 /** Footer attached to every message the bot lands (in addition to the metadata payload). */

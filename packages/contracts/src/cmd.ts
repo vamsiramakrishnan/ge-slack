@@ -31,7 +31,14 @@ export type CmdEffect =
     }
   | { kind: 'post'; channel: string; text: string }
   | { kind: 'canvas'; title: string; markdown: string }
-  | { kind: 'canvas-edit'; canvasId: string; markdown: string; sectionId?: string }
+  | {
+      kind: 'canvas-edit';
+      canvasId: string;
+      markdown: string;
+      sectionId?: string;
+      heading?: string;
+    }
+  | { kind: 'action-item'; text: string; owner?: string; due?: string }
   | { kind: 'schedule'; channel: string; at: string; text: string }
   | { kind: 'remind'; user: string; at: string; text: string }
   | { kind: 'bookmark'; title: string; link: string }
@@ -56,6 +63,7 @@ export const CMD_EFFECT_VERBS = [
   'remind',
   'bookmark',
   'react',
+  'action',
 ] as const;
 export const CMD_CONTROL_VERBS = ['done', 'help'] as const;
 export const CMD_VERBS = [...CMD_READ_VERBS, ...CMD_EFFECT_VERBS, ...CMD_CONTROL_VERBS];
@@ -71,6 +79,7 @@ export const EFFECT_VERB_TO_KIND: Record<(typeof CMD_EFFECT_VERBS)[number], Actu
   remind: 'remind',
   bookmark: 'bookmark',
   react: 'react',
+  action: 'action-items',
 };
 
 export type FenceResult =
@@ -290,9 +299,11 @@ export function parseStatement(line: string, toks: Tok[]): CmdLine {
     case 'canvas-edit': {
       const id = positional[0];
       const markdown = str(positional, 1);
-      if (!id || id.kind !== 'word' || !markdown)
-        return err('canvas-edit <canvas-id> """markdown""" [section=<id>]');
+      const usage = 'canvas-edit <canvas-id> """markdown""" [section=<id> | heading="text"]';
+      if (!id || id.kind !== 'word' || !markdown) return err(usage);
       const sectionId = prop(args, 'section');
+      const heading = prop(args, 'heading');
+      if (sectionId && heading) return err('canvas-edit takes section= or heading=, not both');
       return {
         verb: 'effect',
         effect: {
@@ -300,7 +311,22 @@ export function parseStatement(line: string, toks: Tok[]): CmdLine {
           canvasId: id.text,
           markdown,
           ...(sectionId ? { sectionId } : {}),
+          ...(heading ? { heading } : {}),
         },
+        line,
+      };
+    }
+    case 'action': {
+      // action <@owner> "text" [due=YYYY-MM-DD]  |  action "text" [due=…]
+      const owner = userRef(positional[0]);
+      const text = owner ? str(positional, 1) : str(positional, 0);
+      if (!text) return err('action <@person> "item" [due=YYYY-MM-DD]');
+      const due = prop(args, 'due');
+      if (due && !/^\d{4}-\d{2}-\d{2}$/.test(due))
+        return err(`action: due "${due}" must be YYYY-MM-DD`);
+      return {
+        verb: 'effect',
+        effect: { kind: 'action-item', text, ...(owner ? { owner } : {}), ...(due ? { due } : {}) },
         line,
       };
     }
@@ -395,7 +421,9 @@ export function renderCmdSignature(kinds: readonly ActuationKind[]): string {
       'reply "text" | reply <permalink> "text"   (also: finding <permalink> "text" [severity=…])',
     post: 'post <#channel> "text"',
     canvas: 'canvas "Title" """markdown"""',
-    'canvas-edit': 'canvas-edit <canvas-id> """markdown""" [section=<id>]',
+    'canvas-edit': 'canvas-edit <canvas-id> """markdown""" [section=<id> | heading="text"]',
+    'action-items':
+      'action <@person> "item" [due=YYYY-MM-DD]   (one line per item; together they become one list)',
     schedule: 'schedule <#channel> <ISO-8601 with offset> "text"',
     remind: 'remind <@person> <ISO-8601 with offset> "text"',
     bookmark: 'bookmark "Title" <https://…>',

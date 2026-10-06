@@ -54,13 +54,15 @@ docs don't fully specify.
   coercion ("Slack Connect channel → Gemini service") before submission.
 
 ### Durable artifacts
-- **Action items as a Slack List.** `notes` writes owners and due dates into a List with
-  `slackLists.create` / `slackLists.items.create`. Undo is `items.delete`. Lists require paid
-  plans; fall back to a checklist message. This replaces text checklists with a trackable artifact.
-- **Precise canvas edits.** Find the target section with `canvases.sections.lookup`
-  (`criteria.contains_text`, `section_types`), then make a one-operation `canvases.edit` on that
-  `section_id`. Read full canvas content with `canvases.getContent` **(unconfirmed)**; today we only
-  read metadata and preview.
+- **Action items as a Slack List.** `notes` emits `action <@owner> "task" [due=…]` lines, which
+  become one Slack List (Task · Owner · Due · Done), shared to the conversation (`write`) and
+  announced in the thread. Undo deletes the items and the announcement; Slack has no list delete,
+  so an empty list remains, and the receipt says so. Lists are paid-plan only: on a Slack refusal
+  the same items post as a checklist and the receipt notes the fallback.
+- **Precise canvas edits.** The executor writes `canvas-edit <id> """…""" heading="Status"`; the
+  bridge resolves it with `canvases.sections.lookup` (`section_types: ["any_header"]`,
+  `contains_text`) and edits only when exactly one section matches. Zero or several matches fail
+  with nothing changed. Canvases are read in full with `canvases.getContent` (markdown).
 - **Work Objects for plans and changes.** Post plans and ledger entries as
   `slack#/entities/task` Work Objects (`chat.postMessage` with `metadata.entities`). The flexpane
   (`entity_details_requested` → `entity.presentDetails`) shows status, principal and sources, with
@@ -111,7 +113,7 @@ docs don't fully specify.
 
 | Release | Scope |
 |---|---|
-| **Now** (this change) | §1: stop button, provenance on streams, context-aware DM, dynamic prompts, titled sessions, anchored public streams |
-| **Next** | Plan → live execution receipt; findings `data_table`; Lists for action items; `canvases.sections.lookup`; Real-time Search for `scope:search` |
+| **Done** (stage 1) | §1: stop button, provenance on streams, context-aware DM, dynamic prompts, titled sessions, anchored public streams |
+| **Done** (stage 2) | Plan → live execution receipt (`plan` block via `response_url`, card keeps its visibility); findings `data_table` with per-row Post/Skip; Lists for action items (checklist fallback); `canvases.sections.lookup` (`heading=`) and `canvases.getContent`; Real-time Search for `scope:search`. Every rich block falls back to classic blocks on `invalid_blocks` |
 | **Then** | Work Objects for plans and changes; source carousels and charts; Slackbot MCP server; metadata audit subscription |
 | **Later** | Opt-in unit notes (memory); per-user Slack token for private search; Marketplace listing |

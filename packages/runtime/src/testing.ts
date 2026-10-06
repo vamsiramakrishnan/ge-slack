@@ -46,6 +46,9 @@ export class RecordingSink implements TurnSink {
   async connect(c: ConnectView) {
     this.events.push({ type: 'connect', value: c });
   }
+  async executing(p: PlanView) {
+    this.events.push({ type: 'executing', value: p });
+  }
   async landed(l: LandedView) {
     this.events.push({ type: 'landed', value: l });
   }
@@ -80,7 +83,28 @@ export class FakeSurface implements SurfacePort {
   async isMember(channel: string, userId: string) {
     return this.members.get(channel)?.has(userId) ?? false;
   }
-  async capture(scope: ResolvedScope): Promise<CapturedContext> {
+  guests = new Set<string>();
+  searches: Array<{ query?: string; actionToken?: string }> = [];
+  async isGuest(userId: string) {
+    return this.guests.has(userId);
+  }
+  async capture(
+    scope: ResolvedScope,
+    opts: { search?: string; actionToken?: string } = {},
+  ): Promise<CapturedContext> {
+    if (scope.kind === 'search') {
+      this.searches.push({
+        ...(opts.search ? { query: opts.search } : {}),
+        ...(opts.actionToken ? { actionToken: opts.actionToken } : {}),
+      });
+      return structuredClone(
+        this.contexts.get(`search:${scope.query}`) ?? {
+          label: 'search',
+          messages: [],
+          truncated: false,
+        },
+      );
+    }
     const key =
       scope.kind === 'thread' || scope.kind === 'message'
         ? `${scope.channel}:${scope.ts}`

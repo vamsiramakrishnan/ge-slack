@@ -15,10 +15,12 @@ import {
   landedBlocks,
   noticeBlocks,
   planBlocks,
+  executingBlocks,
   progressBlocks,
+  type RenderOptions,
   type Block,
 } from './blocks.js';
-import { must, type SlackApi } from './slack-api.js';
+import { must, slackErrorCode, type SlackApi } from './slack-api.js';
 
 /** POST to a Slack `response_url` (ephemeral replies for slash commands and shortcuts). */
 export type ResponsePoster = (url: string, body: Record<string, unknown>) => Promise<void>;
@@ -36,7 +38,18 @@ export type SinkTarget =
       anchorText?: string;
     }
   /** Only visible to the invoker (slash / shortcuts / modal): ephemeral via response_url or postEphemeral. */
-  | { mode: 'ephemeral'; channel: string; threadTs?: string; userId: string; responseUrl?: string }
+  | {
+      mode: 'ephemeral';
+      channel: string;
+      threadTs?: string;
+      userId: string;
+      responseUrl?: string;
+      /**
+       * A button click on a card: `response_url` replaces that card in place (approval card →
+       * live receipt). `response_type` is omitted so the card keeps its visibility.
+       */
+      card?: boolean;
+    }
   /** Unattended: plans and outcomes go to the owner's DM; answers to the destination. */
   | { mode: 'unattended'; ownerId: string; destination: string; threadTs?: string };
 
@@ -145,28 +158,42 @@ export class SlackTurnSink implements TurnSink {
 
   async plan(p: PlanView): Promise<void> {
     await this.closeStreamWith([]);
-    const blocks = planBlocks(p);
     const text = `${p.title} — approve or cancel`;
     const t = this.target;
-    if (t.mode === 'stream') {
-      await must(this.api, 'chat.postMessage', {
-        channel: t.channel,
-        ...(this.thread() ? { thread_ts: this.thread() } : {}),
-        text,
-        blocks,
-        unfurl_links: false,
-      });
-    } else if (t.mode === 'ephemeral') {
-      await this.ephemeral(blocks, text, true);
-    } else {
-      await must(this.api, 'chat.postMessage', {
-        channel: t.ownerId,
-        text: `An automation needs your approval: ${text}`,
-        blocks,
-        unfurl_links: false,
-      });
-    }
+    await withRichFallback(
+      (opts) => planBlocks(p, opts),
+      async (blocks) => {
+        if (t.mode === 'stream') {
+          await must(this.api, 'chat.postMessage', {
+            channel: t.channel,
+            ...(this.thread() ? { thread_ts: this.thread() } : {}),
+            text,
+            blocks,
+            unfurl_links: false,
+          });
+        } else if (t.mode === 'ephemeral') {
+          await this.ephemeral(blocks, text, true);
+        } else {
+          await must(this.api, 'chat.postMessage', {
+            channel: t.ownerId,
+            text: `An automation needs your approval: ${text}`,
+            blocks,
+            unfurl_links: false,
+          });
+        }
+      },
+    );
     await this.idle();
+  }
+
+  async executing(p: PlanView): Promise<void> {
+    // Only a clicked card turns into a live receipt; other surfaces just get the final receipt.
+    const t = this.target;
+    if (t.mode !== 'ephemeral' || !t.card || !t.responseUrl) return;
+    await withRichFallback(
+      (opts) => executingBlocks(p, opts),
+      (blocks) => this.ephemeral(blocks, 'Applying changes…', true),
+    ).catch(() => undefined); // progress is best effort; the final receipt still lands
   }
 
   async automationPlan(p: AutomationPlanView): Promise<void> {
@@ -185,13 +212,17 @@ export class SlackTurnSink implements TurnSink {
     await this.closeStreamWith([]);
     const t = this.target;
     const invoker = t.mode === 'unattended' ? t.ownerId : t.userId;
-    const blocks = landedBlocks(l, invoker);
     const text = `Applied ${l.results.filter((r) => r.outcome === 'applied').length}/${l.results.length} changes`;
-    if (t.mode === 'unattended') {
-      await must(this.api, 'chat.postMessage', { channel: t.ownerId, text, blocks });
-    } else {
-      await this.private(blocks, text);
-    }
+    await withRichFallback(
+      (opts) => landedBlocks(l, invoker, opts),
+      async (blocks) => {
+        if (t.mode === 'unattended') {
+          await must(this.api, 'chat.postMessage', { channel: t.ownerId, text, blocks });
+        } else {
+          await this.private(blocks, text);
+        }
+      },
+    );
   }
 
   async notice(kind: NoticeKind, text: string): Promise<void> {
@@ -387,7 +418,8 @@ export class SlackTurnSink implements TurnSink {
     if (t.mode !== 'ephemeral') return;
     if (t.responseUrl) {
       await this.postResponse(t.responseUrl, {
-        response_type: 'ephemeral',
+        // Updating a clicked card keeps its visibility; Slack forbids changing response_type.
+        ...(t.card ? {} : { response_type: 'ephemeral' }),
         replace_original: replace,
         text: text.slice(0, 3000),
         blocks,
@@ -426,5 +458,31 @@ export const defaultResponsePoster: ResponsePoster = async (url, body) => {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`response_url failed (${res.status})`);
+  // Slack answers "ok", or an error code such as "invalid_blocks" in the body.
+  const detail = (await res.text().catch(() => '')).slice(0, 100);
+  if (!res.ok || /invalid_blocks|"ok"\s*:\s*false/.test(detail)) {
+    throw new Error(`response_url failed (${res.status}): ${detail}`);
+  }
 };
+
+function isInvalidBlocks(err: unknown): boolean {
+  const code = slackErrorCode(err);
+  if (code) return /invalid_blocks|invalid_block|unsupported/.test(code);
+  return err instanceof Error && /invalid_blocks|invalid_block|unsupported/.test(err.message);
+}
+
+/**
+ * Render with Slack's newest blocks first; if Slack rejects them (older workspace/client gating,
+ * or a block not yet allowed on this surface), resend the same content with classic blocks.
+ */
+export async function withRichFallback(
+  build: (opts: RenderOptions) => Block[],
+  send: (blocks: Block[]) => Promise<void>,
+): Promise<void> {
+  try {
+    await send(build({ rich: true }));
+  } catch (err) {
+    if (!isInvalidBlocks(err)) throw err;
+    await send(build({ rich: false }));
+  }
+}

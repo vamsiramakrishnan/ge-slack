@@ -334,3 +334,17 @@ metadata and `session_status: "active"`. Public answers outside a thread first p
 message, because streaming needs a thread. The roadmap for richer native rendering is in
 [SLACK-UX-ADVANCED.md](SLACK-UX-ADVANCED.md); competitive positioning is in
 [COMPETITIVE.md](COMPETITIVE.md).
+
+**Stage 2 (2026-10).**
+- *Live receipts:* approving a plan turns the same card into a native `plan` block. Every change
+  shows in progress, then complete or error, with a link to what landed and Undo buttons. There is
+  no second message.
+- *Review findings* appear as a sortable `data_table` with a Post/Skip toggle on each row. Only the
+  requester can toggle rows, and the approve button counts what will post.
+- *`notes` action items* land as a Slack List, or as a checklist where Lists are unavailable (the
+  receipt says which).
+- *Canvas rewrites* target a section by its heading and refuse to guess between several matches.
+- *`scope:search("…")`* searches public channels with Slack's Real-time Search when started from
+  `@Gemini` or the agent DM (Slack issues the per-event `action_token` there). From a slash
+  command it falls back to a keyword filter of the current channel and says so. Guests can't
+  search. The Gemini service only sees results from channels allow-listed for it.
