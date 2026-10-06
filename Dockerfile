@@ -1,12 +1,12 @@
 # Cloud Run image. Bun runs the TypeScript sources directly. Base pulled through Google's Docker Hub
 # mirror (no Hub rate limits in Cloud Build), pinned by digest; keep the tag = package.json packageManager.
-FROM mirror.gcr.io/oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4 AS deps
+FROM mirror.gcr.io/oven/bun:1.4.2@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895 AS deps
 WORKDIR /app
 COPY package.json bun.lock ./
 COPY packages ./packages
 RUN bun install --frozen-lockfile --production
 
-FROM mirror.gcr.io/oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4
+FROM mirror.gcr.io/oven/bun:1.4.2@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=deps /app /app
