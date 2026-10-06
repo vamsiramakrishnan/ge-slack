@@ -1,0 +1,132 @@
+# Cloud Run service for the bot, rendered by deploy/deploy.sh (placeholders are substituted there).
+# Same region as GE_LOCATION's residency commitment; secrets come from Secret Manager only.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: ${SERVICE}
+  labels:
+    app: ge-slack
+  annotations:
+    # Slack calls the bot over the public internet; requests are authenticated by the signing
+    # secret (and /cron/tick by Cloud Scheduler's Google-signed OIDC token), not by Cloud Run IAM.
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        # Gemini turns keep running after the 3-second Slack ack(): CPU must stay allocated.
+        run.googleapis.com/cpu-throttling: 'false'
+        run.googleapis.com/startup-cpu-boost: 'true'
+        run.googleapis.com/execution-environment: gen2
+        # One warm instance: Slack's 3-second ack can't absorb a cold start, and in-memory Google
+        # tokens / running-turn handles live per instance.
+        autoscaling.knative.dev/minScale: '1'
+        autoscaling.knative.dev/maxScale: '${MAX_INSTANCES}'
+    spec:
+      serviceAccountName: ${RUNTIME_SA}
+      # Long agent turns (Deep Research) stream inside one request (ADR-0002 § Consequences).
+      timeoutSeconds: 3600
+      containerConcurrency: 40
+      containers:
+        - image: ${IMAGE}
+          ports:
+            - containerPort: 8080
+          resources:
+            limits:
+              cpu: '1'
+              memory: 1Gi
+          startupProbe:
+            httpGet:
+              path: /healthz
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet:
+              path: /healthz
+            periodSeconds: 30
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: GE_STORE
+              value: firestore
+            - name: SLACK_TEAM_ID
+              value: ${SLACK_TEAM_ID}
+            - name: SLACK_TEAM_DOMAIN
+              value: ${SLACK_TEAM_DOMAIN}
+            - name: SLACK_APP_ID
+              value: ${SLACK_APP_ID}
+            - name: PUBLIC_BASE_URL
+              value: ${PUBLIC_BASE_URL}
+            - name: GE_PROJECT
+              value: ${GE_PROJECT}
+            - name: GE_LOCATION
+              value: ${GE_LOCATION}
+            - name: GE_ENGINE
+              value: ${GE_ENGINE}
+            - name: IDP_KIND
+              value: ${IDP_KIND}
+            - name: IDP_ISSUER
+              value: ${IDP_ISSUER}
+            - name: IDP_CLIENT_ID
+              value: ${IDP_CLIENT_ID}
+            - name: WIF_POOL_ID
+              value: ${WIF_POOL_ID}
+            - name: WIF_PROVIDER_ID
+              value: ${WIF_PROVIDER_ID}
+            - name: GE_SERVICE_MODE
+              value: ${GE_SERVICE_MODE}
+            - name: GE_SERVICE_ACCOUNT
+              value: ${GE_SERVICE_ACCOUNT}
+            - name: GE_SLACK_KMS_KEY
+              value: ${GE_SLACK_KMS_KEY}
+            - name: GE_CRON_INVOKER
+              value: ${CRON_INVOKER}
+            - name: GE_SOURCES_FILE
+              value: /config/sources/sources.json
+            - name: GE_AGENTS_FILE
+              value: /config/agents/agents.json
+            # Optional settings (GE_APP_URL, skills, GE_TIME_ZONE, …): add them here or with
+            # `gcloud run services update --update-env-vars` after the first deploy.
+            - name: SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ge-slack-bot-token
+                  key: latest
+            - name: SLACK_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ge-slack-signing-secret
+                  key: latest
+            - name: GE_SLACK_WRAPPED_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: ge-slack-wrapped-keys
+                  key: latest
+            - name: IDP_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ge-slack-idp-client-secret
+                  key: latest
+          volumeMounts:
+            - name: sources
+              mountPath: /config/sources
+              readOnly: true
+            - name: agents
+              mountPath: /config/agents
+              readOnly: true
+      volumes:
+        # The @ catalogs, one Secret Manager secret per file. Pin versions (SOURCES_VERSION /
+        # AGENTS_VERSION) so a catalog change only lands with a reviewed redeploy; with `latest`, a
+        # new secret version reaches the next instance that starts.
+        - name: sources
+          secret:
+            secretName: ge-slack-sources
+            items:
+              - key: '${SOURCES_VERSION}'
+                path: sources.json
+        - name: agents
+          secret:
+            secretName: ge-slack-agents
+            items:
+              - key: '${AGENTS_VERSION}'
+                path: agents.json

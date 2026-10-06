@@ -1,0 +1,21 @@
+{
+  "name": "@ge-slack/automations",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Schedules, reaction/keyword triggers, unattended actuation gate, Workflow Builder steps",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "@ge-slack/contracts": "workspace:*",
+    "@ge-slack/runtime": "workspace:*",
+    "@ge-slack/identity": "workspace:*"
+  }
+}

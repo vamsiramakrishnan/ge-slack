@@ -1,0 +1,20 @@
+{
+  "name": "@ge-slack/gemini-client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Discovery Engine streamAssist client + user (WIF) and service-account token sources",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "@ge-slack/contracts": "workspace:*",
+    "zod": "^3.23.0"
+  }
+}

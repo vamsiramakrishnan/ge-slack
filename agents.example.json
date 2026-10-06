@@ -1,0 +1,31 @@
+[
+  {
+    "alias": "research",
+    "title": "Deep Research",
+    "kind": "deep-research",
+    "agentId": "deep_research",
+    "description": "Multi-step web + enterprise research with a plan you approve",
+    "serviceAllowed": false
+  },
+  {
+    "alias": "helpdesk",
+    "title": "IT helpdesk",
+    "kind": "assistant",
+    "agentId": "15492003793394502655",
+    "description": "Workflow Builder chat agent over the IT knowledge base",
+    "serviceAllowed": true
+  },
+  {
+    "alias": "triage",
+    "title": "Incident triage",
+    "kind": "a2a",
+    "agentId": "8741956021",
+    "description": "ADK agent on Agent Engine, registered via A2A",
+    "serviceAllowed": false,
+    "attestation": {
+      "sideEffects": "confirms",
+      "identity": "user-delegated",
+      "hostedIn": "eu"
+    }
+  }
+]

@@ -1,0 +1,12 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/contracts" },
+    { "path": "packages/gemini-client" },
+    { "path": "packages/identity" },
+    { "path": "packages/slack-bridge" },
+    { "path": "packages/runtime" },
+    { "path": "packages/automations" },
+    { "path": "packages/app" }
+  ]
+}

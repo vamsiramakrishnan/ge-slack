@@ -1,0 +1,28 @@
+{
+  "name": "@ge-slack/app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bolt wiring: slash command, mentions, agent DM, shortcuts, interactivity, App Home, OAuth callback",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "start": "bun src/main.ts"
+  },
+  "dependencies": {
+    "@ge-slack/contracts": "workspace:*",
+    "@ge-slack/gemini-client": "workspace:*",
+    "@ge-slack/identity": "workspace:*",
+    "@ge-slack/runtime": "workspace:*",
+    "@ge-slack/slack-bridge": "workspace:*",
+    "@ge-slack/automations": "workspace:*",
+    "@slack/bolt": "^4.4.0",
+    "@google-cloud/firestore": "^7.11.0",
+    "zod": "^3.23.0"
+  }
+}
