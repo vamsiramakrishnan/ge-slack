@@ -1,6 +1,8 @@
 /**
  * `bun run probe [--as user|service] [--only a,b] [--connector <collection-id>]
- *                [--deep-research-run] [--json]`
+ *                [--allow-state [--deep-research-run]] [--json]`
+ *
+ * Without --allow-state nothing persistent is created (no sessions, no agent tasks).
  *
  * Runs the ADR-0002 / STATUS.md live probes against the configured Gemini Enterprise engine.
  * Reads only the GE_* settings (no Slack or IdP config needed). Exit code 1 if any probe fails.
@@ -59,10 +61,15 @@ if (as === 'service') {
       '--as service needs GE_SERVICE_MODE (metadata|impersonate) and GE_SERVICE_ACCOUNT',
     );
   }
-  tokens =
-    settings.GE_SERVICE_MODE === 'metadata'
-      ? new MetadataServerTokenSource()
-      : new ImpersonatedTokenSource(gcloudToken, { targetServiceAccount: sa });
+  if (settings.GE_SERVICE_MODE === 'metadata') {
+    const metadata = new MetadataServerTokenSource();
+    // The report names this account, so the attached identity must actually be it.
+    const attached = await metadata.email();
+    if (attached !== sa) throw new Error(`Attached service account ${attached} is not ${sa}.`);
+    tokens = metadata;
+  } else {
+    tokens = new ImpersonatedTokenSource(gcloudToken, { targetServiceAccount: sa });
+  }
   identity = `service:${sa}`;
 }
 
@@ -81,6 +88,7 @@ const results = await runProbes(
     identity,
     fetchImpl,
     ...(connector ? { connector } : {}),
+    allowState: flag('allow-state') || flag('deep-research-run'),
     deepResearchRun: flag('deep-research-run'),
     timeoutMs: flag('deep-research-run') ? 30 * 60_000 : 120_000,
   },

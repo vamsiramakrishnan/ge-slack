@@ -71,9 +71,13 @@ Build and upload `skill/slack-command-planner` and `skill/slack-surface-commande
 
 ## 5. Deploy (Cloud Run, same region as `GE_LOCATION`)
 
-`deploy/service.yaml` is the declarative Cloud Run service. `deploy/deploy.sh` renders it from
-environment variables, builds the image with Cloud Build, applies it, and (re)creates the Cloud
-Scheduler tick.
+`deploy/service.yaml` is the declarative Cloud Run service. `deploy/deploy.sh`:
+
+- renders it from environment variables, and refuses a `REGION` outside the `GE_LOCATION`
+  residency and malformed values;
+- builds the image with Cloud Build and applies the service;
+- allows Slack to reach it;
+- (re)creates the Cloud Scheduler tick, authenticated with OIDC.
 
 **One-time setup** (in `PROJECT`, region `REGION` inside the `GE_LOCATION` residency):
 
@@ -84,26 +88,37 @@ Scheduler tick.
    - `roles/cloudkms.cryptoKeyDecrypter` on the vault key only;
    - with `GE_SERVICE_MODE=impersonate`, `roles/iam.serviceAccountTokenCreator` on the licensed
      `GE_SERVICE_ACCOUNT` only.
-3. **KMS vault key.** Production refuses a static `GE_SLACK_VAULT_KEY`. Create a KMS key and set
+3. **Scheduler service account** (`CRON_INVOKER`). `/cron/tick` accepts only Google-signed OIDC
+   tokens for this account. There is no shared secret in the job config, in argv, or in gcloud
+   logs. The account needs no roles: the app verifies the token itself.
+4. **KMS vault key.** Production refuses a static `GE_SLACK_VAULT_KEY`. Create a KMS key and set
    `GE_SLACK_KMS_KEY`. Store `k1=<KMS ciphertext of a 32-byte data key>` in the secret
    `ge-slack-wrapped-keys`; add `k0=…` entries when rotating.
-4. **Firestore.** Create the database in the same region as `GE_LOCATION`. Enable a TTL policy on
+5. **Firestore.** Create the database in the same region as `GE_LOCATION`. Enable a TTL policy on
    field `expiresAt` of collection `ge_slack_kv`. Plans, resume payloads, paused agents and
    24-hour answers (for *Share*) live there.
-5. **Secret Manager:** create these secrets.
+6. **Secret Manager:** create these secrets.
    - `ge-slack-bot-token`
    - `ge-slack-signing-secret`
-   - `ge-slack-cron-secret` (24+ random characters)
    - `ge-slack-wrapped-keys`
    - `ge-slack-idp-client-secret`
    - `ge-slack-sources` (the `@` sources JSON)
    - `ge-slack-agents` (the `@` agents JSON, `[]` if none)
+
+   Set `SOURCES_VERSION` / `AGENTS_VERSION` to pin catalog versions, so a catalog change lands only
+   with a redeploy. With the default `latest`, a new version reaches the next instance that starts.
+   Restrict `secretmanager.secretVersionAdder` on these two secrets to catalog admins either way.
+7. **Public access.** Slack must reach the service, so the script grants `allUsers`
+   `roles/run.invoker`. Every request is still authenticated in the app: the Slack signing secret,
+   and OIDC on `/cron/tick`. If an org policy forbids `allUsers` bindings, put an external HTTPS
+   load balancer in front instead.
 
 **Deploy:**
 
 ```bash
 export PROJECT=my-proj REGION=europe-west1 RUNTIME_SA=ge-slack-runtime@my-proj.iam.gserviceaccount.com \
   SLACK_TEAM_ID=T0… SLACK_TEAM_DOMAIN=acme PUBLIC_BASE_URL=https://ge-slack.acme.com \
+  CRON_INVOKER=ge-slack-scheduler@my-proj.iam.gserviceaccount.com \
   GE_PROJECT=my-proj GE_LOCATION=eu GE_ENGINE=my-engine \
   IDP_KIND=oidc IDP_ISSUER=https://login.microsoftonline.com/<tenant>/v2.0 IDP_CLIENT_ID=… \
   WIF_POOL_ID=… WIF_PROVIDER_ID=… GE_SLACK_KMS_KEY=projects/…/cryptoKeys/ge-slack-vault
@@ -126,15 +141,18 @@ Other notes:
 
 ## 6. Prove it live (`bun run probe`)
 
-Before installing in Slack, run the live probes against the engine. They are read-only: nothing
-is created, changed or deleted.
+Before installing in Slack, run the live probes against the engine. By default nothing persistent
+is created, changed or deleted: chat probes are sessionless, the connector probe only lists tools,
+and A2A agents only have their card read. `--allow-state` additionally runs the probes that create
+state: a Deep Research session in your history, and a task on each A2A agent.
 
 ```bash
 gcloud auth login            # a workforce (WIF) user: use your workforce login config
 GE_PROJECT=… GE_LOCATION=eu GE_ENGINE=… GE_SOURCES_FILE=sources.json GE_AGENTS_FILE=agents.json \
   bun run probe                                  # as you
 bun run probe --as service                       # as the licensed service account
-bun run probe --only agents --deep-research-run  # also run Deep Research phase 2 (minutes)
+bun run probe --only agents --allow-state        # also start a Deep Research plan and ping A2A agents
+bun run probe --only agents --deep-research-run  # …and run Deep Research phase 2 (minutes)
 bun run probe --only connector-mcp --connector jira-fed_123
 ```
 
@@ -146,7 +164,7 @@ anything fails. Tokens and response bodies are never printed. The checks:
 | `stream-assist` | regional `:streamAssist` under this identity, with `actionSpec.actionDisabled` and without `isSessionLess` |
 | `grounding` | the `@` sources ground answers. `connectorAuthErrors` parse for unauthorized connectors |
 | `skills` | planner and commander routing (`invokedSkills`). If it fails, try `GE_SKILL_AGENTS_SPEC=off` |
-| `agents` | each `@` agent: `agentsSpec` chat agents, the Deep Research plan (and optionally phase 2), and the A2A agent card plus `message:stream` |
+| `agents` | each `@` agent: `agentsSpec` chat agents and the A2A agent card. With `--allow-state`, also the Deep Research plan (phase 2 with `--deep-research-run`) and A2A `message:stream` |
 | `agent-views` | `:listAvailableAgentViews` (undocumented). Every `@` agent is visible to this identity |
 | `engine` | `engines.get`. Every `@` source is attached to the engine |
 | `connector-mcp` | `dataConnector:invokeConnectorMcp` `tools/list` (never `tools/call`): the path to connector actions |

@@ -90,6 +90,25 @@ No criticals. All findings fixed with regression tests, except M3, which is acce
 | Cloud Run deploy (`deploy/`) | Implemented | render tested locally; `deploy.sh` not yet run against a real project |
 | Live probe harness (`bun run probe`) | Implemented | unit-tested against a scripted engine; run against the real regional endpoint with a dummy token (reached it, reported 401 with a hint); not yet run with real credentials |
 
+## Security review — ops tooling (2026-10-06)
+
+No criticals. All findings fixed:
+
+| Finding | Fix |
+|---|---|
+| H1 the cron shared secret was in the scheduler job config, gcloud argv and gcloud logs | Cloud Scheduler uses OIDC. `/cron/tick` verifies a Google-signed RS256 ID token (issuer, audience, expiry, exact invoker SA, verified email). `GE_CRON_INVOKER` is required in production. The shared secret is dev-only |
+| M1 Cloud Run / Build / Scheduler region not tied to `GE_LOCATION` | the renderer refuses a `REGION` outside the residency. `global` needs `ALLOW_GLOBAL_REGION=1` |
+| M2 some probes created state | Deep Research sessions and A2A tasks run only with `--allow-state` |
+| L1 unvalidated YAML substitutions / double expansion | one-pass substitution. Strict shapes for unquoted values. Control characters rejected. Unit tests in `deploy/test_render.py` |
+| L2 catalogs follow `latest` | `SOURCES_VERSION` / `AGENTS_VERSION` pins; docs corrected |
+| L3 nested `.env*` could reach the image / build bucket | `**/.env*` in `.dockerignore`; `.gcloudignore` added |
+| L4 mutable action tags and base image tag | actions pinned to commit SHAs, base image pinned by digest, Dependabot for both |
+| L5 A2A card probe bypassed `proxyUrl` | skipped through a proxy, like the other raw probes |
+| L6 probe `--as service` didn't verify the attached SA | compares the metadata-server email first |
+| L7 manifest scope deny-list | bot scopes are an allow-list. User scopes must be empty |
+| L8 fragile secret header in the scheduler job | gone with H1 |
+| INFO renderer missed conditional settings | `WIF_*` required for `oidc`, `GE_SERVICE_ACCOUNT` for service modes |
+
 ## Next live checks
 
 Start with `bun run probe` (SETUP §6): it covers the Gemini Enterprise half of the list below in

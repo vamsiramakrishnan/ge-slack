@@ -8,3 +8,5 @@ docs
 **/*.test.ts
 deploy
 .github
+**/.env*
+!.env.example

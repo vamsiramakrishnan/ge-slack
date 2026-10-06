@@ -17,7 +17,9 @@ export SERVICE="${SERVICE:-ge-slack}"
 export MAX_INSTANCES="${MAX_INSTANCES:-10}"
 export IDP_KIND="${IDP_KIND:-oidc}"
 export GE_SERVICE_MODE="${GE_SERVICE_MODE:-none}"
+export SOURCES_VERSION="${SOURCES_VERSION:-latest}" AGENTS_VERSION="${AGENTS_VERSION:-latest}"
 : "${REGION:?set REGION (a Cloud Run region inside the GE_LOCATION residency)}"
+export REGION
 : "${PROJECT:?set PROJECT}"
 export IMAGE="${IMAGE:-${REGION}-docker.pkg.dev/${PROJECT}/ge-slack/ge-slack:$(git -C "$root" rev-parse --short HEAD)}"
 
@@ -29,18 +31,23 @@ fi
 gcloud builds submit "$root" --project "$PROJECT" --region "$REGION" --tag "$IMAGE"
 gcloud run services replace "$out" --project "$PROJECT" --region "$REGION"
 
-# Cloud Scheduler drives automations: POST /cron/tick every minute with the shared secret.
-cron_secret="$(gcloud secrets versions access latest --secret ge-slack-cron-secret --project "$PROJECT")"
+# Slack reaches the bot unauthenticated at the Cloud Run layer; every request is authenticated in
+# the app (Slack signing secret; Cloud Scheduler OIDC on /cron/tick). An org policy restricting
+# allUsers bindings will refuse this: then front the service with a load balancer instead.
+gcloud run services add-iam-policy-binding "$SERVICE" --project "$PROJECT" --region "$REGION" \
+  --member allUsers --role roles/run.invoker >/dev/null
+
+# Cloud Scheduler drives automations: POST /cron/tick every minute with a Google-signed OIDC token
+# for CRON_INVOKER (no shared secret in the job, argv or gcloud logs).
+base="${PUBLIC_BASE_URL%/}"
 verb=create
-headers_flag=--headers
 if gcloud scheduler jobs describe ge-slack-tick --project "$PROJECT" --location "$REGION" >/dev/null 2>&1; then
   verb=update
-  headers_flag=--update-headers
 fi
 gcloud scheduler jobs "$verb" http ge-slack-tick --project "$PROJECT" --location "$REGION" \
-  --schedule '* * * * *' --uri "${PUBLIC_BASE_URL%/}/cron/tick" --http-method POST \
-  "${headers_flag}=X-GE-Cron-Secret=${cron_secret}" --attempt-deadline 60s >/dev/null
-unset cron_secret
+  --schedule '* * * * *' --uri "${base}/cron/tick" --http-method POST \
+  --oidc-service-account-email "$CRON_INVOKER" --oidc-token-audience "${base}/cron/tick" \
+  --attempt-deadline 60s >/dev/null
 
 echo "Deployed ${SERVICE}. Point the Slack manifest URLs at ${PUBLIC_BASE_URL%/}/slack/events,"
 echo "then run: bun run probe   (see docs/SETUP.md §6)"

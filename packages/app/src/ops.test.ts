@@ -32,12 +32,13 @@ describe('manifest check', () => {
     );
     m.oauth_config.scopes.bot = m.oauth_config.scopes.bot
       .filter((s) => s !== 'lists:write')
-      .concat('team:read');
+      .concat('team:read', 'channels:write');
     m.functions.ge_ask!.input_parameters.required = ['prompt'];
     expect(checkManifest(m, facts)).toEqual(
       expect.arrayContaining([
         'missing bot scope lists:write',
         'bot scope team:read must not be requested',
+        'bot scope channels:write is not on the allow-list (manifest-check.ts)',
         'event app_context_changed is wired but not subscribed',
         'workflow step ge_ask must require its interactivity input',
       ]),
@@ -171,7 +172,7 @@ describe('live probes (against a scripted engine)', () => {
         () => json({ error: { status: 'PERMISSION_DENIED', message: 'nope' } }, 403),
       ],
     ]);
-    const results = await runProbes(ctx(fetchImpl, { connector: 'jira-fed_1' }));
+    const results = await runProbes(ctx(fetchImpl, { connector: 'jira-fed_1', allowState: true }));
     const by = Object.fromEntries(results.map((r) => [r.name, r]));
     expect(by['stream-assist']!.status).toBe('pass');
     expect(by['grounding']!.detail).toContain('connectorAuthErrors parsed: jira-fed_1');
@@ -196,6 +197,21 @@ describe('live probes (against a scripted engine)', () => {
     const report = formatReport(results);
     expect(report).not.toContain('SECRET');
     expect(report).toMatch(/\d+ passed · 2 failed · 1 skipped/);
+  });
+
+  it('creates no state by default: no Deep Research session, no A2A task', async () => {
+    const { calls, fetchImpl } = fakeEngine([[/\/a2a\/v1\/card$/, () => json({ name: 'triage' })]]);
+    const results = await runProbes(ctx(fetchImpl), ['agents']);
+    expect(results.map((r) => r.status)).toEqual(['skip', 'pass']);
+    expect(results[1]!.detail).toContain('--allow-state');
+    expect(calls.map((c) => c.url)).toEqual([expect.stringMatching(/\/a2a\/v1\/card$/)]);
+    // Through an egress proxy, raw calls (the card too) are skipped, never sent around it.
+    const proxied = await runProbes(
+      ctx(fetchImpl, { gemini: { ...gemini, proxyUrl: 'https://proxy.example' } }),
+      ['agents'],
+    );
+    expect(proxied[1]).toMatchObject({ status: 'skip' });
+    expect(calls).toHaveLength(1);
   });
 
   it('turns a provider failure into one redacted line', async () => {

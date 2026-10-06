@@ -29,6 +29,7 @@ import {
 import { AutomationEngine } from '@ge-slack/automations';
 import { domainAliases, geminiClientConfig, type AppConfig } from './config.js';
 import { FirestoreStore } from './firestore-store.js';
+import { GoogleIdTokenVerifier } from './google-id-token.js';
 
 /** Everything the Slack handlers need, composed once from config. */
 export interface Container {
@@ -43,6 +44,8 @@ export interface Container {
   engine: AutomationEngine;
   orch: Orchestrator;
   postResponse: ResponsePoster;
+  /** Verifies Cloud Scheduler's OIDC token on /cron/tick. */
+  cronVerifier: GoogleIdTokenVerifier;
   /** Pick the right rendering for an origin (EXPERIENCE §3 visibility rules). */
   sinkFor(origin: Origin, inv?: Pick<Invocation, 'flags'>): SlackTurnSink;
   unattendedSink(a: Automation, opts: { threadTs?: string }): SlackTurnSink;
@@ -278,6 +281,7 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
     engine,
     orch,
     postResponse,
+    cronVerifier: new GoogleIdTokenVerifier(fetchImpl),
     sinkFor,
     unattendedSink,
   };

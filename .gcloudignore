@@ -1,0 +1,14 @@
+# Uploaded to Cloud Build by deploy/deploy.sh (gcloud builds submit). Same exclusions as the image:
+# never ship local env files or credentials to the build bucket.
+.git
+.github
+node_modules
+**/node_modules
+**/dist
+**/.env*
+!.env.example
+*.log
+docs
+skill
+deploy
+.ge-slack-dev

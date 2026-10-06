@@ -19,17 +19,24 @@ export const REQUIRED_BOT_SCOPES = [
   'commands',
   'groups:history',
   'groups:read',
+  'files:read', // canvas fallback: files.info preview
   'im:history',
+  'im:read', // conversations.info on DMs
   'im:write',
   'lists:write', // action items
+  'reactions:read', // reaction_added triggers
   'reactions:write',
   'search:read.public', // Real-time Search (assistant.search.context)
   'users:read',
   'users:read.email', // email binding (ADR-0001 §3)
 ];
 
-/** Scopes deliberately not requested (security review L10: permalinks use the team domain). */
-export const FORBIDDEN_BOT_SCOPES = ['team:read', 'chat:write.customize', 'admin'];
+/**
+ * The bot scopes are an allow-list: anything not above fails CI, so a broad scope can't slip in
+ * unreviewed. Named here are ones we deliberately never request (security review L10: permalinks
+ * use the team domain, so no team:read).
+ */
+export const FORBIDDEN_BOT_SCOPES = ['team:read', 'chat:write.customize', 'chat:write.public'];
 
 export interface ManifestFacts {
   /** Events registered with `app.event(...)` plus message events. */
@@ -50,9 +57,15 @@ export function checkManifest(manifest: unknown, facts: ManifestFacts): string[]
     if (!scopes.includes(s)) errors.push(`missing bot scope ${s}`);
   }
   for (const s of scopes) {
-    if (FORBIDDEN_BOT_SCOPES.some((f) => s === f || s.startsWith(`${f}.`))) {
+    if (FORBIDDEN_BOT_SCOPES.includes(s) || s.startsWith('admin')) {
       errors.push(`bot scope ${s} must not be requested`);
+    } else if (!REQUIRED_BOT_SCOPES.includes(s)) {
+      errors.push(`bot scope ${s} is not on the allow-list (manifest-check.ts)`);
     }
+  }
+  const userScopes = ((m.oauth_config as Json | undefined)?.scopes as Json | undefined)?.user;
+  if (Array.isArray(userScopes) && userScopes.length) {
+    errors.push('user token scopes are not used and must not be requested');
   }
 
   const commands = (features.slash_commands ?? []) as Json[];

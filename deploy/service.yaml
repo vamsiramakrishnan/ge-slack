@@ -1,4 +1,4 @@
-# Cloud Run service for the bot (rendered by deploy/deploy.sh; ${VARS} are substituted there).
+# Cloud Run service for the bot, rendered by deploy/deploy.sh (placeholders are substituted there).
 # Same region as GE_LOCATION's residency commitment; secrets come from Secret Manager only.
 apiVersion: serving.knative.dev/v1
 kind: Service
@@ -8,7 +8,7 @@ metadata:
     app: ge-slack
   annotations:
     # Slack calls the bot over the public internet; requests are authenticated by the signing
-    # secret (and /cron/tick by its shared secret), not by Cloud Run IAM.
+    # secret (and /cron/tick by Cloud Scheduler's Google-signed OIDC token), not by Cloud Run IAM.
     run.googleapis.com/ingress: all
 spec:
   template:
@@ -79,6 +79,8 @@ spec:
               value: ${GE_SERVICE_ACCOUNT}
             - name: GE_SLACK_KMS_KEY
               value: ${GE_SLACK_KMS_KEY}
+            - name: GE_CRON_INVOKER
+              value: ${CRON_INVOKER}
             - name: GE_SOURCES_FILE
               value: /config/sources/sources.json
             - name: GE_AGENTS_FILE
@@ -94,11 +96,6 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: ge-slack-signing-secret
-                  key: latest
-            - name: GE_CRON_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: ge-slack-cron-secret
                   key: latest
             - name: GE_SLACK_WRAPPED_KEYS
               valueFrom:
@@ -118,17 +115,18 @@ spec:
               mountPath: /config/agents
               readOnly: true
       volumes:
-        # The @ catalogs as one Secret Manager secret per file, so an admin change is a new secret
-        # version + redeploy, reviewed like any config change.
+        # The @ catalogs, one Secret Manager secret per file. Pin versions (SOURCES_VERSION /
+        # AGENTS_VERSION) so a catalog change only lands with a reviewed redeploy; with `latest`, a
+        # new secret version reaches the next instance that starts.
         - name: sources
           secret:
             secretName: ge-slack-sources
             items:
-              - key: latest
+              - key: '${SOURCES_VERSION}'
                 path: sources.json
         - name: agents
           secret:
             secretName: ge-slack-agents
             items:
-              - key: latest
+              - key: '${AGENTS_VERSION}'
                 path: agents.json

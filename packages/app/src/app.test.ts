@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { randomBytes } from 'node:crypto';
+import { generateKeyPairSync, randomBytes, sign as cryptoSign } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { MemoryStore } from '@ge-slack/identity';
@@ -11,7 +11,8 @@ import {
   type SlackApiResponse,
 } from '@ge-slack/slack-bridge';
 import { loadConfig } from './config.js';
-import { buildContainer } from './container.js';
+import { buildContainer, type Container } from './container.js';
+import { GoogleIdTokenVerifier } from './google-id-token.js';
 import { invocationFromComposer, onPolicySubmit, onSlash } from './handlers.js';
 import { routes } from './wiring.js';
 
@@ -121,7 +122,11 @@ describe('config', () => {
       loadConfig(e as unknown as NodeJS.ProcessEnv);
     expect(load(kms)).toThrow(/memory/);
     expect(load({ ...kms, GE_STORE: 'firestore', GE_EMAIL_BINDING: 'off' })).toThrow(/enforce/);
-    expect(load({ ...kms, GE_STORE: 'firestore' })).not.toThrow();
+    // Production cron is OIDC-only: no shared secret in scheduler config.
+    expect(load({ ...kms, GE_STORE: 'firestore' })).toThrow(/GE_CRON_INVOKER/);
+    expect(
+      load({ ...kms, GE_STORE: 'firestore', GE_CRON_INVOKER: 'cron@p1.iam.gserviceaccount.com' }),
+    ).not.toThrow();
   });
   it('loads the @agent catalog and refuses aliases that collide with sources or keywords', () => {
     const agent = (alias: string) =>
@@ -238,22 +243,43 @@ describe('admin policy', () => {
 });
 
 describe('http routes', () => {
-  it('cron tick requires the shared secret', async () => {
-    const { c } = await container();
+  const tickWith = async (c: Container, headers: Record<string, string>) => {
     const tick = routes(c).find((r) => r.path === '/cron/tick')!;
-    const bad = fakeRes();
-    tick.handler(
-      { headers: { 'x-ge-cron-secret': 'nope' } } as unknown as IncomingMessage,
-      bad.res,
-    );
-    expect(bad.r.status).toBe(401);
-    const good = fakeRes();
-    tick.handler(
-      { headers: { 'x-ge-cron-secret': ENV.GE_CRON_SECRET } } as unknown as IncomingMessage,
-      good.res,
-    );
-    await new Promise((r) => setTimeout(r, 10));
-    expect(good.r.status).toBe(200);
+    const out = fakeRes();
+    tick.handler({ headers } as unknown as IncomingMessage, out.res);
+    await new Promise((r) => setTimeout(r, 20));
+    return out.r.status;
+  };
+
+  it('cron tick (dev) requires the shared secret', async () => {
+    const { c } = await container();
+    expect(await tickWith(c, { 'x-ge-cron-secret': 'nope' })).toBe(401);
+    expect(await tickWith(c, { 'x-ge-cron-secret': String(ENV.GE_CRON_SECRET) })).toBe(200);
+  });
+
+  it('cron tick (production) accepts only a Google ID token for the invoker', async () => {
+    const { c } = await container();
+    const invoker = 'cron@p1.iam.gserviceaccount.com';
+    const google = fakeGoogle();
+    c.cfg.GE_CRON_INVOKER = invoker;
+    c.cronVerifier = new GoogleIdTokenVerifier(google.fetchImpl, () => NOW_MS);
+    const audience = `${String(ENV.PUBLIC_BASE_URL).replace(/\/$/, '')}/cron/tick`;
+    const bearer = (claims: Record<string, unknown>, key = google.key) => ({
+      authorization: `Bearer ${google.sign({ ...goodClaims(invoker, audience), ...claims }, key)}`,
+    });
+    expect(await tickWith(c, bearer({}))).toBe(200);
+    // Once an invoker is configured the shared secret no longer works.
+    expect(await tickWith(c, { 'x-ge-cron-secret': String(ENV.GE_CRON_SECRET) })).toBe(401);
+    expect(await tickWith(c, bearer({ aud: 'https://elsewhere/cron/tick' }))).toBe(401);
+    expect(await tickWith(c, bearer({ email: 'other@p1.iam.gserviceaccount.com' }))).toBe(401);
+    expect(await tickWith(c, bearer({ email_verified: false }))).toBe(401);
+    expect(await tickWith(c, bearer({ exp: NOW_MS / 1000 - 3600 }))).toBe(401);
+    expect(await tickWith(c, bearer({ iss: 'https://evil.example' }))).toBe(401);
+    expect(await tickWith(c, bearer({}, google.otherKey))).toBe(401);
+    const [h, p] = google.sign(goodClaims(invoker, audience)).split('.');
+    expect(await tickWith(c, { authorization: `Bearer ${h}.${p}.` })).toBe(401);
+    const none = Buffer.from(JSON.stringify({ alg: 'none', kid: 'k1' })).toString('base64url');
+    expect(await tickWith(c, { authorization: `Bearer ${none}.${p}.` })).toBe(401);
   });
 
   it('oauth callback rejects unknown state with an escaped page', async () => {
@@ -348,3 +374,40 @@ describe('agent DM context', () => {
     }
   });
 });
+
+const NOW_MS = Date.UTC(2026, 9, 6, 6, 0, 0);
+
+function goodClaims(email: string, aud: string): Record<string, unknown> {
+  const now = NOW_MS / 1000;
+  return {
+    iss: 'https://accounts.google.com',
+    aud,
+    email,
+    email_verified: true,
+    iat: now - 10,
+    exp: now + 3590,
+  };
+}
+
+/** Google's JWKS endpoint with one signing key (k1), plus a key Google never published. */
+function fakeGoogle() {
+  const key = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const otherKey = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const jwk = { ...key.publicKey.export({ format: 'jwk' }), kid: 'k1', alg: 'RS256', use: 'sig' };
+  const fetchImpl = (async () =>
+    Response.json(
+      { keys: [jwk] },
+      { headers: { 'cache-control': 'public, max-age=3600' } },
+    )) as unknown as typeof fetch;
+  const sign = (claims: Record<string, unknown>, k = key) => {
+    const h = Buffer.from(JSON.stringify({ alg: 'RS256', kid: 'k1', typ: 'JWT' })).toString(
+      'base64url',
+    );
+    const p = Buffer.from(JSON.stringify(claims)).toString('base64url');
+    const sig = cryptoSign('RSA-SHA256', Buffer.from(`${h}.${p}`), k.privateKey).toString(
+      'base64url',
+    );
+    return `${h}.${p}.${sig}`;
+  };
+  return { fetchImpl, sign, key, otherKey };
+}

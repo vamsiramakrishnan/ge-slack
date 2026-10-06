@@ -12,9 +12,12 @@ import {
 
 /**
  * Live probes against a real Gemini Enterprise engine (`bun run probe`): the checks ADR-0002 and
- * docs/STATUS.md list as "not yet run live", turned into one pass/fail report. Read-only: probes
- * never create, change or delete anything, and they never print tokens or response bodies beyond a
- * short, single-line excerpt of an error.
+ * docs/STATUS.md list as "not yet run live", turned into one pass/fail report. They never print
+ * tokens or response bodies beyond a short, redacted, single-line excerpt of an error.
+ *
+ * By default nothing persistent is created: chat probes are sessionless, the connector probe only
+ * lists tools, and A2A agents only have their card read. Probes that create state — a Deep Research
+ * session in the identity's history, or a task on an A2A agent — run only with `allowState`.
  */
 
 export type ProbeStatus = 'pass' | 'fail' | 'skip';
@@ -35,7 +38,12 @@ export interface ProbeContext {
   fetchImpl?: typeof fetch;
   /** Connector collection id for the `invokeConnectorMcp` probe (e.g. `jira-fed_123`). */
   connector?: string;
-  /** Run Deep Research phase 2 too (slow: minutes). */
+  /**
+   * Allow probes that create state: a Deep Research session (and, with `deepResearchRun`, a full
+   * research job), and a `ping` task on each A2A agent. Off by default.
+   */
+  allowState?: boolean;
+  /** Run Deep Research phase 2 too (slow: minutes; implies a research job). */
   deepResearchRun?: boolean;
   /** Abort a single probe after this long (default 120 s). */
   timeoutMs?: number;
@@ -208,9 +216,21 @@ async function probeAgents(ctx: ProbeContext): Promise<ProbeResult[]> {
     const name = `agent:@${a.alias} (${a.kind})`;
     const agent = { kind: a.kind, agentId: a.agentId };
     if (a.kind === 'a2a') {
+      if (ctx.gemini.proxyUrl) {
+        out.push({ name, status: 'skip', detail: 'not routed through proxyUrl' });
+        continue;
+      }
       const card = await getJson(ctx, `${a2aBase(ctx, a.agentId)}/card`, 'GET');
       if (!card.ok) {
         out.push({ name, status: 'fail', detail: `agent card: ${card.detail}` });
+        continue;
+      }
+      if (!ctx.allowState) {
+        out.push({
+          name,
+          status: 'pass',
+          detail: 'agent card ok (message:stream not sent: it creates a task; --allow-state)',
+        });
         continue;
       }
       const r = await collect(ctx, { text: 'ping', route: 'default', agent });
@@ -224,6 +244,14 @@ async function probeAgents(ctx: ProbeContext): Promise<ProbeResult[]> {
               detail: `card ok; message:stream ${wait ? `paused (${wait.reason})` : 'completed'} (${r.text.length} chars)`,
             },
       );
+      continue;
+    }
+    if (a.kind === 'deep-research' && !ctx.allowState) {
+      out.push({
+        name,
+        status: 'skip',
+        detail: 'creates a session in this identity’s history: --allow-state',
+      });
       continue;
     }
     const r = await collect(ctx, {

@@ -561,28 +561,46 @@ export function routes(c: Container) {
       path: '/cron/tick',
       method: ['POST'],
       handler: (req: IncomingMessage, res: ServerResponse) => {
-        const secret = c.cfg.GE_CRON_SECRET;
-        const given = String(req.headers['x-ge-cron-secret'] ?? '');
-        const ok =
-          secret !== undefined &&
-          given.length === secret.length &&
-          timingSafeEqual(Buffer.from(given), Buffer.from(secret));
-        if (!ok) {
-          res.writeHead(401);
-          res.end();
-          return;
-        }
-        void c.engine
-          .tick(c.orch, c.cfg.SLACK_TEAM_ID, c.unattendedSink)
-          .then((ran) => {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ran: ran.length }));
-          })
-          .catch(() => {
-            res.writeHead(500);
+        void cronAuthorized(c, req).then((ok) => {
+          if (!ok) {
+            res.writeHead(401);
             res.end();
-          });
+            return;
+          }
+          void c.engine
+            .tick(c.orch, c.cfg.SLACK_TEAM_ID, c.unattendedSink)
+            .then((ran) => {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ran: ran.length }));
+            })
+            .catch(() => {
+              res.writeHead(500);
+              res.end();
+            });
+        });
       },
     },
   ];
+}
+
+/**
+ * Cloud Scheduler authenticates with a Google-signed OIDC token for `GE_CRON_INVOKER` (production).
+ * The shared-secret header is accepted only when no invoker is configured (dev / Socket Mode).
+ */
+async function cronAuthorized(c: Container, req: IncomingMessage): Promise<boolean> {
+  const invoker = c.cfg.GE_CRON_INVOKER;
+  if (invoker) {
+    const bearer = /^Bearer (\S+)$/.exec(String(req.headers.authorization ?? ''))?.[1];
+    if (!bearer) return false;
+    const audience =
+      c.cfg.GE_CRON_AUDIENCE ?? `${c.cfg.PUBLIC_BASE_URL.replace(/\/$/, '')}/cron/tick`;
+    return c.cronVerifier.verify(bearer, { audience, email: invoker }).catch(() => false);
+  }
+  const secret = c.cfg.GE_CRON_SECRET;
+  const given = String(req.headers['x-ge-cron-secret'] ?? '');
+  return (
+    secret !== undefined &&
+    given.length === secret.length &&
+    timingSafeEqual(Buffer.from(given), Buffer.from(secret))
+  );
 }

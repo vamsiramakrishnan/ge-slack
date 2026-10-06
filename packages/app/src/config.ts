@@ -87,7 +87,15 @@ const EnvSchema = z.object({
   GE_SKILL_AGENTS_SPEC: z.enum(['on', 'off']).default('on'),
   GE_EMAIL_BINDING: z.enum(['enforce', 'off']).default('enforce'),
   GE_EMAIL_DOMAIN_ALIASES: z.string().optional(),
+  /** Dev / Socket Mode only: shared secret for POST /cron/tick. Production uses OIDC below. */
   GE_CRON_SECRET: z.string().min(24).optional(),
+  /** Cloud Scheduler's OIDC identity: /cron/tick accepts only Google ID tokens for this SA. */
+  GE_CRON_INVOKER: z
+    .string()
+    .regex(/^[^@\s]+@[^@\s]+\.iam\.gserviceaccount\.com$/)
+    .optional(),
+  /** Audience the scheduler mints tokens for; defaults to `${PUBLIC_BASE_URL}/cron/tick`. */
+  GE_CRON_AUDIENCE: z.string().url().optional(),
   GE_TIME_ZONE: z.string().default('UTC'),
   NODE_ENV: z.string().default('development'),
 });
@@ -139,6 +147,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       );
     if (!c.PUBLIC_BASE_URL.startsWith('https://'))
       throw new Error('PUBLIC_BASE_URL must be https in production.');
+    if (!c.SLACK_APP_TOKEN && !c.GE_CRON_INVOKER) {
+      throw new Error(
+        'GE_CRON_INVOKER is required in production: Cloud Scheduler calls /cron/tick with OIDC, not a shared secret.',
+      );
+    }
   }
   return { ...c, ...loadCatalogs(c) };
 }
