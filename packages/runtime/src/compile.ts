@@ -131,10 +131,28 @@ export class StreamSanitizer {
   }
 }
 
-/** Pretty, bounded JSON for the card (the full arguments are what runs). */
-export function prettyArgs(args: Record<string, unknown>): string {
-  const s = JSON.stringify(args, null, 2);
-  return s.length > 2500 ? `${s.slice(0, 2499)}…` : s;
+/** Room for the arguments in one card section (Slack's 3000-character limit, minus the fence). */
+export const ACT_CARD_CHARS = 2900;
+
+/**
+ * The arguments exactly as they run, readable: pretty JSON with every invisible or private-use
+ * character (bidi overrides, zero-width, tag characters…) spelled out as `\uXXXX`, which is the
+ * same JSON value. Never truncated — compile refuses arguments that don't fit (F1).
+ */
+export function visibleArgs(args: Record<string, unknown>): string {
+  return JSON.stringify(args, null, 1).replace(/[\p{Cf}\p{Co}\u2028\u2029]/gu, (c) =>
+    [...c]
+      .map((u) => {
+        const cp = u.codePointAt(0)!;
+        return cp > 0xffff
+          ? String.fromCharCode(0xd800 + ((cp - 0x10000) >> 10), 0xdc00 + ((cp - 0x10000) & 0x3ff))
+              .split('')
+              .map((x) => `\\u${x.charCodeAt(0).toString(16).padStart(4, '0')}`)
+              .join('')
+          : `\\u${cp.toString(16).padStart(4, '0')}`;
+      })
+      .join(''),
+  );
 }
 
 function preview(text: string): string {
@@ -262,12 +280,20 @@ export function compileEffect(effect: CmdEffect, line: string, ctx: CompileConte
       if (JSON.stringify(effect.arguments).length > MAX_ACT_ARGS_CHARS) {
         return err(`arguments are limited to ${MAX_ACT_ARGS_CHARS} characters`);
       }
+      // The approval card must show every argument that runs — never a truncated view (F1).
+      if (mrkdwnEscape(visibleArgs(effect.arguments)).length > ACT_CARD_CHARS) {
+        return err('arguments are too long to show in full on the approval card; shorten them');
+      }
       params = {
         kind: 'connector-action',
         connector: tool.alias,
         collection: tool.collection,
         tool: tool.name,
-        summary: clean(effect.summary).replace(/\s+/g, ' ').trim().slice(0, 300),
+        summary: clean(effect.summary)
+          .replace(/[\p{Cf}\p{Co}]/gu, '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 300),
         arguments: effect.arguments,
       };
       break;
@@ -302,7 +328,7 @@ export function compileEffect(effect: CmdEffect, line: string, ctx: CompileConte
       preview: previewOf(p),
       approvalClass: approvalClassOf(p, ctx.originChannel),
       reversible: label.undo !== 'Not reversible',
-      ...(p.kind === 'connector-action' ? { detail: prettyArgs(p.arguments) } : {}),
+      ...(p.kind === 'connector-action' ? { detail: visibleArgs(p.arguments) } : {}),
     },
   };
 }

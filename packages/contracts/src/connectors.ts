@@ -10,6 +10,8 @@ export const ConnectorToolSchema = z.object({
   name: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
   /** May the Gemini service run it? Default false (fail closed). */
   serviceAllowed: z.boolean().default(false),
+  /** Admin-written description; preferred over the connector's own (which is untrusted). */
+  description: z.string().max(300).optional(),
 });
 
 export const ConnectorEntrySchema = z.object({
@@ -35,4 +37,19 @@ export interface AvailableConnectorTool {
   inputSchema?: string;
 }
 
-export const MAX_ACT_ARGS_CHARS = 8000;
+/**
+ * Arguments must fit — whole — on the approval card (Slack section text ≤ 3000 characters), so
+ * what a person approves is exactly what runs (security review F1).
+ */
+export const MAX_ACT_ARGS_CHARS = 2000;
+/** Nesting limit for arguments (the Python mirror can't parse arbitrarily deep JSON). */
+export const MAX_ACT_ARGS_DEPTH = 16;
+
+export function jsonDepth(v: unknown, d = 0): number {
+  if (d > MAX_ACT_ARGS_DEPTH) return d;
+  if (Array.isArray(v)) return Math.max(d + 1, ...v.map((x) => jsonDepth(x, d + 1)));
+  if (v && typeof v === 'object') {
+    return Math.max(d + 1, ...Object.values(v).map((x) => jsonDepth(x, d + 1)));
+  }
+  return d;
+}

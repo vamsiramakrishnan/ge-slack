@@ -59,7 +59,19 @@ EFFECT_VERB_TO_KIND = {
 
 # cmd.ts: act <connector>.<tool> "summary" """{json arguments}"""
 _ACT_TARGET = re.compile(r"^@?([a-z0-9][a-z0-9_-]{0,62})\.([A-Za-z0-9_-]{1,64})$")
-MAX_ACT_ARGS_CHARS = 8000
+MAX_ACT_ARGS_CHARS = 2000
+MAX_ACT_ARGS_DEPTH = 16
+
+
+def _json_depth(v, d=0):
+    # cmd.ts jsonDepth
+    if d > MAX_ACT_ARGS_DEPTH:
+        return d
+    if isinstance(v, list):
+        return max([d + 1] + [_json_depth(x, d + 1) for x in v])
+    if isinstance(v, dict):
+        return max([d + 1] + [_json_depth(x, d + 1) for x in v.values()])
+    return d
 
 
 def _reject_constant(name: str):
@@ -445,10 +457,15 @@ def parse_statement(line: str, toks: list) -> dict:
             return err(f"act: arguments are limited to {MAX_ACT_ARGS_CHARS} characters")
         try:
             args_obj = json.loads(raw, parse_constant=_reject_constant)
+        except RecursionError:
+            # Deeper than Python can parse ⇒ deeper than MAX_ACT_ARGS_DEPTH, as cmd.ts reports.
+            return err(f"act: arguments are nested more than {MAX_ACT_ARGS_DEPTH} levels")
         except ValueError:
             return err("act: arguments must be a JSON object")
         if not isinstance(args_obj, dict):
             return err("act: arguments must be a JSON object")
+        if _json_depth(args_obj) > MAX_ACT_ARGS_DEPTH:
+            return err(f"act: arguments are nested more than {MAX_ACT_ARGS_DEPTH} levels")
         return _effect(
             {
                 "kind": "connector-action",

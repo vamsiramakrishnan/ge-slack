@@ -27,7 +27,6 @@ export interface JobRecord {
   startedAt: string;
   endedAt?: string;
   heartbeatAt: string;
-  cancelRequested?: boolean;
 }
 
 export const JOB_HEARTBEAT_MS = 5_000;
@@ -36,20 +35,28 @@ export const JOB_STALE_MS = 60_000;
 export const JOB_NOTIFY_AFTER_MS = 60_000;
 const JOB_RETAIN_MS = 7 * 86_400_000;
 
+/**
+ * Jobs are keyed per person (listing never scans the team), and a cancel request lives in its own
+ * key: the runner's heartbeat writes the job record, so a flag on the record could be lost (F9).
+ */
 export class JobStore {
   constructor(private readonly kv: KeyValueStore) {}
   save(j: JobRecord) {
-    return this.kv.set(`job/${j.teamId}/${j.id}`, j, { ttlMs: JOB_RETAIN_MS });
+    return this.kv.set(`job/${j.teamId}/${j.invokerId}/${j.id}`, j, { ttlMs: JOB_RETAIN_MS });
   }
-  get(teamId: string, id: string) {
-    return this.kv.get<JobRecord>(`job/${teamId}/${id}`);
+  get(teamId: string, userId: string, id: string) {
+    return this.kv.get<JobRecord>(`job/${teamId}/${userId}/${id}`);
+  }
+  requestCancel(teamId: string, id: string) {
+    return this.kv.set(`jobcancel/${teamId}/${id}`, true, { ttlMs: 86_400_000 });
+  }
+  async cancelRequested(teamId: string, id: string): Promise<boolean> {
+    return Boolean(await this.kv.get<boolean>(`jobcancel/${teamId}/${id}`));
   }
   async forUser(teamId: string, userId: string, now: number): Promise<JobRecord[]> {
-    const rows = await this.kv.list<JobRecord>(`job/${teamId}/`);
+    const rows = await this.kv.list<JobRecord>(`job/${teamId}/${userId}/`);
     return rows
-      .map((r) => r.value)
-      .filter((j) => j.invokerId === userId)
-      .map((j) => withLiveness(j, now))
+      .map((r) => withLiveness(r.value, now))
       .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
   }
 }
@@ -101,15 +108,10 @@ export async function runAsJob(
   const beat = setInterval(() => {
     if (inflight) return;
     inflight = (async () => {
-      const cur = await jobs.get(job.teamId, job.id);
-      if (cur?.cancelRequested) ac.abort();
+      if (await jobs.cancelRequested(job.teamId, job.id)) ac.abort();
       // Never overwrite the final status written below.
       if (finished) return;
-      await jobs.save({
-        ...job,
-        heartbeatAt: now(),
-        ...(cur?.cancelRequested ? { cancelRequested: true } : {}),
-      });
+      await jobs.save({ ...job, heartbeatAt: now() });
     })()
       .catch(() => undefined)
       .finally(() => {
@@ -136,12 +138,15 @@ export async function runAsJob(
     orch.observe(origin.teamId, { kind: 'job', outcome: status });
     const tookMs = ended.getTime() - Date.parse(job.startedAt);
     if (status === 'done' && tookMs > JOB_NOTIFY_AFTER_MS) {
+      // Link the thread only for someone still in that conversation (F11).
+      const linkable =
+        job.channel && job.threadTs
+          ? await orch.deps.surface.isMember(job.channel, origin.userId).catch(() => false)
+          : false;
       await orch.deps.surface
         .notifyUser(origin.userId, {
           text: `✦ *${title}* finished.`,
-          ...(job.channel && job.threadTs
-            ? { link: { channel: job.channel, ts: job.threadTs } }
-            : {}),
+          ...(linkable ? { link: { channel: job.channel!, ts: job.threadTs! } } : {}),
         })
         .catch(() => undefined);
     }
@@ -157,13 +162,10 @@ export async function cancelJob(
   sink: TurnSink,
 ): Promise<void> {
   const jobs = orch.deps.jobs;
-  const j = jobs ? await jobs.get(teamId, id) : undefined;
+  // Looked up under the clicker's own key: someone else's job id finds nothing.
+  const j = jobs ? await jobs.get(teamId, userId, id) : undefined;
   if (!jobs || !j) {
-    await sink.notice('info', 'That job is gone.');
-    return;
-  }
-  if (j.invokerId !== userId) {
-    await sink.notice('denied', `Only <@${j.invokerId}> can cancel this job.`);
+    await sink.notice('info', 'That job is gone, or isn’t yours to cancel.');
     return;
   }
   const live = withLiveness(j, Date.now());
@@ -174,7 +176,7 @@ export async function cancelJob(
     );
     return;
   }
-  await jobs.save({ ...j, cancelRequested: true });
+  await jobs.requestCancel(teamId, id);
   local.get(id)?.abort();
   await sink.notice('info', `Cancelling *${j.title}*…`);
 }

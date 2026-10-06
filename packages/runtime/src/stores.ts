@@ -104,6 +104,15 @@ export interface LedgerEntry {
   automationId?: string;
   /** Channel notes that grounded the drafting turn. */
   memoryNotes?: number;
+  /** Connector actions: what ran where (no argument values — a hash of them). */
+  external?: {
+    connector: string;
+    collection: string;
+    tool: string;
+    argsHash: string;
+    /** Short reference from the connector's reply (e.g. a ticket key). */
+    reference?: string;
+  };
   at: string;
   undoneAt?: string;
   undoneBy?: string;

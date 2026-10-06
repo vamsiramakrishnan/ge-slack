@@ -34,6 +34,7 @@ import { collectStream, contentHash, type TokenSource } from '@ge-slack/gemini-c
 import { IdentityRevokedError } from '@ge-slack/identity';
 import {
   StreamSanitizer,
+  mrkdwnEscape,
   compileActionItems,
   compileEffect,
   sanitizeOutbound,
@@ -1031,13 +1032,17 @@ export class Orchestrator {
    * marked serviceAllowed. Discovery failures drop that connector; they never fail the turn.
    */
   private async connectorTools(
-    teamId: string,
+    origin: Origin,
     turn: Turn,
     sink: TurnSink,
   ): Promise<AvailableConnectorTool[]> {
     const port = this.deps.connectors;
     if (!port || !this.deps.features?.has('connector-actions') || turn.agent) return [];
-    const catalog = await this.deps.config.connectors(teamId);
+    // Never proposed from content nobody is present to own (unattended), from a conversation
+    // shared with another organization, or for guests/externals (F3, F4).
+    if (isUnattended(origin) || turn.externallyShared) return [];
+    if (await this.deps.surface.isGuest(origin.userId)) return [];
+    const catalog = await this.deps.config.connectors(origin.teamId);
     const out: AvailableConnectorTool[] = [];
     for (const c of catalog) {
       const allowed = c.tools.filter((t) => turn.principal.kind === 'user' || t.serviceAllowed);
@@ -1050,6 +1055,7 @@ export class Orchestrator {
             tools: await port.listTools(turn.tokens, c.collection),
             until: Date.now() + 600_000,
           };
+          if (this.toolCache.size > 500) this.toolCache.clear();
           this.toolCache.set(key, listed);
         } catch {
           continue;
@@ -1064,7 +1070,9 @@ export class Orchestrator {
           title: c.title,
           collection: c.collection,
           name: t.name,
-          ...(offered.description ? { description: offered.description.slice(0, 300) } : {}),
+          ...((t.description ?? offered.description)
+            ? { description: (t.description ?? offered.description)!.slice(0, 300) }
+            : {}),
           ...(schema ? { inputSchema: schema.slice(0, 1500) } : {}),
         });
       }
@@ -1088,7 +1096,7 @@ export class Orchestrator {
   ): Promise<void> {
     const connectorTools =
       inv.verb === 'draft' || inv.verb === 'notes'
-        ? await this.connectorTools(origin.teamId, turn, sink)
+        ? await this.connectorTools(origin, turn, sink)
         : [];
     const kinds: ActuationKind[] = [
       ...kindsFor(inv.verb, turn.scope),
@@ -1396,6 +1404,14 @@ export class Orchestrator {
       await sink.retire('Dry run closed — nothing was applied.');
       return;
     }
+    // The edit dialog can't show connector arguments, so it can't approve them (F5).
+    if (Object.keys(edits).length && p.effects.some((e) => e.params.kind === 'connector-action')) {
+      await sink.notice(
+        'denied',
+        'Plans with connector actions can’t be approved from the edit dialog. Run it again and approve the card.',
+      );
+      return;
+    }
     // Re-admit at click time: identity and membership may have changed since the card rendered.
     const channel = scopeChannel(p.scope) ?? p.origin.channelId ?? '';
     const policy = await this.deps.config.channelPolicy(p.teamId, channel);
@@ -1458,8 +1474,11 @@ export class Orchestrator {
     ]);
     for (const e of p.effects) {
       const edited = edits[e.changeId];
-      if (edited !== undefined) {
-        e.params = withText(e.params, sanitizeOutbound(edited, knownUsers));
+      if (edited === undefined) continue;
+      const next = withText(e.params, sanitizeOutbound(edited, knownUsers));
+      // Only text effects are editable; mark `edited` only when something actually changed (F5).
+      if (JSON.stringify(next) !== JSON.stringify(e.params)) {
+        e.params = next;
         (e as CompiledEffect & { edited?: boolean }).edited = true;
       }
     }
@@ -1580,6 +1599,31 @@ export class Orchestrator {
         ...(p.automationId ? { automationId: p.automationId } : {}),
       };
       const req: ActuationRequest = { changeId: e.changeId, params: e.params, provenance };
+      const external =
+        e.params.kind === 'connector-action'
+          ? {
+              connector: e.params.connector,
+              collection: e.params.collection,
+              tool: e.params.tool,
+              argsHash: await contentHash(JSON.stringify(e.params.arguments)),
+            }
+          : undefined;
+      if (external) {
+        // Ledger first: if this instance dies mid-call, the action still leaves a trace (F7).
+        await this.deps.stores.record({
+          changeId: e.changeId,
+          teamId: p.teamId,
+          invokerId: p.invokerId,
+          ...(approval.approvedBy ? { approvedBy: approval.approvedBy } : {}),
+          approval: approval.approval,
+          kind: e.params.kind,
+          label: e.label,
+          outcome: 'uncertain',
+          principal: identity,
+          external,
+          at: this.now().toISOString(),
+        });
+      }
       let res;
       try {
         res =
@@ -1613,6 +1657,11 @@ export class Orchestrator {
         principal: identity,
         ...(p.automationId ? { automationId: p.automationId } : {}),
         ...(p.memoryNotes ? { memoryNotes: p.memoryNotes } : {}),
+        ...(external
+          ? {
+              external: { ...external, ...(res.note ? { reference: res.note.slice(0, 120) } : {}) },
+            }
+          : {}),
         at: this.now().toISOString(),
       });
       results.push({
@@ -1662,17 +1711,29 @@ export class Orchestrator {
     }
     const r = await this.deps.connectors.callTool(tokens, p.collection, p.tool, p.arguments);
     if (!r.ok) {
+      if (r.uncertain) {
+        // It may have run: never say "failed" (a retry could act twice) (F6).
+        return {
+          ...base,
+          outcome: 'uncertain',
+          error: {
+            code: r.code,
+            message: `may have run — check ${p.connector} before trying again`,
+          },
+        };
+      }
       const why =
         r.code === 'http_401' || r.code === 'http_403'
           ? `not authorized for ${p.connector} — authorize it in Gemini Enterprise and try again`
           : `${p.connector} refused it (${r.code})`;
       return { ...base, outcome: 'failed', error: { code: r.code, message: why } };
     }
+    // A short reference only: the card may be visible to people without access there (F13).
     const note = r.text
-      .replace(/[\p{Cc}\p{Cf}]/gu, ' ')
+      .replace(/[\p{Cc}\p{Cf}\p{Co}]/gu, ' ')
       .replace(/\s+/g, ' ')
       .trim()
-      .slice(0, 280);
+      .slice(0, 120);
     return { ...base, outcome: 'applied', inverse, ...(note ? { note } : {}) };
   }
 
@@ -1986,5 +2047,5 @@ function displayName(raw: string): string {
 
 /** A fixed job label: the agent's admin-set title and where it runs — never captured content. */
 function jobTitle(agentTitle: string, origin: Origin): string {
-  return `${agentTitle}${origin.channelId ? ` in <#${origin.channelId}>` : ''}`;
+  return `${mrkdwnEscape(agentTitle)}${origin.channelId ? ` in <#${origin.channelId}>` : ''}`;
 }

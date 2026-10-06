@@ -263,11 +263,22 @@ export function planBlocks(p: PlanView, opts: RenderOptions = { rich: true }): B
         ),
       });
       if (e.detail) {
-        // The exact arguments that will run (connector actions): shown verbatim, inert.
-        blocks.push({
-          type: 'section',
-          text: mrkdwn(`\`\`\`${esc(e.detail.replace(/```/g, "'''")).slice(0, 2900)}\`\`\``),
-        });
+        // Exactly what will run (connector actions), in full: compile refuses anything that
+        // wouldn't fit, and invisible characters are already spelled out as \uXXXX.
+        blocks.push(
+          {
+            type: 'section',
+            text: mrkdwn(`\`\`\`${esc(e.detail.replace(/```/g, "'''"))}\`\`\``),
+          },
+          {
+            type: 'context',
+            elements: [
+              mrkdwn(
+                'These arguments are exactly what runs. The one-line summary is written by Gemini.',
+              ),
+            ],
+          },
+        );
       }
     }
   }

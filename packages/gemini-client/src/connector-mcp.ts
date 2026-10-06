@@ -12,8 +12,10 @@ export interface McpTool {
   inputSchema?: unknown;
 }
 
-export type McpCallResult =
-  { ok: true; text: string } | { ok: false; code: string; message: string };
+type Failure = { ok: false; code: string; message: string; uncertain?: boolean };
+
+/** `uncertain`: the call may have run (5xx / 408 / timeout / unreadable reply after dispatch). */
+export type McpCallResult = { ok: true; text: string } | Failure;
 
 /**
  * Connector tools through Gemini Enterprise: `POST v1alpha/{collection}/dataConnector:
@@ -21,8 +23,8 @@ export type McpCallResult =
  * caller's identity and their connector authorization in Gemini Enterprise.
  *
  * Undocumented in the guides (schema only, ADR-0002 probe 6). Never retried: `tools/call` acts in
- * another system, so a retried call could act twice. Only a 401 — rejected before anything ran —
- * is re-sent once with a fresh token.
+ * another system, so a retried call could act twice. A 401 is re-sent once only for `tools/list`:
+ * on `tools/call` it may come from the connector after the fact, so the person re-authorizes.
  */
 export class ConnectorMcpClient {
   constructor(
@@ -51,7 +53,7 @@ export class ConnectorMcpClient {
     args: Record<string, unknown>,
   ): Promise<McpCallResult> {
     const r = await this.invoke(tokens, collection, 'tools/call', { name, arguments: args });
-    if (!r.ok) return { ok: false, code: r.code, message: r.message };
+    if (!r.ok) return r;
     const result = r.result as { content?: unknown; isError?: unknown };
     const text = (Array.isArray(result.content) ? result.content : [])
       .map((c) => c as { type?: string; text?: unknown })
@@ -77,7 +79,7 @@ export class ConnectorMcpClient {
     collection: string,
     method: 'tools/list' | 'tools/call',
     params: Record<string, unknown>,
-  ): Promise<{ ok: true; result: unknown } | { ok: false; code: string; message: string }> {
+  ): Promise<{ ok: true; result: unknown } | Failure> {
     const a = this.config.assistant;
     const engine = `${collectionResourceName(a)}/engines/${a.engine}`;
     const body = JSON.stringify({ method, params, engine });
@@ -90,20 +92,41 @@ export class ConnectorMcpClient {
           'Content-Type': 'application/json',
         },
         body,
+        signal: AbortSignal.timeout(60_000),
       });
-    let res = await send();
-    if (res.status === 401 && tokens.invalidate) {
-      tokens.invalidate();
+    const acting = method === 'tools/call';
+    const unsure = acting ? { uncertain: true } : {};
+    let res: Response;
+    try {
       res = await send();
+      if (res.status === 401 && !acting && tokens.invalidate) {
+        tokens.invalidate();
+        res = await send();
+      }
+    } catch (err) {
+      // Timed out or dropped after the request left: a tools/call may have run.
+      return {
+        ok: false,
+        code: 'network',
+        message: err instanceof Error ? err.name : 'network',
+        ...unsure,
+      };
     }
     if (!res.ok) {
+      const maybeRan = res.status >= 500 || res.status === 408 || res.status === 499;
       return {
         ok: false,
         code: `http_${res.status}`,
         message: (await safeText(res)).slice(0, 300),
+        ...(maybeRan ? unsure : {}),
       };
     }
-    const json = (await res.json().catch(() => ({}))) as { result?: unknown; error?: unknown };
+    let json: { result?: unknown; error?: unknown };
+    try {
+      json = (await res.json()) as typeof json;
+    } catch {
+      return { ok: false, code: 'bad_reply', message: 'The reply could not be read.', ...unsure };
+    }
     if (json.error) {
       const e = json.error as { code?: unknown; message?: unknown };
       return {

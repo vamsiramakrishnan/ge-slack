@@ -131,6 +131,25 @@ No criticals. Fixed with regression tests:
 Accepted: L6, the ledger export lists DM/private ids and links for admins (by design: it's the
 admin's audit trail). L9, `forget <n>` is positional (the Forget button uses ids).
 
+## Security review — jobs and connector actions (2026-10-06)
+
+Confirmed: no path runs a connector action without the requester's approval. Fixed with
+regression tests:
+
+| Finding | Fix |
+|---|---|
+| F1 card could truncate the arguments that run; invisible Unicode | full arguments always shown (≤ 2000 chars, ≤ 16 levels; refused if the escaped card wouldn't fit); `\uXXXX` for invisible/private-use characters; summary marked "written by Gemini" |
+| F2 connector-written tool docs inside `<capabilities>` | moved to a separate `<connector_tool_docs>` data block; admin-set descriptions preferred; "never copy the conversation into arguments" |
+| F3 Slack Connect / guests could drive actions | not offered in externally shared conversations or for guests/externals |
+| F4 unattended runs could propose actions | never offered unattended |
+| F5 "Approve edited" could approve unseen actions; `edited` flag wrong | edit dialog refused for such plans (UI and runtime); `edited` only when text changed |
+| F6 5xx after dispatch reported "failed" | 5xx/408/499/timeouts/unreadable replies are *uncertain* ("may have run — check before trying again") |
+| F7 thin ledger trail | ledger row written before dispatch; connector, collection, tool, argument hash and a short reference kept |
+| F8 401 re-send on `tools/call` | only `tools/list` re-sends |
+| F9/F10 lost cancels; team-wide scans; unbounded cache | cancel in its own key; jobs keyed per person; tool cache capped |
+| F11/F13 | job titles escaped; DM link only for current members; connector reply cut to a 120-char reference |
+| F12 parser edge cases | depth limit in TS and Python (`RecursionError` handled); 3 new parity rows |
+
 ## Next live checks
 
 Start with `bun run probe` (SETUP §6): it covers the Gemini Enterprise half of the list below in

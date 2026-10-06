@@ -381,6 +381,9 @@ export async function openPlanEditor(
   const p = await c.stores.getPlan(planId);
   if (!p) return 'This plan expired.';
   if (p.invokerId !== userId) return `Only <@${p.invokerId}> can edit this plan.`;
+  if (p.effects.some((e) => e.params.kind === 'connector-action')) {
+    return 'Plans with connector actions can’t be edited — approve the card as shown, or cancel and ask again.';
+  }
   const effects = p.effects.flatMap((e) => {
     const text =
       'text' in e.params ? e.params.text : 'markdown' in e.params ? e.params.markdown : undefined;

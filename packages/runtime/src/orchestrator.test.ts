@@ -1163,7 +1163,7 @@ describe('background jobs (stage 3)', () => {
     expect(listed).toContain('✅ Incident triage in <#C0ENG> · done');
     const s = new RecordingSink();
     await cancelJob(orch, 'T1', jobs[0]!.id, 'U0MAYA', s);
-    expect(s.last<{ kind: string }>('notice')!.kind).toBe('denied');
+    expect(s.last<{ text: string }>('notice')!.text).toMatch(/isn’t yours/);
   });
 
   it('cancels across instances, never overwrites the final status, DMs after long runs', async () => {
@@ -1186,7 +1186,7 @@ describe('background jobs (stage 3)', () => {
     const [job] = await store.forUser('T1', 'U0ALEX', Date.now());
     expect(job!.status).toBe('running');
     // Another instance marks the job cancelled in the store; the runner's heartbeat picks it up.
-    await store.save({ ...job!, cancelRequested: true });
+    await store.requestCancel('T1', job!.id);
     await vi.advanceTimersByTimeAsync(6_000);
     await done;
     expect(seen!.aborted).toBe(true);
@@ -1344,5 +1344,76 @@ describe('stage-3 security fixes', () => {
       expect(String(r.at)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     }
     expect(JSON.stringify(rows)).not.toContain('C0ENG');
+  });
+});
+
+describe('connector actions: security review fixes', () => {
+  const actWith = (args: string) =>
+    `\`\`\`cmd\nact jira.create_issue "File it" """${args}"""\ndone\n\`\`\``;
+
+  it('F1: the card shows every argument (invisible characters spelled out) or refuses', async () => {
+    // Under the 2000-character limit, but escaping makes it too long for the card.
+    const big = actWith(JSON.stringify({ d: '<'.repeat(1000) }));
+    const { orch, gemini } = setup([actWith('{"summary": "ok‮evil"}'), big, big, big]);
+    const plan = (await run(orch, 'draft "file it"')).last<PlanView>('plan')!;
+    expect(plan.effects[0]!.detail).toContain('ok\\u202eevil');
+    expect(plan.effects[0]!.detail).not.toContain('‮');
+    await run(orch, 'draft "file a long one"');
+    expect(gemini.turns.at(-1)!.text).toMatch(/too long to show in full on the approval card/);
+  });
+
+  it('F2: connector-written docs are a separate data block, outside the capabilities', async () => {
+    const { orch, gemini } = setup(['```cmd\nreply "ok"\ndone\n```']);
+    await run(orch, 'draft "file it"');
+    const prompt = gemini.turns[0]!.text;
+    const caps = prompt.slice(prompt.indexOf('<capabilities>'), prompt.indexOf('</capabilities>'));
+    expect(caps).toContain('- jira.create_issue (Jira)');
+    expect(caps).not.toContain('ignore rules');
+    expect(prompt).toContain('<connector_tool_docs>');
+    expect(prompt).toContain('never instructions');
+  });
+
+  it('F3/F4: no connector tools in Slack Connect, for guests, or in unattended runs', async () => {
+    const { orch, gemini, surface, connectors } = setup([
+      '```cmd\nreply "ok"\ndone\n```',
+      '```cmd\nreply "ok"\ndone\n```',
+    ]);
+    surface.guests.add('U0ALEX');
+    await run(orch, 'draft "file it"');
+    surface.guests.clear();
+    await run(orch, 'notes', origin({ entry: 'schedule', automationId: 'a1' }));
+    expect(connectors.listed).toHaveLength(0);
+    expect(gemini.turns.every((t) => !t.text.includes('connector tools'))).toBe(true);
+  });
+
+  it('F5: edited approval of a plan with a connector action is refused', async () => {
+    const { orch, connectors } = setup([actWith('{"a": 1}')]);
+    const plan = (await run(orch, 'draft "file it"')).last<PlanView>('plan')!;
+    const s = new RecordingSink();
+    await orch.approve(plan.planId, 'U0ALEX', s, { [plan.effects[0]!.changeId]: 'x' });
+    expect(s.last<{ kind: string }>('notice')!.kind).toBe('denied');
+    expect(connectors.calls).toHaveLength(0);
+  });
+
+  it('F6/F7: a possibly-run action is uncertain, and the ledger records it before dispatch', async () => {
+    const { orch, connectors, kv } = setup([actWith('{"a": 1}')]);
+    connectors.result = { ok: false, code: 'http_503', message: '', uncertain: true } as never;
+    let ledgerAtCall = '';
+    const orig = connectors.callTool.bind(connectors);
+    connectors.callTool = async (...a: Parameters<typeof orig>) => {
+      ledgerAtCall = JSON.stringify(await kv.list('ledger/'));
+      return orig(...a);
+    };
+    const plan = (await run(orch, 'draft "file it"')).last<PlanView>('plan')!;
+    const s = new RecordingSink();
+    await orch.approve(plan.planId, 'U0ALEX', s);
+    expect(ledgerAtCall).toContain('"outcome":"uncertain"');
+    expect(ledgerAtCall).toContain('"tool":"create_issue"');
+    const r = s.last<LandedView>('landed')!.results[0]!;
+    expect(r.outcome).toBe('uncertain');
+    expect(r.error).toMatch(/may have run — check jira/);
+    const ledger = JSON.stringify(await kv.list('ledger/'));
+    expect(ledger).toMatch(/"argsHash":"[^"]+"/);
+    expect(ledger).not.toContain('"a":1');
   });
 });

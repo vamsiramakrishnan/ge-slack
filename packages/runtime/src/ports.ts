@@ -149,7 +149,9 @@ export interface ConnectorPort {
     collection: string,
     name: string,
     args: Record<string, unknown>,
-  ): Promise<{ ok: true; text: string } | { ok: false; code: string; message: string }>;
+  ): Promise<
+    { ok: true; text: string } | { ok: false; code: string; message: string; uncertain?: boolean }
+  >;
 }
 
 /** Admin insights sink (EXPERIENCE §10). Records carry no content and no user identities. */

@@ -444,3 +444,11 @@ With `connector-actions` on, admins allow-list connector tools (e.g. `@jira` →
   ledger records the action.
 - Only allow-listed tools that the connector actually offers this person can be proposed. The
   Gemini service may run only tools an admin marked `serviceAllowed`.
+- **Never proposed** in unattended runs, in Slack Connect conversations, or for guests and
+  external members.
+- The card shows **all** the arguments that will run, with invisible characters spelled out as
+  `\uXXXX`. Arguments that wouldn't fit are refused. The one-line summary is marked as written by
+  Gemini.
+- Plans with connector actions can't be approved from the edit dialog: approve the card as shown.
+- If the connector times out or errors after the call left, the receipt says **may have run —
+  check before trying again**, never "failed". The ledger records the action before it is sent.

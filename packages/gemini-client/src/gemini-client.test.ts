@@ -600,15 +600,27 @@ describe('ConnectorMcpClient', () => {
     ).rejects.toThrow();
   });
 
-  it('reports tool errors, never retries a failure, re-sends once on 401', async () => {
+  it('after dispatch: 5xx and unreadable replies are uncertain, never retried; 401 re-sent only for tools/list', async () => {
     let n = 0;
     const fail = (async () => {
       n++;
       return json({}, 503);
     }) as unknown as typeof fetch;
     const r = await new ConnectorMcpClient(cfg, fail).callTool(tokens(), 'c', 't', {});
-    expect(r).toMatchObject({ ok: false, code: 'http_503' });
+    expect(r).toMatchObject({ ok: false, code: 'http_503', uncertain: true });
     expect(n).toBe(1);
+    const refused = (async () => json({}, 400)) as unknown as typeof fetch;
+    expect(
+      await new ConnectorMcpClient(cfg, refused).callTool(tokens(), 'c', 't', {}),
+    ).not.toHaveProperty('uncertain');
+    const garbled = (async () =>
+      new Response('<html>', { status: 200 })) as unknown as typeof fetch;
+    expect(
+      await new ConnectorMcpClient(cfg, garbled).callTool(tokens(), 'c', 't', {}),
+    ).toMatchObject({
+      code: 'bad_reply',
+      uncertain: true,
+    });
     const isErr = (async () =>
       json({
         result: { isError: true, content: [{ type: 'text', text: 'no project' }] },
@@ -621,8 +633,13 @@ describe('ConnectorMcpClient', () => {
     const t = tokens();
     let m = 0;
     const unauth = (async () =>
-      ++m === 1 ? json({}, 401) : json({ result: { content: [] } })) as unknown as typeof fetch;
-    expect((await new ConnectorMcpClient(cfg, unauth).callTool(t, 'c', 't', {})).ok).toBe(true);
+      ++m === 1
+        ? json({}, 401)
+        : json({ result: { content: [], tools: [] } })) as unknown as typeof fetch;
+    expect((await new ConnectorMcpClient(cfg, unauth).callTool(t, 'c', 't', {})).ok).toBe(false);
+    expect(t.invalidate).not.toHaveBeenCalled();
+    m = 0;
+    expect(await new ConnectorMcpClient(cfg, unauth).listTools(t, 'c')).toEqual([]);
     expect(t.invalidate).toHaveBeenCalledTimes(1);
   });
 });

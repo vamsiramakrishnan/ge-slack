@@ -1,6 +1,6 @@
 import { parsePermalink } from './scope.js';
 import type { ActuationKind } from './actuation.js';
-import { MAX_ACT_ARGS_CHARS } from './connectors.js';
+import { MAX_ACT_ARGS_CHARS, MAX_ACT_ARGS_DEPTH, jsonDepth } from './connectors.js';
 
 /**
  * The model-facing ```cmd algebra for Slack (ge-msft ADR-0004/0008). The executor skill emits
@@ -395,6 +395,9 @@ export function parseStatement(line: string, toks: Tok[]): CmdLine {
       }
       if (!parsedArgs || typeof parsedArgs !== 'object' || Array.isArray(parsedArgs)) {
         return err('act: arguments must be a JSON object');
+      }
+      if (jsonDepth(parsedArgs) > MAX_ACT_ARGS_DEPTH) {
+        return err(`act: arguments are nested more than ${MAX_ACT_ARGS_DEPTH} levels`);
       }
       return {
         verb: 'effect',
