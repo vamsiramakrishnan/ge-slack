@@ -85,7 +85,7 @@ you allow-listed. If it doesn't, stop: the rest can't work on this tenant yet.
 ## 6. Licence onboarding (`licences`, on by default)
 
 Set `GE_LICENCE_REQUESTS_CHANNEL` (and invite the bot). Grant the admin-plane identity
-`discoveryengine.userLicenses.list`. Use one test user **with** a licence and one **without**.
+`discoveryengine.userStores.listUserLicenses`. Use one test user **with** a licence and one **without**.
 First run `curl -H "Authorization: Bearer $(gcloud auth print-access-token)"
 "https://discoveryengine.$GE_LOCATION.rep.googleapis.com/v1alpha/projects/$GE_PROJECT/locations/$GE_LOCATION/userStores/default_user_store/userLicenses?filter=user_principal%20%3D%20%22<email>%22"`.
 It must return that user's row. If `userPrincipal` isn't the email, set

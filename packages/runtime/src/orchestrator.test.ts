@@ -1655,7 +1655,10 @@ describe('licence onboarding: security review fixes', () => {
       const s = this.states.get(principal.toLowerCase());
       return s ? { status: s, principal: principal.toUpperCase() } : { status: 'unknown' as const };
     }
-    async assign(_t: unknown, principal: string) {
+    async assign(
+      _t: unknown,
+      principal: string,
+    ): Promise<{ ok: true } | { ok: false; code: string; pending?: boolean }> {
       this.assigned.push(principal);
       return { ok: true as const };
     }
@@ -1796,6 +1799,29 @@ describe('licence onboarding: security review fixes', () => {
     const s = new RecordingSink();
     await decideLicence(orch, 'T1', 'U0ALEX', id, 'U0ADMIN', 'decline', s);
     expect(surface.licenceCards.at(-1)?.view.status).toBe('declined');
+  });
+
+  it('approval always asks the directory, even right after a lookup (Codex P1)', async () => {
+    const { orch, dir, surface } = env();
+    dir.states.set('alex@acme.com', 'unlicensed');
+    await requestLicence(orch, origin({ entry: 'button' }), new RecordingSink());
+    const id = surface.licenceCards[0]!.view.requestId;
+    dir.states.set('alex@acme.com', 'blocked'); // blocked seconds later, inside the throttle
+    await decideLicence(orch, 'T1', 'U0ALEX', id, 'U0ADMIN', 'approve', new RecordingSink());
+    expect(dir.assigned).toEqual([]);
+  });
+
+  it('an assignment still running keeps the request open and is audited as pending', async () => {
+    const { orch, dir, surface, licences } = env();
+    dir.states.set('alex@acme.com', 'unlicensed');
+    dir.assign = async () => ({ ok: false as const, code: 'pending', pending: true });
+    await requestLicence(orch, origin({ entry: 'button' }), new RecordingSink());
+    const id = surface.licenceCards[0]!.view.requestId;
+    const s = new RecordingSink();
+    await decideLicence(orch, 'T1', 'U0ALEX', id, 'U0ADMIN', 'approve', s);
+    expect(s.last<{ text: string }>('notice')!.text).toMatch(/hasn’t finished/);
+    expect((await licences.auditSince('T1', 0)).at(-1)?.outcome).toBe('assign-pending');
+    expect((await licences.getRequest('T1', 'U0ALEX'))?.status).toBe('open');
   });
 
   it('L9: fresh lookups are throttled per person', async () => {

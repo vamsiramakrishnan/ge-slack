@@ -39,7 +39,7 @@ to an admin.
   return someone else's state.
 - **Who calls it.** An **admin-plane identity**: the runtime service account, or
   `GE_LICENCE_ADMIN_SERVICE_ACCOUNT` by impersonation. It needs only
-  `discoveryengine.userLicenses.list` (+ `discoveryengine.userStores.batchUpdateUserLicenses` if
+  `discoveryengine.userStores.listUserLicenses` (+ `discoveryengine.userStores.batchUpdateUserLicenses` if
   assignment is on). A person's own token can't read the user store and is never used for this. The
   GE-licensed service account (ADR-0001 §4) is not given these grants unless it is also the runtime
   account (`GE_SERVICE_MODE=metadata`). In that case keep `GE_LICENCE_CONFIG` unset, or use a

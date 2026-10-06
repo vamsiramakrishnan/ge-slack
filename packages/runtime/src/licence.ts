@@ -34,7 +34,7 @@ export interface LicenceDirectoryPort {
     tokens: TokenSource,
     principal: string,
     licenseConfig: string,
-  ): Promise<{ ok: true } | { ok: false; code: string }>;
+  ): Promise<{ ok: true } | { ok: false; code: string; pending?: boolean }>;
 }
 
 export interface LicenceOptions {
@@ -95,11 +95,12 @@ export class LicenceService {
     teamId: string,
     userId: string,
     linked: { email: string; subject: string },
-    opts: { fresh?: boolean } = {},
+    /** `force`: always ask the directory (approval-time safety checks; never throttled). */
+    opts: { fresh?: boolean; force?: boolean } = {},
   ): Promise<{ status: LicenceStatus; reason?: string; found?: string }> {
     const key = `licence/${teamId}/${userId}`;
     const principal = this.principalOf(linked);
-    const hit = await this.kv.get<Cached & { principal: string }>(key);
+    const hit = opts.force ? undefined : await this.kv.get<Cached & { principal: string }>(key);
     if (hit && hit.principal === principal && (!opts.fresh || this.now() - hit.at < FRESH_MIN_MS)) {
       return {
         status: hit.status,
@@ -166,7 +167,9 @@ export class LicenceService {
     return this.opts.adminIdentity;
   }
 
-  assign(principal: string) {
+  assign(
+    principal: string,
+  ): Promise<{ ok: true } | { ok: false; code: string; pending?: boolean }> {
     if (!this.opts.licenseConfig)
       return Promise.resolve({ ok: false as const, code: 'not_configured' });
     return this.opts.directory.assign(this.opts.tokens, principal, this.opts.licenseConfig);
@@ -522,7 +525,7 @@ export async function decideLicence(
       return;
     }
     // …and the user store must still allow it: never override a block made meanwhile (M2).
-    const now = await svc.status(teamId, requesterId, linked, { fresh: true });
+    const now = await svc.status(teamId, requesterId, linked, { force: true });
     if (now.status === 'blocked') {
       await audit('refused-blocked');
       await finish('void', undefined);
@@ -561,12 +564,15 @@ export async function decideLicence(
       ...(svc.adminIdentity ? { adminIdentity: svc.adminIdentity } : {}),
     };
     if (!r.ok) {
-      await audit('assign-failed', { ...assignAudit, code: r.code });
+      // `reopen` stays true either way: someone can try again (the same assignment is idempotent).
+      await audit(r.pending ? 'assign-pending' : 'assign-failed', { ...assignAudit, code: r.code });
       await sink.notice(
         'error',
-        `Gemini Enterprise didn’t assign the licence (${r.code}). Nothing changed; try again, or assign it in the Gemini Enterprise console.`,
+        r.pending
+          ? 'Gemini Enterprise accepted the assignment but hasn’t finished yet. Check the console in a minute; approving again is safe.'
+          : `Gemini Enterprise didn’t assign the licence (${r.code}). Try again, or assign it in the Gemini Enterprise console.`,
       );
-      return; // `reopen` stays true: someone can try again
+      return;
     }
     await audit('assigned', assignAudit);
     await svc.forget(teamId, requesterId);

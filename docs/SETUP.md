@@ -62,8 +62,9 @@ account), the skills, the Slack app, and the bot deployment.
   that is the runtime service account. To keep it separate, set
   `GE_LICENCE_ADMIN_SERVICE_ACCOUNT=<sa>`; the runtime SA then needs
   `roles/iam.serviceAccountTokenCreator` on that account only.
-- Grant that identity a custom role with `discoveryengine.userLicenses.list`. Add
-  `discoveryengine.userStores.batchUpdateUserLicenses` only if approvals should assign licences.
+- Grant that identity a custom role with `discoveryengine.userStores.listUserLicenses`. Add
+  `discoveryengine.userStores.batchUpdateUserLicenses` and `discoveryengine.operations.get` only if
+  approvals should assign licences (the assignment is a long-running operation the bot waits on).
   Don't add these grants to the GE-licensed service account.
 - `GE_LICENCE_USER_STORE` (default `default_user_store`).
 - `GE_LICENCE_PRINCIPAL`: `email` (default) or `subject`. This is the field your user store keys

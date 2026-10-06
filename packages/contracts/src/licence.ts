@@ -86,7 +86,14 @@ export interface LicenceAuditEntry {
   requestId: string;
   requesterId: string;
   deciderId: string;
-  outcome: 'assigned' | 'approved' | 'declined' | 'void' | 'refused-blocked' | 'assign-failed';
+  outcome:
+    | 'assigned'
+    | 'approved'
+    | 'declined'
+    | 'void'
+    | 'refused-blocked'
+    | 'assign-failed'
+    | 'assign-pending';
   principal: string;
   licenseConfig?: string;
   /** The admin-plane identity that made the call (assignments only). */

@@ -442,9 +442,15 @@ export function register(app: App, c: Container, botUserId: () => string | undef
   });
   onAction(ACTIONS.licenceRequest, async (b) => {
     const origin = clickOrigin(c, b);
-    // From App Home there is no conversation: the outcome goes to the person's DM.
-    const sinkOrigin: Origin =
-      actionValue(b) === 'home' ? { ...origin, channelId: b.user.id } : origin;
+    // From App Home there is no conversation or response_url: answer in the person's DM with
+    // the app (a real `D…` conversation id; a user id isn't a valid ephemeral target).
+    let sinkOrigin: Origin = origin;
+    if (actionValue(b) === 'home') {
+      const dm = await c.api.call('conversations.open', { users: b.user.id });
+      const dmId = (dm.channel as { id?: string } | undefined)?.id;
+      if (!dmId) return;
+      sinkOrigin = { ...origin, entry: 'slash', channelId: dmId };
+    }
     await requestLicence(c.orch, origin, c.sinkFor(sinkOrigin));
     await publishHome(c, b.user.id).catch(() => undefined);
   });

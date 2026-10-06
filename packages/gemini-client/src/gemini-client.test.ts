@@ -706,7 +706,15 @@ describe('LicenceDirectory (userStores.userLicenses)', () => {
   });
 
   it('assigns one principal to one validated licence config', async () => {
-    const fetchImpl = vi.fn(async () => reply({ name: 'operations/1' }));
+    const fetchImpl = vi.fn(async () =>
+      reply({
+        name: 'projects/p1/locations/eu/userStores/default_user_store/operations/op-1',
+        done: true,
+        response: {
+          userLicenses: [{ userPrincipal: 'alex@acme.com', licenseAssignmentState: 'ASSIGNED' }],
+        },
+      }),
+    );
     const d = new LicenceDirectory(cfg, undefined, fetchImpl as unknown as typeof fetch);
     expect(await d.assign(tokens, 'alex@acme.com', 'not-a-config')).toEqual({
       ok: false,
@@ -731,6 +739,73 @@ describe('LicenceDirectory (userStores.userLicenses)', () => {
         updateMask: 'licenseConfig',
       },
     });
+  });
+});
+
+describe('LicenceDirectory assignment operations', () => {
+  const tokens: TokenSource = { getAccessToken: async () => 't' };
+  const CONFIG = 'projects/p1/locations/eu/licenseConfigs/std';
+  const OP = 'projects/p1/locations/eu/userStores/default_user_store/operations/op-1';
+  const json = (b: unknown) => new Response(JSON.stringify(b));
+  const make = (replies: unknown[]) => {
+    const calls: string[] = [];
+    const f = (async (url: string) => {
+      calls.push(url);
+      return json(replies.shift());
+    }) as unknown as typeof fetch;
+    return { d: new LicenceDirectory(cfg, undefined, f, 0, 3, async () => {}), calls };
+  };
+
+  it('polls the operation until done and checks the person was updated', async () => {
+    const { d, calls } = make([
+      { name: OP, done: false },
+      { name: OP, done: false },
+      { name: OP, done: true, response: { userLicenses: [{ userPrincipal: 'alex@acme.com' }] } },
+    ]);
+    expect(await d.assign(tokens, 'alex@acme.com', CONFIG)).toEqual({ ok: true });
+    expect(calls.slice(1)).toEqual([
+      `https://discoveryengine.eu.rep.googleapis.com/v1alpha/${OP}`,
+      `https://discoveryengine.eu.rep.googleapis.com/v1alpha/${OP}`,
+    ]);
+  });
+
+  it('a per-user error, an operation error, or a missing row is a failure', async () => {
+    expect(
+      await make([{ name: OP, done: true, response: { errorSamples: [{ code: 9 }] } }]).d.assign(
+        tokens,
+        'alex@acme.com',
+        CONFIG,
+      ),
+    ).toEqual({ ok: false, code: 'user_9' });
+    expect(
+      await make([{ name: OP, done: true, error: { code: 7 } }]).d.assign(
+        tokens,
+        'alex@acme.com',
+        CONFIG,
+      ),
+    ).toEqual({ ok: false, code: 'op_7' });
+    expect(
+      await make([{ name: OP, done: true, response: { userLicenses: [] } }]).d.assign(
+        tokens,
+        'alex@acme.com',
+        CONFIG,
+      ),
+    ).toEqual({ ok: false, code: 'not_updated' });
+  });
+
+  it('still running after the wait is pending, and a foreign operation name is never fetched', async () => {
+    const running = make([{ name: OP, done: false }, { name: OP }, { name: OP }, { name: OP }]);
+    expect(await running.d.assign(tokens, 'alex@acme.com', CONFIG)).toEqual({
+      ok: false,
+      code: 'pending',
+      pending: true,
+    });
+    const evil = make([{ name: 'https://evil.example/x', done: false }]);
+    expect(await evil.d.assign(tokens, 'alex@acme.com', CONFIG)).toEqual({
+      ok: false,
+      code: 'bad_operation',
+    });
+    expect(evil.calls).toHaveLength(1);
   });
 });
 

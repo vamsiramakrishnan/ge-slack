@@ -107,7 +107,7 @@ const EnvSchema = z.object({
   /**
    * Licence-aware onboarding (EXPERIENCE §11, ADR-0003 §1). Lookups use an admin-plane identity:
    * the runtime service account, or this one by impersonation. It needs
-   * `discoveryengine.userLicenses.list` (and `discoveryengine.userStores.batchUpdateUserLicenses`
+   * `discoveryengine.userStores.listUserLicenses` (and `discoveryengine.userStores.batchUpdateUserLicenses`
    * when GE_LICENCE_CONFIG is set) — never the GE-licensed service account's own grants.
    */
   GE_LICENCE_ADMIN_SERVICE_ACCOUNT: z
