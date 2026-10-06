@@ -303,7 +303,7 @@ export function register(app: App, c: Container, botUserId: () => string | undef
     );
     const clicker: Origin = { entry: 'button', teamId: team, userId: body.user.id };
     await guard('agent-reply', () =>
-      continueAgent(c, { id: view.private_metadata, userId: body.user.id, reply, clicker }),
+      continueAgent(c, { id: view.private_metadata, userId: body.user.id, reply, clicker, track }),
     )();
   });
 
@@ -347,6 +347,7 @@ export function register(app: App, c: Container, botUserId: () => string | undef
       id: actionValue(b),
       userId: b.user.id,
       clicker: clickOrigin(c, b),
+      track,
       ...(b.response_url ? { responseUrl: b.response_url } : {}),
     }),
   );
@@ -355,6 +356,7 @@ export function register(app: App, c: Container, botUserId: () => string | undef
       id: actionValue(b),
       userId: b.user.id,
       clicker: clickOrigin(c, b),
+      track,
       ...(b.response_url ? { responseUrl: b.response_url } : {}),
     }),
   );

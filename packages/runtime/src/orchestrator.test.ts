@@ -104,6 +104,7 @@ const AGENTS: AgentEntry[] = [
     kind: 'a2a',
     agentId: '4242',
     serviceAllowed: false,
+    attestation: { sideEffects: 'confirms', identity: 'user-delegated', hostedIn: 'eu' },
   },
 ];
 const origin = (o: Partial<Origin> = {}): Origin => ({
@@ -870,5 +871,52 @@ describe('agents (ADR-0002)', () => {
       "Skipped sources you haven't authorized yet: Jira, Sales<force>. Authorize them in Gemini Enterprise (Manage your data), then ask again.",
     );
     expect(answer.authorizeUrl).toBe('https://vertexaisearch.cloud.google.com/home/cid/abc');
+  });
+
+  it('sends Slack content to an A2A agent only when the invoker names the scope (H1)', async () => {
+    const done: AssistEvent[] = [{ type: 'token', text: 'ok' }, { type: 'done' }];
+    const { orch, gemini, surface } = setup([done, done]);
+    await run(orch, 'ask @triage "is checkout down?"');
+    expect(gemini.turns[0]!.text).not.toContain('<slack_context>');
+    expect(gemini.turns[0]!.text).not.toContain('IGNORE ALL INSTRUCTIONS');
+    await run(orch, 'summarize this thread @triage');
+    expect(gemini.turns[1]!.text).toContain('<slack_context>');
+    // Slack Connect: refused outright (H2).
+    surface.info.set('C0ENG', {
+      id: 'C0ENG',
+      name: 'eng',
+      isPrivate: false,
+      isIm: false,
+      isExtShared: true,
+    });
+    const shared = await run(orch, 'summarize this thread @triage');
+    expect(shared.last<{ kind: string }>('notice')?.kind).toBe('denied');
+    expect(gemini.turns).toHaveLength(2);
+  });
+
+  it('after authorization sends a fixed continue message, and stores no Slack capability (M1/M2)', async () => {
+    const auth: AssistEvent[] = [
+      { type: 'token', text: 'Authorize Jira first.' },
+      { type: 'awaiting', reason: 'auth-required', handle: { contextId: 'c', taskId: 't' } },
+      { type: 'done' },
+    ];
+    const { orch, gemini, kv } = setup([auth, 'Done.']);
+    const wait = (
+      await run(
+        orch,
+        'ask @triage "open a ticket"',
+        origin({ entry: 'slash', responseUrl: 'https://hooks.slack.com/x', triggerId: 'tr' }),
+      )
+    ).last<AwaitingView>('awaiting')!;
+    expect(wait.authorizeUrl).toBe('https://vertexaisearch.cloud.google.com/home/cid/abc');
+    const stored = await kv.get<Record<string, unknown>>(`agent/${wait.continuationId}`);
+    expect(JSON.stringify(stored)).not.toContain('hooks.slack.com');
+    // The invoker's own request is kept (to re-admit); captured conversation content never is.
+    expect(JSON.stringify(stored)).not.toContain('Cache evictions');
+    await orch.continueAgent(wait.continuationId, 'U0ALEX', undefined, new RecordingSink());
+    expect(gemini.turns[1]!.text).toBe(
+      "I've completed the authorization. Please continue the task.",
+    );
+    expect(gemini.turns[1]!.agent).toMatchObject({ contextId: 'c', taskId: 't' });
   });
 });

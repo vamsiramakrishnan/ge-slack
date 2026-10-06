@@ -96,6 +96,8 @@ type Turn = {
   externallyShared: boolean;
   /** The `@agent` this turn addresses, if any (ADR-0002). */
   agent?: AgentEntry;
+  /** False when captured Slack content must not be sent (A2A agent, scope not named). */
+  forwardContext: boolean;
   /** Aborted by Slack's stop button (`agent_session_stopped`). */
   signal?: AbortSignal;
 };
@@ -251,7 +253,7 @@ export class Orchestrator {
     }
     const policy = await config.channelPolicy(origin.teamId, channel ?? '');
 
-    if (scope.kind === 'search' && opts.actionToken) {
+    if (scope.kind === 'search' && (opts.actionToken || opts.resume)) {
       // Workspace search reads public channels the person may not have joined, so its results
       // are private-only, read-only, never in shared channels, and never for guests/externals.
       const publicDelivery = origin.entry === 'mention' || inv.flags.visibility === 'public';
@@ -271,6 +273,13 @@ export class Orchestrator {
         return undefined;
       }
     }
+    const agents = await config.agents(origin.teamId);
+    const named = inv.grounds.flatMap((g) =>
+      g.kind === 'alias'
+        ? agents.filter((a) => a.alias.toLowerCase() === g.alias.toLowerCase())
+        : [],
+    );
+    const agentBarsService = named.some((a) => !a.serviceAllowed);
     const resolved = await identity.resolve({
       teamId: origin.teamId,
       userId: origin.userId,
@@ -287,7 +296,7 @@ export class Orchestrator {
           origin,
           sink,
           d.message,
-          d.offerService,
+          d.offerService && !agentBarsService,
           policy.serviceGrounds,
         );
       } else {
@@ -298,7 +307,12 @@ export class Orchestrator {
     const principal = resolved.principal;
 
     // Membership gate: the human must be able to read everything in scope and every destination.
-    const mustBeMember = [scopeChannel(scope), inv.flags.to].filter((c): c is string => Boolean(c));
+    // A resumed agent answer is delivered where the turn started: re-check that too.
+    const mustBeMember = [
+      scopeChannel(scope),
+      inv.flags.to,
+      ...(opts.resume && origin.entry !== 'agent-dm' ? [origin.channelId] : []),
+    ].filter((c): c is string => Boolean(c));
     for (const c of new Set(mustBeMember)) {
       if (!(await surface.isMember(c, origin.userId))) {
         await sink.notice(
@@ -331,10 +345,9 @@ export class Orchestrator {
       return undefined;
     }
 
-    const [catalog, unit, agents] = await Promise.all([
+    const [catalog, unit] = await Promise.all([
       config.catalog(origin.teamId),
       channel ? config.unit(origin.teamId, channel) : Promise.resolve(undefined),
-      config.agents(origin.teamId),
     ]);
     const admission = admitAgent(
       {
@@ -343,6 +356,8 @@ export class Orchestrator {
         principal: principal.kind,
         unattended: isUnattended(origin),
         scope: scope.kind,
+        scopeNamed: Boolean(inv.scope),
+        externallyShared,
       },
       agents,
     );
@@ -351,6 +366,7 @@ export class Orchestrator {
       return undefined;
     }
     const agent = admission.agent;
+    const forwardContext = admission.forwardContext;
     // Agents ground only on sources named in the request (never the channel's @unit); A2A agents
     // bring their own tools, so data stores aren't sent to them at all.
     const grounds =
@@ -383,16 +399,25 @@ export class Orchestrator {
         grounds,
         ctx: undefined,
         allowedChannels: new Set(),
+        forwardContext,
         ...(agent ? { agent } : {}),
       };
     }
-    await sink.task({
-      id: 'capture',
-      title: scope.kind === 'search' ? 'Searching Slack' : 'Reading the conversation',
-      status: 'in_progress',
-    });
+    if (forwardContext) {
+      await sink.task({
+        id: 'capture',
+        title: scope.kind === 'search' ? 'Searching Slack' : 'Reading the conversation',
+        status: 'in_progress',
+      });
+    }
     let ctx: CapturedContext | undefined;
-    if (scope.kind !== 'none') {
+    if (!forwardContext) {
+      await sink.task({
+        id: 'capture',
+        title: `Not sharing the conversation with ${agent?.title ?? 'the agent'} (name a scope to include it)`,
+        status: 'complete',
+      });
+    } else if (scope.kind !== 'none') {
       ctx = await surface.capture(scope, {
         from: inv.from,
         maxMessages: this.deps.maxMessages ?? 200,
@@ -447,6 +472,7 @@ export class Orchestrator {
       grounds,
       ctx,
       allowedChannels,
+      forwardContext,
       ...(agent ? { agent } : {}),
     };
   }
@@ -514,7 +540,7 @@ export class Orchestrator {
       ? `${agent.title} ${asWho(turn.principal)}`
       : `Gemini Enterprise ${asWho(turn.principal)}`;
     await sink.task({ id: 'ask', title: `Asking ${who}`, status: 'in_progress' });
-    const text = resume?.text ?? composeChatPrompt(inv, turn.ctx);
+    const text = resume?.text ?? composeChatPrompt(inv, turn.forwardContext ? turn.ctx : undefined);
     // Deep Research needs its session for phase 2; A2A agents continue their context/task.
     const session = resume?.handle.session;
     const events = this.deps.gemini.stream(turn.tokens, {
@@ -664,7 +690,7 @@ export class Orchestrator {
         ? { authorizeUrl: this.deps.appUrl }
         : {}),
     });
-    if (awaiting && agent) await this.pauseAgent(awaiting, agent, inv, origin, sink, turn, text);
+    if (awaiting && agent) await this.pauseAgent(awaiting, agent, inv, origin, sink, turn);
   }
 
   private connectorAuthWarning(names: string[], principal: Principal): string {
@@ -683,20 +709,20 @@ export class Orchestrator {
     origin: Origin,
     sink: TurnSink,
     turn: Turn,
-    lastText: string,
   ): Promise<void> {
+    // Slack capabilities (response_url, trigger_id) are short-lived and never stored with it.
+    const { responseUrl: _r, triggerId: _t, ...storedOrigin } = origin;
     const c: AgentContinuation = {
       id: this.newId(),
       teamId: origin.teamId,
       invokerId: origin.userId,
-      origin,
+      origin: storedOrigin,
       invocation: inv,
       agentAlias: agent.alias,
       agentId: agent.agentId,
       reason: e.reason,
       handle: e.handle,
       identity: turn.identity,
-      lastText,
       expiresAt: this.now().getTime() + AGENT_CONTINUATION_TTL_MS,
     };
     await this.deps.stores.saveContinuation(c, this.now().getTime());
@@ -719,6 +745,7 @@ export class Orchestrator {
     userId: string,
     reply: string | undefined,
     sink: TurnSink,
+    opts: { signal?: AbortSignal } = {},
   ): Promise<void> {
     const peek = await this.deps.stores.getContinuation(id);
     if (!peek || peek.expiresAt < this.now().getTime()) {
@@ -742,6 +769,7 @@ export class Orchestrator {
     try {
       const turn = await this.admit(c.invocation, c.origin, sink, { resume: true });
       if (!turn) return;
+      if (opts.signal) turn.signal = opts.signal;
       if (turn.identity !== c.identity) {
         await sink.notice(
           'denied',
@@ -760,7 +788,8 @@ export class Orchestrator {
             : 'Start Research'
           : c.reason === 'input-required'
             ? text!
-            : c.lastText;
+            : // Never replay the original request into the task: it could repeat side effects.
+              "I've completed the authorization. Please continue the task.";
       await this.chat(c.invocation, c.origin, sink, turn, [], { handle: c.handle, text: next });
     } catch (err) {
       if (err instanceof IdentityRevokedError) {

@@ -504,7 +504,7 @@ export function awaitingBlocks(a: AwaitingView): Block[] {
       elements: [
         mrkdwn(
           a.reason === 'research-plan'
-            ? 'Deep Research can take several minutes. Nothing is posted until you share it.'
+            ? 'Deep Research can take several minutes. Nothing runs until you start it; the report appears where you asked.'
             : 'Only you can continue this. It expires in an hour.',
         ),
       ],

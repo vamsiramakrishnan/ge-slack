@@ -395,14 +395,27 @@ export async function openPlanEditor(
  */
 export async function continueAgent(
   c: Container,
-  p: { id: string; userId: string; reply?: string; responseUrl?: string; clicker: Origin },
+  p: {
+    id: string;
+    userId: string;
+    reply?: string;
+    responseUrl?: string;
+    clicker: Origin;
+    /** Registers the run under its thread so Slack's stop button can cancel it. */
+    track?: (key: string, fn: (signal: AbortSignal) => Promise<void>) => Promise<void>;
+  },
 ): Promise<void> {
   const peek = await c.stores.getContinuation(p.id);
   const sink =
     peek && peek.invokerId === p.userId
       ? c.sinkFor(withResponseUrl(peek.origin, p.responseUrl), peek.invocation)
       : c.sinkFor(p.clicker);
-  await c.orch.continueAgent(p.id, p.userId, p.reply, sink);
+  const run = (signal?: AbortSignal) =>
+    c.orch.continueAgent(p.id, p.userId, p.reply, sink, signal ? { signal } : {});
+  const o = peek?.origin;
+  const key = o?.channelId ? `${o.channelId}:${o.threadTs ?? o.messageTs ?? ''}` : undefined;
+  if (p.track && key && peek?.invokerId === p.userId) await p.track(key, run);
+  else await run();
 }
 
 export async function openAgentReply(

@@ -67,6 +67,20 @@ No criticals. All findings fixed with regression tests:
 | M7 canvas gated on origin policy | service needs `serviceMayRead` on the canvas's own conversations |
 | L1–L4 | search authors not "known users"; hits verified public; names/labels neutralized; list share failure and provenance reported honestly |
 
+## Security review — agents (2026-10-06)
+
+No criticals. All findings fixed with regression tests, except M3, which is accepted (ADR-0002):
+
+| Finding | Fix |
+|---|---|
+| H1 A2A agents' own tools could act, steered by injected Slack content | A2A agents get Slack content only for a scope the invoker named. A required admin attestation (`sideEffects: none\|confirms`, `identity: user-delegated`). Service only for side-effect-free agents |
+| H2 Slack Connect / out-of-region egress to A2A agents | refused in externally shared conversations. `hostedIn` must match `GE_LOCATION` at boot |
+| M1 "Try again" replayed the request into the task | a fixed continue message is sent instead |
+| M2 continuation stored the composed prompt and `response_url` | stores neither |
+| M3 agent `kind` not verified | accepted: the engine refuses A2A agents on streamAssist. A verification check is a follow-up |
+| M4 A2A identity not declared | the attestation requires `identity: user-delegated` |
+| L1–L5 | search gates and delivery-channel membership re-run on resume; card wording; A2A echo filter (role spelling + our `messageId`); stop button cancels continuations; no service offer for agents that bar it |
+
 ## Next live checks
 
 1. Install the manifest in a sandbox workspace; confirm `chat.startStream` plan/task rendering and

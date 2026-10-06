@@ -16,7 +16,8 @@ import { StreamAssistClient, type AssistTurn } from './stream-assist.js';
  * `contextId`/`taskId`.
  *
  * Never retried: the agent's own tools may have side effects, so a re-sent message could act
- * twice. Only a 401 (rejected before the agent ran) is re-sent once with a fresh token.
+ * twice. Only a 401 (rejected before the agent ran) is re-sent once with a fresh token. After an
+ * authorization pause the runtime sends a fixed "continue" message, never the original request.
  * Engine Model Armor does not screen A2A agents; the runtime's output sanitizer still applies.
  */
 export class A2aClient {
@@ -31,9 +32,10 @@ export class A2aClient {
       yield { type: 'error', code: 'invalid_request', message: 'Not an A2A agent turn.' };
       return;
     }
+    const sentId = randomUUID();
     let res: Response;
     try {
-      res = await this.post(tokens, turn, a2aStreamUrl(this.config, agent.agentId));
+      res = await this.post(tokens, turn, a2aStreamUrl(this.config, agent.agentId), sentId);
     } catch (err) {
       yield {
         type: 'error',
@@ -75,7 +77,10 @@ export class A2aClient {
         if (message) {
           contextId = str(message.contextId) ?? contextId;
           taskId = str(message.taskId) ?? taskId;
-          if (str(message.role) !== 'ROLE_USER') yield* emit(partsText(message));
+          // Never render our own message back (echoes may use the older "user" role spelling).
+          const own =
+            /^(ROLE_)?USER$/i.test(str(message.role) ?? '') || str(message.messageId) === sentId;
+          if (!own) yield* emit(partsText(message));
         }
         if (task) {
           contextId = str(task.contextId) ?? contextId;
@@ -142,13 +147,18 @@ export class A2aClient {
     yield { type: 'done' };
   }
 
-  private async post(tokens: TokenSource, turn: AssistTurn, url: string): Promise<Response> {
+  private async post(
+    tokens: TokenSource,
+    turn: AssistTurn,
+    url: string,
+    messageId: string,
+  ): Promise<Response> {
     const agent = turn.agent!;
     const body = JSON.stringify({
       message: {
         role: 'ROLE_USER',
         content: [{ text: turn.text || ' ' }],
-        messageId: randomUUID(),
+        messageId,
         ...(agent.contextId ? { contextId: agent.contextId } : {}),
         ...(agent.taskId ? { taskId: agent.taskId } : {}),
       },

@@ -320,6 +320,10 @@ describe('A2aClient', () => {
         new Response(
           streamBody([
             {
+              // An echo of our own message must never render as the answer (L3).
+              message: { role: 'user', content: [{ text: 'triage INC-1 <slack_context>' }] },
+            },
+            {
               statusUpdate: {
                 contextId: 'projects/1/sessions/9',
                 taskId: 't1',
@@ -335,6 +339,7 @@ describe('A2aClient', () => {
     const client = new A2aClient(cfg, fetchImpl as unknown as typeof fetch);
     const events = await all(client.stream(tokens(), a2aTurn()));
     expect(events).toContainEqual({ type: 'token', text: 'Which environment?' });
+    expect(events.filter((e) => e.type === 'token')).toHaveLength(1);
     expect(events).toContainEqual({
       type: 'awaiting',
       reason: 'input-required',

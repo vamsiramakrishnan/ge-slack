@@ -69,8 +69,8 @@ export interface StoredAnswer {
 
 /**
  * An agent turn paused for its invoker (ADR-0002). Only the invoker may continue it, once, under
- * the same principal; the agent's own session/context carries the conversation, so nothing from
- * Slack is stored here beyond the invoker's last request text (re-sent after authorization).
+ * the same principal. The agent's own session/context carries the conversation, so no Slack
+ * content is stored here, and the origin is stored without its response_url / trigger_id.
  */
 export interface AgentContinuation {
   id: string;
@@ -83,7 +83,6 @@ export interface AgentContinuation {
   reason: AwaitingReason;
   handle: AgentHandle;
   identity: string;
-  lastText: string;
   expiresAt: number;
 }
 

@@ -21,6 +21,11 @@
     "kind": "a2a",
     "agentId": "8741956021",
     "description": "ADK agent on Agent Engine, registered via A2A",
-    "serviceAllowed": false
+    "serviceAllowed": false,
+    "attestation": {
+      "sideEffects": "confirms",
+      "identity": "user-delegated",
+      "hostedIn": "eu"
+    }
   }
 ]

@@ -133,6 +133,18 @@ describe('config', () => {
     const firstSource = (JSON.parse(String(ENV.GE_SOURCES_JSON)) as Array<{ alias: string }>)[0]!;
     expect(() => load({ GE_AGENTS_JSON: agent(firstSource.alias) })).toThrow(/collides/);
     expect(() => load({ GE_APP_URL: 'http://ge.example' })).toThrow(/https/);
+    const a2a = (hostedIn: string) =>
+      JSON.stringify([
+        {
+          alias: 'triage',
+          title: 'T',
+          kind: 'a2a',
+          agentId: '9',
+          attestation: { sideEffects: 'confirms', identity: 'user-delegated', hostedIn },
+        },
+      ]);
+    expect(() => load({ GE_AGENTS_JSON: a2a('us') })).toThrow(/outside GE_LOCATION/);
+    expect(load({ GE_AGENTS_JSON: a2a(String(ENV.GE_LOCATION)) }).agents).toHaveLength(1);
   });
 });
 

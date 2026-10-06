@@ -148,6 +148,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   // One `@` namespace: an alias must mean exactly one source or one agent.
   const taken = new Set(['unit', 'this', 'web', ...sources.map((s) => s.alias.toLowerCase())]);
   for (const a of agents) {
+    // Slack content may only reach agents running inside the residency pin (ADR-0002 §2).
+    if (a.attestation && c.GE_LOCATION !== 'global' && a.attestation.hostedIn !== c.GE_LOCATION) {
+      throw new Error(
+        `Agent @${a.alias} is hosted in ${a.attestation.hostedIn}, outside GE_LOCATION=${c.GE_LOCATION}.`,
+      );
+    }
     const k = a.alias.toLowerCase();
     if (taken.has(k)) throw new Error(`Agent alias @${a.alias} collides with a source or keyword.`);
     taken.add(k);

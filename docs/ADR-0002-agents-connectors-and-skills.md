@@ -57,6 +57,9 @@ Admins register agents in an **agent catalog** (`GE_AGENTS_JSON`). Each entry ha
 | Service principal only if `serviceAllowed` | Same model as `@` sources |
 | No `deep-research`/`a2a` in unattended runs | They pause for a person |
 | No workspace search (`scope:search`) results to `a2a` agents | A2A agents may be hosted elsewhere and aren't Model Armor–screened. Search hits include channels the invoker hasn't joined |
+| No `a2a` agents in externally shared (Slack Connect) conversations | A partner organization's messages never leave for an unscreened agent |
+| `a2a` agents receive Slack content only when the invoker **names the scope** (`summarize this thread @triage`, `#channel`, a link). Otherwise they get only the request line | Captured messages can carry injected instructions, and an A2A agent's tools act as the invoker. Opting in is a deliberate act |
+| `a2a` entries need an admin **attestation**: `sideEffects: none \| confirms`, `identity: user-delegated`, `hostedIn` (checked against `GE_LOCATION` at boot). `serviceAllowed` only with `sideEffects: none` | ge-slack can't see inside a full-code agent. Its owner attests that every side effect stops for confirmation (A2A `INPUT_REQUIRED` → **Reply** card), that it reads data as the user, and where it runs |
 | Agents ground only on sources named in the request | The channel's `@unit` is not sent implicitly. `a2a` agents get no data stores (they bring their own tools) |
 
 Admission runs **after** principal resolution and the membership gate, so it can't widen anything.
@@ -76,19 +79,21 @@ Admission runs **after** principal resolution and the membership gate, so it can
 
 ### 4. Paused agents: one continuation, the invoker only
 
-When an agent pauses, the runtime stores an `AgentContinuation`: the agent, the handle, the pinned principal identity, the original origin and invocation, and the last request text. It lasts one hour. Then a private card is shown:
+When an agent pauses, the runtime stores an `AgentContinuation`: the agent, the handle, the pinned principal identity, and the original origin and invocation. It lasts one hour. No captured Slack content is stored, and the origin is stored without its `response_url`/`trigger_id`. Then a private card is shown:
 
 | Pause | Card | Continue with |
 |---|---|---|
 | Deep Research plan | **Start research** · **Change the plan** (modal) | `"Start Research"` / `"Revise the research plan: …"` on the same session |
 | A2A `INPUT_REQUIRED` | **Reply** (modal) | the reply, on the same `contextId`/`taskId` |
-| A2A `AUTH_REQUIRED` | **Authorize** (link to `GE_APP_URL`) · **Try again** | the original text re-sent |
+| A2A `AUTH_REQUIRED` | **Authorize** (link to `GE_APP_URL`) · **Try again** | a fixed "authorization done, please continue" message. The original request is **never** replayed into the task, so side effects can't repeat |
 
 Continuation rules:
 
 - **Invoker only.** The continuation is taken exactly once.
 - **Re-admitted.** The principal is re-resolved, the membership gate and agent admission are re-checked, and the turn is refused if the identity differs from the one that paused (as with plan approval).
+- **Re-checked on resume.** The workspace-search gates run again, and so does membership of the conversation the answer is delivered to.
 - **No re-reading of Slack.** The agent's session already holds the context.
+- **Cancellable.** Slack's stop button cancels a continued run, as it does any other turn.
 
 The answer renders where the original turn did (agent DM thread, mention thread, or privately), using the click's fresh `response_url`.
 
@@ -111,6 +116,11 @@ The answer renders where the original turn did (agent DM thread, mention thread,
 - **Egress is admin-controlled.** Slack content reaches an A2A agent only if an admin registered it. The agent sees what the turn admitted (never search hits), framed as data.
 - **Side effects are the agent's.** A full-code agent can act through its own tools under the OAuth grant the person gave it in Gemini Enterprise. ge-slack never gives agents Slack write access. Register only agents whose actions ask for confirmation (A2A `INPUT_REQUIRED`), so the confirmation reaches the person as a **Reply** card.
 - **Long-running work.** Deep Research can stream for many minutes inside one request. On Cloud Run, raise the request timeout (up to 60 min). A job runner with push notifications (A2A `pushNotificationConfigs`) is the follow-up.
+
+**Accepted:** an agent's `kind` comes from admin config and isn't verified against the engine (M3).
+A full-code agent misfiled as `assistant` would be sent via `agentsSpec`. The engine doesn't run
+A2A/ADK agents on streamAssist **[docs]**, so the turn fails rather than reaching the agent
+unscreened. An admin-side `agents.get` check is part of the catalog-discovery follow-up.
 
 ## Live probes before GA
 

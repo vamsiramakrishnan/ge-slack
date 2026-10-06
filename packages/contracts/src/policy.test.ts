@@ -134,6 +134,11 @@ describe('intent routing', () => {
 });
 
 describe('admitAgent (ADR-0002)', () => {
+  const attestation = {
+    sideEffects: 'confirms' as const,
+    identity: 'user-delegated' as const,
+    hostedIn: 'eu',
+  };
   const agents: AgentEntry[] = [
     {
       alias: 'research',
@@ -142,7 +147,14 @@ describe('admitAgent (ADR-0002)', () => {
       agentId: 'deep_research',
       serviceAllowed: false,
     },
-    { alias: 'triage', title: 'Triage', kind: 'a2a', agentId: '42', serviceAllowed: true },
+    {
+      alias: 'triage',
+      title: 'Triage',
+      kind: 'a2a',
+      agentId: '42',
+      serviceAllowed: false,
+      attestation,
+    },
   ];
   const input = {
     verb: 'ask' as const,
@@ -153,21 +165,43 @@ describe('admitAgent (ADR-0002)', () => {
     principal: 'user' as const,
     unattended: false,
     scope: 'thread',
+    scopeNamed: false,
+    externallyShared: false,
   };
   it('splits the agent from the remaining grounds; A2A agents get no data stores', () => {
-    const r = admitAgent(input, agents);
-    expect(r).toEqual({ ok: true, agent: agents[1], grounds: [] });
+    expect(admitAgent(input, agents)).toEqual({
+      ok: true,
+      agent: agents[1],
+      grounds: [],
+      forwardContext: false,
+    });
     const plain = admitAgent({ ...input, grounds: [{ kind: 'alias', alias: 'jira' }] }, agents);
     expect(plain).toEqual({
       ok: true,
       agent: undefined,
       grounds: [{ kind: 'alias', alias: 'jira' }],
+      forwardContext: true,
     });
   });
-  it('never forwards workspace search hits to an A2A agent', () => {
+  it('sends Slack content to an A2A agent only when the invoker named the scope', () => {
+    expect(admitAgent({ ...input, scopeNamed: true }, agents)).toMatchObject({
+      ok: true,
+      forwardContext: true,
+    });
+    const research = [{ kind: 'alias' as const, alias: 'research' }];
+    expect(admitAgent({ ...input, grounds: research }, agents)).toMatchObject({
+      ok: true,
+      forwardContext: true,
+    });
+  });
+  it('never forwards search hits or Slack Connect conversations to an A2A agent', () => {
     expect(admitAgent({ ...input, scope: 'search' }, agents)).toMatchObject({
       ok: false,
       reason: 'search',
+    });
+    expect(admitAgent({ ...input, externallyShared: true }, agents)).toMatchObject({
+      ok: false,
+      reason: 'shared',
     });
   });
   it('fails closed for the service and for unattended pauses', () => {
@@ -184,7 +218,7 @@ describe('admitAgent (ADR-0002)', () => {
       reason: 'write-verb',
     });
   });
-  it('rejects agent ids that are not a terminal segment', () => {
+  it('validates catalog entries: terminal ids, A2A attestations, service only without side effects', () => {
     expect(
       AgentEntrySchema.safeParse({ ...agents[0], agentId: 'projects/p/agents/1' }).success,
     ).toBe(false);
@@ -192,5 +226,23 @@ describe('admitAgent (ADR-0002)', () => {
       AgentEntrySchema.parse({ alias: 'x', title: 'X', kind: 'assistant', agentId: '1' })
         .serviceAllowed,
     ).toBe(false);
+    const a2a = { alias: 'x', title: 'X', kind: 'a2a', agentId: '1' };
+    expect(AgentEntrySchema.safeParse(a2a).success).toBe(false);
+    expect(
+      AgentEntrySchema.safeParse({
+        ...a2a,
+        attestation: { ...attestation, identity: 'agent-account' },
+      }).success,
+    ).toBe(false);
+    expect(AgentEntrySchema.safeParse({ ...a2a, attestation, serviceAllowed: true }).success).toBe(
+      false,
+    );
+    expect(
+      AgentEntrySchema.safeParse({
+        ...a2a,
+        attestation: { ...attestation, sideEffects: 'none' },
+        serviceAllowed: true,
+      }).success,
+    ).toBe(true);
   });
 });
