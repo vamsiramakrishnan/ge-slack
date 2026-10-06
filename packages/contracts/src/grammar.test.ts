@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseCommand, renderInvocation, tokenize, isSafePattern } from './grammar.js';
+import { parseFeatures } from './features.js';
 import { scheduleTextToCron } from './schedule-text.js';
 import { parsePermalink, parseDuration } from './scope.js';
 
@@ -158,5 +159,40 @@ describe('isSafePattern', () => {
     expect(isSafePattern('incident|sev[12]')).toBe(true);
     expect(isSafePattern('(a+)+')).toBe(false);
     expect(isSafePattern('.*')).toBe(false);
+  });
+});
+
+describe('stage-3 control verbs', () => {
+  it('apply only in their exact shapes; otherwise the text is a question', () => {
+    expect(parseCommand('remember "Deploys freeze Thursday"')).toEqual({
+      kind: 'control',
+      verb: 'remember',
+      args: ['Deploys freeze Thursday'],
+    });
+    const q = parseCommand('remember when we moved the deploy freeze?');
+    expect(q.kind === 'invoke' && q.invocation.verb === 'ask' && q.invocation.inferredVerb).toBe(
+      true,
+    );
+    expect(parseCommand('forget 3')).toMatchObject({ kind: 'control', verb: 'forget' });
+    expect(parseCommand('forget about it')).toMatchObject({ kind: 'invoke' });
+    expect(parseCommand('memory')).toMatchObject({ kind: 'control', verb: 'memory' });
+    expect(parseCommand('jobs report for Q3')).toMatchObject({ kind: 'invoke' });
+    expect(parseCommand('diag service')).toMatchObject({ kind: 'control', args: ['service'] });
+    expect(parseCommand('stats export')).toMatchObject({ kind: 'control', args: ['export'] });
+    expect(parseCommand('stats for the release')).toMatchObject({ kind: 'invoke' });
+  });
+});
+
+describe('features', () => {
+  it('parses GE_FEATURES with defaults, additions and removals; refuses typos', () => {
+    expect([...parseFeatures(undefined)].sort()).toEqual(['analytics', 'diag', 'jobs', 'memory']);
+    expect([...parseFeatures('default,connector-actions,-jobs')].sort()).toEqual([
+      'analytics',
+      'connector-actions',
+      'diag',
+      'memory',
+    ]);
+    expect([...parseFeatures('memory')]).toEqual(['memory']);
+    expect(() => parseFeatures('memroy')).toThrow(/Unknown feature/);
   });
 });

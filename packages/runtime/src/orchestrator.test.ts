@@ -176,6 +176,8 @@ function setup(script: Array<string | import('@ge-slack/contracts').AssistEvent[
     now: () => NOW,
     newId: () => `id${++id}`,
     appUrl: 'https://vertexaisearch.cloud.google.com/home/cid/abc',
+    features: new Set(['memory', 'analytics', 'jobs', 'diag', 'connector-actions'] as const),
+    version: 'test',
   });
   return { orch, surface, gemini, identity, config, kv };
 }
@@ -918,5 +920,42 @@ describe('agents (ADR-0002)', () => {
       "I've completed the authorization. Please continue the task.",
     );
     expect(gemini.turns[1]!.agent).toMatchObject({ contextId: 'c', taskId: 't' });
+  });
+});
+
+describe('diagnostics (stage 3)', () => {
+  it('runs the live path as the invoker and reports each check privately', async () => {
+    const { orch, gemini, config } = setup([
+      [
+        { type: 'token', text: 'ready' },
+        { type: 'connector-auth', connectors: ['Jira<script>'] },
+        { type: 'done' },
+      ],
+    ]);
+    await config.setUnit('T1', 'C0ENG', { aliases: ['runbooks'] });
+    const sink = await run(orch, 'diag', origin({ entry: 'slash' }));
+    const text = sink.last<{ text: string }>('notice')!.text;
+    expect(text).toContain('build test');
+    expect(text).toContain('✅ *Identity*  as you · alex@acme.com');
+    expect(text).toContain("you're a member of <#C0ENG>");
+    expect(text).toMatch(/✅ \*Gemini\* {2}answered in [\d.]+ s/);
+    expect(text).toContain('not authorized: Jira&lt;script&gt;');
+    expect(text).toContain('Authorize sources in Gemini Enterprise');
+    expect(text).toContain('@triage (name a scope to share the thread)');
+    // Live call: sessionless, grounded on @unit, no answer posted.
+    expect(gemini.turns[0]).toMatchObject({ sessionless: true, route: 'default' });
+    expect(gemini.turns[0]!.dataStores).toHaveLength(1);
+    expect(sink.last('answer')).toBeUndefined();
+  });
+
+  it('explains a missing link instead of prompting, and can be switched off', async () => {
+    const { orch, gemini, identity } = setup([]);
+    identity.linked.clear();
+    const s = await run(orch, 'diag', origin({ entry: 'slash' }));
+    expect(s.last<{ text: string }>('notice')!.text).toContain('🔓 *Identity*');
+    expect(gemini.turns).toHaveLength(0);
+    (orch.deps as { features?: Set<string> }).features = new Set();
+    const off = await run(orch, 'diag', origin({ entry: 'slash' }));
+    expect(off.last<{ text: string }>('notice')!.text).toMatch(/switched off/);
   });
 });

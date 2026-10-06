@@ -357,3 +357,80 @@ message, because streaming needs a thread. The roadmap for richer native renderi
   a pointer to the DM. Guests and external members can't search. The Gemini service only sees hits
   from channels allow-listed for it. From a slash command (which carries no `action_token`) it
   falls back to a keyword filter of the current channel and says so.
+
+## 10. Stage 3 — memory, diagnostics, insights, jobs, connector actions
+
+Each feature has a flag in `GE_FEATURES` so it can be switched on in a sandbox first (`default`
+= `memory,analytics,jobs,diag`; `connector-actions` is opt-in). Live checks for each are in
+[LIVE-TESTING.md](LIVE-TESTING.md).
+
+### Diagnostics — `/gemini diag`
+A private card that runs the real path as *you, in this channel* and says what it found:
+
+```
+🩺 Gemini diagnostics · build 7f4ae9f · features: memory, analytics, jobs, diag
+✅ Identity   as you · alex@acme.com (channel policy: user-only)
+✅ Access     you're a member of #eng
+✅ Gemini     answered in 1.4 s (eu, engine support-app)
+⚠️ Sources    @unit = Runbooks, Jira · not authorized: Jira  [Authorize sources]
+✅ Agents     @research (Deep Research) · @helpdesk · 🚫 @triage (needs a named scope)
+🏢 Service    ge-bot@… configured · may read this channel: no
+```
+
+Nothing is posted and no session is kept. A failure line says the likely cause, never a raw
+provider body. `/gemini diag service` runs the same check as the Gemini service.
+
+### Channel memory — notes the team can see
+Memory is **opt-in, visible and editable**. It is never learned silently from conversation.
+
+- `/gemini remember "Deploy freezes start Thursday 18:00 UTC"`, or the **Remember this** message
+  shortcut on any message. The note keeps a link to that message.
+- `/gemini memory` lists the channel's notes. Each row shows who added it and when, and has a
+  **Forget** button. `/gemini forget 3` does the same.
+- Every turn scoped to the channel grounds on its notes as *data*, never as instructions. The
+  answer footer says `📌 3 channel notes`.
+- Any member can add or forget notes; the list shows who did what. You must be a member to read or
+  change a channel's notes. The Gemini service uses them only where it may read the channel. A2A
+  agents get them only when you name the scope.
+- Limits: 50 notes per channel, 500 characters each.
+
+### Admin insights — App Home → Admin, `/gemini stats`
+For workspace admins only. Last 7 days, with **no message content and no user identities**:
+
+- turns by verb, user versus service, agents used;
+- outcomes: answered, plans shown, changes applied, denied, blocked by policy, errors;
+- 👍/👎 rate;
+- the top denial reasons, which show where policy is getting in people's way.
+
+**Export ledger** DMs the admin a CSV of the last 30 days of landed changes. It has ids, kinds,
+outcomes, principals, approvers and links, but no content.
+
+### Background jobs — long agents don't hold a thread hostage
+Deep Research runs and A2A tasks become **jobs**. The thread shows live progress, and the result
+lands there when done. If it takes longer than a minute, the invoker also gets a DM:
+"Your research is ready → link".
+
+- App Home → **Running for you** lists active jobs, each with **Cancel**. Slack's stop button
+  also works.
+- A job interrupted by a restart is marked *interrupted*, never left looking alive.
+
+### Connector actions — "do it in Jira", as a reviewable plan
+With `connector-actions` on, admins allow-list connector tools (e.g. `@jira` →
+`create_issue`). `draft` and free-text requests can then propose them:
+
+```
+┌ Draft · 2 changes                                  🔐 as you · alex@acme.com ┐
+│ 1. Reply in thread          "Filed ENG-… for the cache TTL fix"             │
+│ 2. 🔌 Jira · create_issue   "Cache TTL 30s → 300s"           can't be undone │
+│      { "project": "ENG", "summary": "Cache TTL 30s → 300s", … }              │
+│ [Approve 2]  [Edit]  [Cancel]                                                │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+- The card shows the **exact tool and arguments**. Nothing runs until the requester approves.
+  The action runs **as the approver**, through Gemini Enterprise, with their connector
+  authorization.
+- Connector actions are marked *can't be undone*. The receipt shows the connector's reply, and the
+  ledger records the action.
+- Only allow-listed tools that the connector actually offers this person can be proposed. The
+  Gemini service may run only tools an admin marked `serviceAllowed`.

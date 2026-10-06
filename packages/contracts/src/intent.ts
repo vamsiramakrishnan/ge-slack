@@ -42,6 +42,12 @@ export const ControlVerbSchema = z.enum([
   'sources',
   'automations',
   'undo',
+  'diag',
+  'remember',
+  'forget',
+  'memory',
+  'stats',
+  'jobs',
 ]);
 export type ControlVerb = z.infer<typeof ControlVerbSchema>;
 

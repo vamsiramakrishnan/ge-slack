@@ -195,6 +195,8 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
     },
     timeZone: cfg.GE_TIME_ZONE,
     ...(cfg.GE_APP_URL ? { appUrl: cfg.GE_APP_URL } : {}),
+    features: cfg.features,
+    version: cfg.GE_VERSION ?? cfg.K_REVISION ?? 'dev',
   });
   const postResponse = deps.postResponse ?? defaultResponsePoster;
 

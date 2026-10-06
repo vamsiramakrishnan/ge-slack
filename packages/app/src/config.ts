@@ -4,6 +4,8 @@ import type { GeminiClientConfig } from '@ge-slack/gemini-client';
 import {
   AgentEntrySchema,
   GroundSourceSchema,
+  parseFeatures,
+  type Feature,
   type AgentEntry,
   type GroundSource,
 } from '@ge-slack/contracts';
@@ -97,12 +99,18 @@ const EnvSchema = z.object({
   /** Audience the scheduler mints tokens for; defaults to `${PUBLIC_BASE_URL}/cron/tick`. */
   GE_CRON_AUDIENCE: z.string().url().optional(),
   GE_TIME_ZONE: z.string().default('UTC'),
+  /** Stage-3 features: `default` (memory,analytics,jobs,diag), `+name`, `-name`. */
+  GE_FEATURES: z.string().optional(),
+  /** Build shown by /gemini diag; Cloud Run sets K_REVISION. */
+  GE_VERSION: z.string().max(64).optional(),
+  K_REVISION: z.string().max(128).optional(),
   NODE_ENV: z.string().default('development'),
 });
 
 export type AppConfig = z.infer<typeof EnvSchema> & {
   sources: GroundSource[];
   agents: AgentEntry[];
+  features: Set<Feature>;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -153,7 +161,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       );
     }
   }
-  return { ...c, ...loadCatalogs(c) };
+  return { ...c, ...loadCatalogs(c), features: parseFeatures(c.GE_FEATURES) };
 }
 
 /** The `@` catalogs (sources + agents) with their cross-checks; shared by the bot and the probe. */

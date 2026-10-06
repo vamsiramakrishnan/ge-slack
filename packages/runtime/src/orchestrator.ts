@@ -19,6 +19,7 @@ import {
   type Invocation,
   type Origin,
   type AssistEvent,
+  type Feature,
   type ParsedCommand,
   type Principal,
   type SourceRef,
@@ -81,6 +82,10 @@ export interface OrchestratorDeps {
   maxEffects?: number;
   /** Gemini Enterprise web app, where people authorize connectors and agents (deep link). */
   appUrl?: string;
+  /** Stage-3 features switched on for this deployment (`GE_FEATURES`). */
+  features?: ReadonlySet<Feature>;
+  /** Build identifier shown by `/gemini diag` (e.g. the git sha / Cloud Run revision). */
+  version?: string;
 }
 
 type Turn = {

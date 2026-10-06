@@ -107,11 +107,31 @@ export function parseCommand(raw: string): ParsedCommand {
 
   if (verb === 'automate') return parseAutomate(tokens.slice(1));
   if (verb && !isIntent(verb)) {
-    return { kind: 'control', verb, args: tokens.slice(1).map((t) => t.text) };
+    const rest = tokens.slice(1);
+    // Words like "remember" or "jobs" also start ordinary questions: the newer control verbs
+    // only apply in their exact shapes; anything else is free text for `ask`.
+    const shape = STRICT_CONTROL[verb];
+    if (shape && !shape(rest)) return finishInvoke('ask', true, tokens);
+    return { kind: 'control', verb, args: rest.map((t) => t.text) };
   }
   if (verb) return finishInvoke(verb, false, tokens.slice(1));
   return finishInvoke('ask', true, tokens);
 }
+
+const word = (t: Token | undefined, ...allowed: string[]) =>
+  t !== undefined && !t.quoted && allowed.includes(t.text.toLowerCase());
+
+/** Exact argument shapes for the stage-3 control verbs (EXPERIENCE §10). */
+const STRICT_CONTROL: Partial<Record<ControlVerb, (rest: Token[]) => boolean>> = {
+  // remember "<note>"  — the note must be quoted
+  remember: (r) => r.length === 1 && r[0]!.quoted && r[0]!.text.trim().length > 0,
+  // forget <n>
+  forget: (r) => r.length === 1 && /^\d{1,3}$/.test(r[0]!.text),
+  memory: (r) => r.length === 0,
+  jobs: (r) => r.length === 0,
+  diag: (r) => r.length === 0 || (r.length === 1 && word(r[0], 'service', 'me')),
+  stats: (r) => r.length === 0 || (r.length === 1 && word(r[0], 'export')),
+};
 
 function finishInvoke(verb: Intent, inferred: boolean, rest: Token[]): ParsedCommand {
   const r = parseInvocationTokens(verb, inferred, rest);

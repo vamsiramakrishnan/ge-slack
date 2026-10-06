@@ -7,6 +7,7 @@ import {
   type ControlVerb,
   type Origin,
 } from '@ge-slack/contracts';
+import { runDiagnostics } from './diag.js';
 import type { Orchestrator } from './orchestrator.js';
 import type { TurnSink } from './ports.js';
 
@@ -18,6 +19,7 @@ export const HELP_TEXT = [
   '*Flags:* `--public` · `--to #channel` · `--as me|service` · `--tone formal|friendly|brief` · `--dry-run`',
   '*Automate:* `automate "weekdays 9:00" summarize #eng --to #eng-digest` · `automate on :memo: notes`',
   '*Account:* `connect` · `disconnect` · `whoami` · `sources` · `automations` · `undo <change-id>`',
+  '*Memory:* `remember "<note>"` · `memory` · `forget <n>` · *Jobs:* `jobs` · *Check setup:* `diag`',
   'Run `/gemini` with no text to open the composer.',
 ].join('\n');
 
@@ -33,6 +35,16 @@ export async function handleControl(
     case 'help':
       await sink.notice('info', HELP_TEXT);
       return;
+
+    case 'diag': {
+      if (!orch.deps.features?.has('diag')) {
+        await sink.notice('info', 'Diagnostics are switched off for this workspace.');
+        return;
+      }
+      const as = args[0] === 'service' ? 'service' : args[0] === 'me' ? 'me' : undefined;
+      await sink.notice('info', (await runDiagnostics(orch, origin, as)).join('\n'));
+      return;
+    }
 
     case 'connect': {
       if (!orch.deps.linker) {
