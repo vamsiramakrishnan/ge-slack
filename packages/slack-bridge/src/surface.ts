@@ -164,7 +164,8 @@ export class SlackSurface implements SurfacePort {
     try {
       const r = await must(this.api, 'users.info', { user: userId });
       const u = r.user as { is_admin?: boolean; is_owner?: boolean; team_id?: string };
-      return Boolean((u.is_admin || u.is_owner) && (!u.team_id || u.team_id === this.opts.teamId));
+      // Enterprise Grid: an admin of another workspace in the org is not an admin here.
+      return Boolean((u.is_admin || u.is_owner) && u.team_id === this.opts.teamId);
     } catch {
       return false;
     }

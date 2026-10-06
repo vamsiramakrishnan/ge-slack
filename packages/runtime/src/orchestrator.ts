@@ -198,16 +198,7 @@ export class Orchestrator {
     warnings: string[] = [],
     opts: RunOptions = {},
   ): Promise<void> {
-    sink = observingSink(
-      this,
-      origin.teamId,
-      {
-        verb: inv.verb,
-        entry: origin.entry,
-        ...(origin.channelId ? { channel: origin.channelId } : {}),
-      },
-      sink,
-    );
+    sink = observingSink(this, origin.teamId, { verb: inv.verb, entry: origin.entry }, sink);
     try {
       const turn = await this.admit(inv, origin, sink, opts);
       if (!turn) return;
@@ -515,8 +506,9 @@ export class Orchestrator {
     );
     // Channel memory grounds turns that read a channel — never search hits, never an A2A agent
     // the invoker didn't point at the conversation (EXPERIENCE §10).
+    // Never in unattended runs: nobody reviews what a note steers there (security review H1).
     const memory =
-      forwardContext && scope.kind !== 'none' && scope.kind !== 'search'
+      forwardContext && !isUnattended(origin) && scope.kind !== 'none' && scope.kind !== 'search'
         ? await notesFor(this, origin.teamId, scopeChannel(scope))
         : [];
     if (memory.length) {
@@ -952,6 +944,7 @@ export class Orchestrator {
       id: this.newId(),
       teamId: origin.teamId,
       invokerId: origin.userId,
+      ...(turn.memory.length ? { memoryNotes: turn.memory.length } : {}),
       origin,
       invocation: inv,
       scope: turn.scope,
@@ -1268,6 +1261,7 @@ export class Orchestrator {
       id: this.newId(),
       teamId: origin.teamId,
       invokerId: origin.userId,
+      ...(turn.memory.length ? { memoryNotes: turn.memory.length } : {}),
       origin,
       invocation: inv,
       scope: turn.scope,
@@ -1361,6 +1355,7 @@ export class Orchestrator {
       dryRun: p.dryRun,
       expiresAt: new Date(p.expiresAt).toISOString(),
       sources: p.sources,
+      ...(p.memoryNotes ? { memoryNotes: p.memoryNotes } : {}),
     };
   }
 
@@ -1374,7 +1369,12 @@ export class Orchestrator {
     edits: Record<string, string> = {},
   ): Promise<void> {
     const peek = await this.deps.stores.getPlan(planId);
-    if (peek) sink = observingSink(this, peek.teamId, { verb: peek.invocation.verb }, sink);
+    // Approval clicks aren't new requests: record only what lands.
+    if (peek) {
+      sink = observingSink(this, peek.teamId, { verb: peek.invocation.verb }, sink, {
+        turns: false,
+      });
+    }
     if (!peek) {
       await sink.notice('info', 'This plan expired or was already handled — run it again.');
       return;
@@ -1612,6 +1612,7 @@ export class Orchestrator {
         ...(res.inverse ? { inverse: res.inverse } : {}),
         principal: identity,
         ...(p.automationId ? { automationId: p.automationId } : {}),
+        ...(p.memoryNotes ? { memoryNotes: p.memoryNotes } : {}),
         at: this.now().toISOString(),
       });
       results.push({

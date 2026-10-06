@@ -65,6 +65,11 @@ export async function handleControl(
         return;
       }
       const as = args[0] === 'service' ? 'service' : args[0] === 'me' ? 'me' : undefined;
+      // Running the service identity on demand spends its licence and quota: admins only.
+      if (as === 'service' && !(await orch.deps.surface.isWorkspaceAdmin(origin.userId))) {
+        await sink.notice('denied', '`/gemini diag service` is for workspace admins.');
+        return;
+      }
       await sink.notice('info', (await runDiagnostics(orch, origin, as)).join('\n'));
       return;
     }

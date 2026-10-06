@@ -109,6 +109,28 @@ No criticals. All findings fixed:
 | L8 fragile secret header in the scheduler job | gone with H1 |
 | INFO renderer missed conditional settings | `WIF_*` required for `oidc`, `GE_SERVICE_ACCOUNT` for service modes |
 
+## Security review — stage 3 memory, diagnostics, insights (2026-10-06)
+
+No criticals. Fixed with regression tests:
+
+| Finding | Fix |
+|---|---|
+| H1 a note could steer everyone's turns, including unattended and write-proposing ones | memory is never used in unattended runs; guests and externals can't change it; attributed and framed as untrusted in the prompt; 90-day expiry; a note stops grounding answers when its author leaves the channel |
+| M1 notes behind a write weren't recorded | note count on plan cards and in the ledger / CSV export |
+| M2 two different admin checks | one check: admin or owner of *this* team (fails closed when `team_id` is missing) |
+| M3 slash commands used a different team key | every entry point keys state by the install team |
+| M4 5 notes could ground answers but not be listed | limit 45 = everything on one card |
+| M5 `diag` reached Gemini for non-members; any member could spend the service identity | stops after the access line; `diag service` is admin-only; `diag me` forces your identity |
+| M6 telemetry kept channel ids and exact times | no conversation ids; day precision |
+| L1/L2 unescaped titles in insights/diag | escaped |
+| L3 skewed counts | approval clicks aren't requests; connect prompts aren't denials; auto-applied runs count; one 👍/👎 per person per real answer |
+| L4/L5 | sharper denial reasons; CSV guard catches leading whitespace and newlines |
+| L7/L8 | 20 adds per person per hour; bot/app messages can't be remembered |
+| L10 | `GE_FEATURES=-memory` means "defaults minus memory" |
+
+Accepted: L6, the ledger export lists DM/private ids and links for admins (by design: it's the
+admin's audit trail). L9, `forget <n>` is positional (the Forget button uses ids).
+
 ## Next live checks
 
 Start with `bun run probe` (SETUP §6): it covers the Gemini Enterprise half of the list below in

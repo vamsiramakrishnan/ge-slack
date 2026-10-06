@@ -322,14 +322,9 @@ export async function publishHome(c: Container, userId: string): Promise<void> {
   });
 }
 
+/** One admin check everywhere: an admin/owner of *this* install's team (fails closed). */
 export async function isWorkspaceAdmin(c: Container, userId: string): Promise<boolean> {
-  try {
-    const r = await c.api.call('users.info', { user: userId });
-    const u = r.user as { is_admin?: boolean; is_owner?: boolean } | undefined;
-    return Boolean(u?.is_admin || u?.is_owner);
-  } catch {
-    return false;
-  }
+  return c.surface.isWorkspaceAdmin(userId);
 }
 
 export async function openPolicy(

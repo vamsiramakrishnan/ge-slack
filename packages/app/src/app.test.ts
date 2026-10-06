@@ -60,7 +60,11 @@ class FakeSlack implements SlackApi {
     if (method === 'users.info')
       return {
         ok: true,
-        user: { is_admin: args.user === 'U0ADMIN', profile: { email: 'alex@acme.com' } },
+        user: {
+          is_admin: args.user === 'U0ADMIN',
+          team_id: ENV.SLACK_TEAM_ID,
+          profile: { email: 'alex@acme.com' },
+        },
       };
     return { ok: true };
   }

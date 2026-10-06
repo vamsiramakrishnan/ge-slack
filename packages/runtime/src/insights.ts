@@ -11,6 +11,7 @@ import type { KeyValueStore } from '@ge-slack/identity';
 import type { Orchestrator } from './orchestrator.js';
 import type { TelemetryPort, TurnSink } from './ports.js';
 import type { LedgerEntry } from './stores.js';
+import { mrkdwnEscape } from './compile.js';
 
 const DAY_MS = 86_400_000;
 const RETAIN_MS = 90 * DAY_MS;
@@ -30,7 +31,8 @@ export class KvTelemetry implements TelemetryPort {
     const parsed = TelemetryEventSchema.safeParse(e);
     if (!parsed.success) return;
     const at = this.now();
-    const rec: TelemetryRecord = { ...parsed.data, at: at.toISOString(), teamId };
+    // Day precision only: a millisecond timestamp could re-identify who did what.
+    const rec: TelemetryRecord = { ...parsed.data, at: day(at), teamId };
     await this.kv.set(`stat/${teamId}/${day(at)}/${randomUUID()}`, rec, { ttlMs: RETAIN_MS });
   }
 
@@ -57,7 +59,7 @@ export function insightsLines(s: InsightsSummary): string[] {
     Object.entries(m)
       .sort((a, b) => b[1] - a[1])
       .slice(0, n)
-      .map(([k, v]) => `${k} ${v}`)
+      .map(([k, v]) => `${mrkdwnEscape(k)} ${v}`)
       .join(' · ') || '—';
   const o = s.outcomes;
   const rated = s.feedback.up + s.feedback.down;
@@ -68,7 +70,7 @@ export function insightsLines(s: InsightsSummary): string[] {
     `*Agents* ${top(s.byAgent)}`,
     `*Outcomes* answered ${o['turn:answered'] ?? 0} · plans ${o['turn:planned'] ?? 0} · changes applied ${o['apply:applied'] ?? 0} · failed ${o['apply:failed'] ?? 0} · denied ${o['turn:denied'] ?? 0} · blocked by policy ${o['turn:blocked'] ?? 0} · errors ${o['turn:error'] ?? 0}`,
     `*Feedback* ${rated ? `👍 ${s.feedback.up} · 👎 ${s.feedback.down} (${Math.round((100 * s.feedback.up) / rated)}% positive)` : 'none yet'}`,
-    `*Top denials* ${s.denials.map((d) => `${d.reason} ${d.count}`).join(' · ') || 'none'}`,
+    `*Top denials* ${s.denials.map((d) => `${mrkdwnEscape(d.reason)} ${d.count}`).join(' · ') || 'none'}`,
   ];
 }
 
@@ -86,6 +88,7 @@ const CSV_COLUMNS = [
   'undone_at',
   'undone_by',
   'automation_id',
+  'memory_notes',
 ] as const;
 
 /**
@@ -95,7 +98,7 @@ const CSV_COLUMNS = [
 export function ledgerCsv(entries: LedgerEntry[]): string {
   const cell = (v: unknown) => {
     let s = v === undefined || v === null ? '' : String(v);
-    if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+    if (/^[\s]*[=+\-@]/.test(s) || /^[\t\r\n]/.test(s)) s = `'${s}`;
     return `"${s.replace(/"/g, '""')}"`;
   };
   const rows = entries.map((e) =>
@@ -113,6 +116,7 @@ export function ledgerCsv(entries: LedgerEntry[]): string {
       e.undoneAt,
       e.undoneBy,
       e.automationId,
+      e.memoryNotes,
     ]
       .map(cell)
       .join(','),
@@ -164,7 +168,7 @@ export async function showStats(
 /** Coarse, content-free reason codes for a denial notice (admin "top denials"). */
 export function denialReason(text: string): string {
   const t = text.toLowerCase();
-  if (/not a member|no longer a member|not in/.test(t)) return 'not-member';
+  if (/not a member|no longer a member/.test(t)) return 'not-member';
   if (/guests|external members/.test(t)) return 'guest';
   if (/externally shared|other organizations|slack connect/.test(t)) return 'slack-connect';
   if (/search/.test(t)) return 'search-rules';
@@ -185,19 +189,20 @@ export function denialReason(text: string): string {
 export function observingSink(
   orch: Orchestrator,
   teamId: string,
-  base: { verb?: string; entry?: string; channel?: string },
+  base: { verb?: string; entry?: string },
   sink: TurnSink,
+  opts: { turns?: boolean } = {},
 ): TurnSink {
+  const countTurns = opts.turns !== false;
   let done = false;
   const turn = (outcome: string, extra: Partial<TelemetryEvent> = {}) => {
-    if (done) return;
+    if (done || !countTurns) return;
     done = true;
     orch.observe(teamId, {
       kind: 'turn',
       outcome,
       ...(base.verb ? { verb: base.verb } : {}),
       ...(base.entry ? { entry: base.entry } : {}),
-      ...(base.channel ? { channel: base.channel } : {}),
       ...extra,
     });
   };
@@ -218,11 +223,14 @@ export function observingSink(
     },
     automationPlan: (p) => sink.automationPlan(p),
     connect: (c) => {
-      turn('denied', { reason: 'needs-link' });
+      // A connect prompt isn't a denial: the request resumes after linking.
+      turn('connect');
       return sink.connect(c);
     },
     executing: (p) => sink.executing(p),
     landed: (l) => {
+      // Unattended answers can land without an answer card: the turn still completed.
+      turn('applied', { principal: l.identity.kind });
       for (const r of l.results) {
         orch.observe(teamId, {
           kind: 'apply',

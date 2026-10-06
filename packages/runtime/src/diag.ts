@@ -29,7 +29,7 @@ export async function runDiagnostics(
     teamId: origin.teamId,
     userId: origin.userId,
     policy: policy.identity,
-    ...(as === 'service' ? { requested: 'service' as const } : {}),
+    ...(as ? { requested: as } : {}),
     unattended: isUnattended(origin),
     externallyShared: Boolean(info?.isExtShared || origin.externallyShared),
   });
@@ -47,13 +47,17 @@ export async function runDiagnostics(
 
   if (channel) {
     const member = await surface.isMember(channel, origin.userId);
-    lines.push(
-      member
-        ? `✅ *Access*  you're a member of <#${channel}>`
-        : `🚫 *Access*  you're not a member of <#${channel}>, so Gemini can't read it for you`,
-    );
+    if (!member) {
+      // Nothing about this channel (sources, connectors) is checked for a non-member.
+      lines.push(
+        `🚫 *Access*  you're not a member of <#${channel}>, so Gemini can't read it for you`,
+      );
+      return lines;
+    }
+    lines.push(`✅ *Access*  you're a member of <#${channel}>`);
     if (principal.kind === 'service' && !policy.serviceMayRead) {
       lines.push(`🚫 *Access*  the Gemini service may not read <#${channel}> (App Home → Admin)`);
+      return lines;
     }
   }
 
@@ -101,7 +105,7 @@ export async function runDiagnostics(
       ? `✅ *Gemini*  answered in ${secs} s`
       : `❌ *Gemini*  ${failure ?? 'the answer was cut off'}`,
   );
-  const sourceNames = grounds.titles.length ? grounds.titles.join(', ') : 'none';
+  const sourceNames = grounds.titles.length ? grounds.titles.map(mrkdwnEscape).join(', ') : 'none';
   lines.push(
     unauthorized.length
       ? `⚠️ *Sources*  @unit = ${sourceNames} · not authorized: ${unauthorized.slice(0, 5).map(oneLine).join(', ')}`
@@ -122,8 +126,9 @@ export async function runDiagnostics(
         },
         agents,
       );
-      if (!r.ok) return `🚫 @${a.alias} (${r.reason})`;
-      return r.forwardContext ? `@${a.alias}` : `@${a.alias} (name a scope to share the thread)`;
+      const alias = mrkdwnEscape(a.alias);
+      if (!r.ok) return `🚫 @${alias} (${r.reason})`;
+      return r.forwardContext ? `@${alias}` : `@${alias} (name a scope to share the thread)`;
     });
     lines.push(`✅ *Agents*  ${verdicts.join(' · ')}`);
   }

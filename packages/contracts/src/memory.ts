@@ -4,7 +4,15 @@ import { z } from 'zod';
  * Channel memory (EXPERIENCE §10): notes people add on purpose, visible and editable, used to
  * ground turns in that channel as data. Never learned silently from conversation.
  */
-export const MEMORY_LIMITS = { notesPerChannel: 50, chars: 500 } as const;
+export const MEMORY_LIMITS = {
+  /** All of them fit on one `/gemini memory` card — nothing that grounds answers is hidden. */
+  notesPerChannel: 45,
+  chars: 500,
+  /** Notes expire; a team re-adds what still matters (security review H1). */
+  ttlDays: 90,
+  /** Adds per person per channel per hour (bounds remember/forget churn). */
+  addsPerHour: 20,
+} as const;
 
 export const ChannelNoteSchema = z.object({
   id: z.string().regex(/^[a-z0-9]{6,32}$/),

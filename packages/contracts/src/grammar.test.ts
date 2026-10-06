@@ -193,6 +193,7 @@ describe('features', () => {
       'memory',
     ]);
     expect([...parseFeatures('memory')]).toEqual(['memory']);
+    expect([...parseFeatures('-memory')].sort()).toEqual(['analytics', 'diag', 'jobs']);
     expect(() => parseFeatures('memroy')).toThrow(/Unknown feature/);
   });
 });

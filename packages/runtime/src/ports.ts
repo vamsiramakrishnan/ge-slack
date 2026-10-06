@@ -252,6 +252,8 @@ export interface PlanView {
   dryRun: boolean;
   expiresAt: string;
   sources: SourceRef[];
+  /** Channel notes that grounded this plan (EXPERIENCE §10). */
+  memoryNotes?: number;
 }
 
 export interface AutomationPlanView {

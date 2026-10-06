@@ -2,8 +2,8 @@ import { z } from 'zod';
 
 /**
  * Admin insights (EXPERIENCE §10): one record per outcome, with **no message content and no user
- * identities** — verbs, principal kinds, agent aliases, outcome and reason codes, and the channel
- * id (to spot where policy gets in the way).
+ * or conversation identities** — verbs, principal kinds, agent titles, outcome and reason codes,
+ * and the day it happened. (A DM id would identify a pair of people, so channels aren't kept.)
  */
 export const TelemetryKindSchema = z.enum([
   'turn',
@@ -28,10 +28,10 @@ export const TelemetryEventSchema = z.object({
     .string()
     .regex(/^[a-z0-9_-]{1,40}$/)
     .optional(),
-  channel: z.string().max(24).optional(),
   entry: z.string().max(24).optional(),
 });
 export type TelemetryEvent = z.infer<typeof TelemetryEventSchema>;
+/** `at` is the UTC day only (YYYY-MM-DD). */
 export type TelemetryRecord = TelemetryEvent & { at: string; teamId: string };
 
 export interface InsightsSummary {

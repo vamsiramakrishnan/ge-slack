@@ -8,7 +8,12 @@ import type { TurnSink } from './ports.js';
  * and that the person is a member of it — reading notes is reading the channel.
  */
 
-async function gate(orch: Orchestrator, origin: Origin, sink: TurnSink): Promise<string | null> {
+async function gate(
+  orch: Orchestrator,
+  origin: Origin,
+  sink: TurnSink,
+  change = false,
+): Promise<string | null> {
   if (!orch.deps.features?.has('memory')) {
     await sink.notice('info', 'Channel memory is switched off for this workspace.');
     return null;
@@ -22,6 +27,12 @@ async function gate(orch: Orchestrator, origin: Origin, sink: TurnSink): Promise
     await sink.notice('denied', `You're not a member of <#${channel}>.`);
     return null;
   }
+  // Notes ground everyone's answers in the channel: only full members of this workspace may
+  // change them, never guests or people from another organization (security review H1).
+  if (change && (await orch.deps.surface.isGuest(origin.userId))) {
+    await sink.notice('denied', "Guests and external members can't change channel memory.");
+    return null;
+  }
   return channel;
 }
 
@@ -32,14 +43,23 @@ export async function rememberNote(
   sink: TurnSink,
   from?: { permalink?: string; sourceUser?: string },
 ): Promise<void> {
-  const channel = await gate(orch, origin, sink);
+  const channel = await gate(orch, origin, sink, true);
   if (!channel) return;
   const cleaned = cleanNoteText(raw);
   if (!cleaned.ok) {
     await sink.notice('error', cleaned.error);
     return;
   }
-  const live = (await orch.deps.stores.notes(origin.teamId, channel)).filter((n) => !n.forgottenAt);
+  const all = await orch.deps.stores.notes(origin.teamId, channel);
+  const live = all.filter((n) => !n.forgottenAt);
+  const hourAgo = new Date(Date.now() - 3_600_000).toISOString();
+  if (
+    all.filter((n) => n.author === origin.userId && n.at > hourAgo).length >=
+    MEMORY_LIMITS.addsPerHour
+  ) {
+    await sink.notice('error', 'That’s a lot of notes in an hour — try again later.');
+    return;
+  }
   if (live.length >= MEMORY_LIMITS.notesPerChannel) {
     await sink.notice(
       'error',
@@ -59,7 +79,7 @@ export async function rememberNote(
       : {}),
   };
   await orch.deps.stores.saveNote(origin.teamId, note);
-  orch.observe(origin.teamId, { kind: 'memory', outcome: 'added', channel });
+  orch.observe(origin.teamId, { kind: 'memory', outcome: 'added' });
   await sink.notice(
     'info',
     `📌 Remembered for <#${channel}> (note ${live.length + 1} of ${MEMORY_LIMITS.notesPerChannel}). Answers in this channel will use it. \`/gemini memory\` to see or forget notes.`,
@@ -101,7 +121,7 @@ export async function forgetNote(
   which: { n: number } | { id: string },
   sink: TurnSink,
 ): Promise<void> {
-  const channel = await gate(orch, origin, sink);
+  const channel = await gate(orch, origin, sink, true);
   if (!channel) return;
   const live = (await orch.deps.stores.notes(origin.teamId, channel)).filter((n) => !n.forgottenAt);
   const note = 'n' in which ? live[which.n - 1] : live.find((n) => n.id === which.id);
@@ -117,16 +137,27 @@ export async function forgetNote(
     forgottenBy: origin.userId,
     forgottenAt: new Date().toISOString(),
   });
-  orch.observe(origin.teamId, { kind: 'memory', outcome: 'forgotten', channel });
+  orch.observe(origin.teamId, { kind: 'memory', outcome: 'forgotten' });
   await sink.notice('info', `Forgot a note in <#${channel}>. It no longer grounds answers.`);
 }
 
-/** Notes that may ground a turn reading `channel` (live notes only). */
+/**
+ * Notes that may ground a turn reading `channel`: live, unexpired, and added by someone who is
+ * still a member (a note leaves with its author).
+ */
 export async function notesFor(
   orch: Orchestrator,
   teamId: string,
   channel: string | undefined,
 ): Promise<ChannelNote[]> {
   if (!channel || !orch.deps.features?.has('memory')) return [];
-  return (await orch.deps.stores.notes(teamId, channel)).filter((n) => !n.forgottenAt);
+  const cutoff = new Date(Date.now() - MEMORY_LIMITS.ttlDays * 86_400_000).toISOString();
+  const live = (await orch.deps.stores.notes(teamId, channel)).filter(
+    (n) => !n.forgottenAt && n.at >= cutoff,
+  );
+  const stillMember = new Map<string, boolean>();
+  for (const a of new Set(live.map((n) => n.author))) {
+    stillMember.set(a, await orch.deps.surface.isMember(channel, a).catch(() => false));
+  }
+  return live.filter((n) => stillMember.get(n.author));
 }

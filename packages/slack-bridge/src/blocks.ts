@@ -278,7 +278,7 @@ export function planBlocks(p: PlanView, opts: RenderOptions = { rich: true }): B
     type: 'context',
     elements: [
       mrkdwn(
-        `${identityLine(p.identity)} · only <@${p.invokerId}> can approve · expires <!date^${Math.floor(Date.parse(p.expiresAt) / 1000)}^{time}|in 30 min>`,
+        `${identityLine(p.identity)}${p.memoryNotes ? ` · 📌 ${p.memoryNotes} channel note${p.memoryNotes === 1 ? '' : 's'}` : ''} · only <@${p.invokerId}> can approve · expires <!date^${Math.floor(Date.parse(p.expiresAt) / 1000)}^{time}|in 30 min>`,
       ),
     ],
   });

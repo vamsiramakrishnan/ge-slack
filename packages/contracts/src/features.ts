@@ -15,10 +15,12 @@ export const DEFAULT_FEATURES: readonly Feature[] = ['memory', 'analytics', 'job
  */
 export function parseFeatures(text: string | undefined): Set<Feature> {
   const out = new Set<Feature>();
-  const tokens = (text ?? 'default')
+  let tokens = (text ?? 'default')
     .split(',')
     .map((t) => t.trim())
     .filter(Boolean);
+  // Only adjustments ("-memory", "+connector-actions") are relative to the defaults.
+  if (tokens.every((t) => t.startsWith('-') || t.startsWith('+'))) tokens = ['default', ...tokens];
   for (const t of tokens) {
     if (t === 'default') {
       for (const f of DEFAULT_FEATURES) out.add(f);

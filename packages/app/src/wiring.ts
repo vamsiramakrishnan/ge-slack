@@ -86,7 +86,8 @@ export function register(app: App, c: Container, botUserId: () => string | undef
   app.command('/gemini', async ({ command, ack }) => {
     await ack(); // within 3s; the work continues asynchronously
     await guard('slash', onSlash)(c, {
-      teamId: command.team_id,
+      // Every entry point keys state by the install team (Slack Connect / Grid send other ids).
+      teamId: team,
       userId: command.user_id,
       channelId: command.channel_id,
       text: command.text,
@@ -264,7 +265,19 @@ export function register(app: App, c: Container, botUserId: () => string | undef
   app.shortcut(CALLBACKS.messageRemember, async ({ shortcut, ack }) => {
     await ack();
     if (shortcut.type !== 'message_action') return;
-    const msg = shortcut.message as { ts: string; text?: string; user?: string };
+    const msg = shortcut.message as { ts: string; text?: string; user?: string; bot_id?: string };
+    if (!msg.user || msg.bot_id) {
+      // A note must say who said it; app and bot messages (including Gemini's) have no person.
+      const origin: Origin = {
+        entry: 'message-shortcut',
+        teamId: team,
+        userId: shortcut.user.id,
+        channelId: shortcut.channel.id,
+        responseUrl: shortcut.response_url,
+      };
+      await c.sinkFor(origin).notice('info', 'Gemini can only remember messages people wrote.');
+      return;
+    }
     await guard('remember', rememberFromMessage)(c, {
       teamId: team,
       userId: shortcut.user.id,
@@ -401,7 +414,12 @@ export function register(app: App, c: Container, botUserId: () => string | undef
     const v = actionValue(b);
     const [dir, turnId] = v.split(':');
     if (turnId && (dir === 'up' || dir === 'down')) {
-      c.orch.observe(team, { kind: 'feedback', outcome: dir });
+      // One vote per person per real answer in insights (re-clicks just change the stored vote).
+      const [answer, prior] = await Promise.all([
+        c.stores.getAnswer(turnId),
+        c.stores.getFeedback(team, turnId, b.user.id),
+      ]);
+      if (answer && !prior) c.orch.observe(team, { kind: 'feedback', outcome: dir });
       await c.stores.recordFeedback(
         team,
         turnId,

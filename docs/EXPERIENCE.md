@@ -378,7 +378,8 @@ A private card that runs the real path as *you, in this channel* and says what i
 ```
 
 Nothing is posted and no session is kept. A failure line says the likely cause, never a raw
-provider body. `/gemini diag service` runs the same check as the Gemini service.
+provider body. In a channel you aren't in, it stops after the access line. `/gemini diag service`
+runs the same check as the Gemini service, for workspace admins only.
 
 ### Channel memory — notes the team can see
 Memory is **opt-in, visible and editable**. It is never learned silently from conversation.
@@ -389,13 +390,22 @@ Memory is **opt-in, visible and editable**. It is never learned silently from co
   **Forget** button. `/gemini forget 3` does the same.
 - Every turn scoped to the channel grounds on its notes as *data*, never as instructions. The
   answer footer says `📌 3 channel notes`.
-- Any member can add or forget notes; the list shows who did what. You must be a member to read or
-  change a channel's notes. The Gemini service uses them only where it may read the channel. A2A
-  agents get them only when you name the scope.
-- Limits: 50 notes per channel, 500 characters each.
+- Any full member can add or forget notes; the list shows who did what. Guests and people from
+  other organizations can't change notes. You must be a member to read a channel's notes. The
+  Gemini service uses them only where it may read the channel. A2A agents get them only when you
+  name the scope.
+- **Never in unattended runs.** Schedules, reaction and keyword triggers, and workflow steps don't
+  read notes, because nobody reviews what a note might steer there.
+- Notes are attributed in the prompt ("added by @maya") and framed as data that may try to give
+  orders. A note stops grounding answers when its author leaves the channel, and expires after 90
+  days.
+- Plan cards and the ledger also show how many notes shaped a change.
+- Limits: 45 notes per channel (all visible on one card), 500 characters each, 20 adds per person
+  per hour.
 
 ### Admin insights — App Home → Admin, `/gemini stats`
-For workspace admins only. Last 7 days, with **no message content and no user identities**:
+For admins of this workspace only. Last 7 days, with **no message content, no user identities and
+no conversation ids** (day precision):
 
 - turns by verb, user versus service, agents used;
 - outcomes: answered, plans shown, changes applied, denied, blocked by policy, errors;

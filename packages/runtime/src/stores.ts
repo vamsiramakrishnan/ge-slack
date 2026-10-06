@@ -34,6 +34,8 @@ export interface PendingPlan {
   contentHash: string;
   /** Principal that drafted the content (`user:…` / `service:…`). Approval must match it. */
   identity: string;
+  /** Channel notes that grounded the drafting turn (shown on the card, kept in the ledger). */
+  memoryNotes?: number;
   /** changeIds the approver unticked (review findings). */
   skipped?: string[];
   /** Unattended run awaiting the owner (automation gate). */
@@ -100,6 +102,8 @@ export interface LedgerEntry {
   inverse?: Inverse;
   principal: string;
   automationId?: string;
+  /** Channel notes that grounded the drafting turn. */
+  memoryNotes?: number;
   at: string;
   undoneAt?: string;
   undoneBy?: string;
@@ -145,8 +149,9 @@ export class RuntimeStores {
   /** One key per note, so concurrent `remember`s never overwrite each other. */
   saveNote(teamId: string, n: ChannelNote) {
     // Forgotten notes stay visible (who/when) for 30 days, then disappear.
+    // Live notes expire after MEMORY_LIMITS.ttlDays (90); notesFor also filters by age.
     return this.kv.set(`memory/${teamId}/${n.channel}/${n.id}`, n, {
-      ...(n.forgottenAt ? { ttlMs: 30 * 24 * 3_600_000 } : {}),
+      ttlMs: (n.forgottenAt ? 30 : 90) * 24 * 3_600_000,
     });
   }
   async notes(teamId: string, channel: string): Promise<ChannelNote[]> {
@@ -195,6 +200,9 @@ export class RuntimeStores {
       .slice(0, limit);
   }
 
+  getFeedback(teamId: string, turnId: string, userId: string) {
+    return this.kv.get<{ value: string }>(`feedback/${teamId}/${turnId}/${userId}`);
+  }
   recordFeedback(teamId: string, turnId: string, userId: string, value: 'positive' | 'negative') {
     return this.kv.set(`feedback/${teamId}/${turnId}/${userId}`, {
       value,
