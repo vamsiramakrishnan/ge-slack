@@ -10,6 +10,22 @@ account), the skills, the Slack app, and the bot deployment.
 2. Create the data stores you want as `@` sources and list them in `GE_SOURCES_FILE`
    (see `sources.example.json`). Mark `serviceAllowed: true` only for shared, non-personal sources.
 3. Model Armor, agent routing, and grounding are engine configuration, not bot configuration.
+4. **Agents (optional, ADR-0002).** List the agents people may call as `@alias` in
+   `GE_AGENTS_FILE` (see `agents.example.json`):
+   - `kind` is `assistant` (Workflow Builder / Agent Designer chat agents, Google-made agents),
+     `deep-research` (`agentId: deep_research`, allowlisted for API use) or `a2a` (ADK/A2A agents
+     registered to the app, called through the A2A proxy).
+   - `agentId` is the last segment of the agent's resource name.
+   - Aliases must not collide with source aliases.
+   - Register `a2a` agents only if their side-effecting tools ask for confirmation (A2A
+     `INPUT_REQUIRED`). Engine Model Armor doesn't screen them.
+5. **Connector authorization.** Set `GE_APP_URL` to your Gemini Enterprise web app URL. When a
+   person hasn't authorized a federated connector, the answer names it and links there (Manage
+   your data → Authorize).
+6. Deep Research streams for minutes inside one request: set the Cloud Run request timeout to at
+   least 30 minutes if you register it.
+7. If skill turns return 500s on your tenant, set `GE_SKILL_AGENTS_SPEC=off` (route skills by
+   mention only).
 
 ## 2. Identities
 

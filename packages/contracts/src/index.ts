@@ -11,3 +11,4 @@ export * from './events.js';
 export * from './actuation.js';
 export * from './cmd.js';
 export * from './plan.js';
+export * from './agents.js';

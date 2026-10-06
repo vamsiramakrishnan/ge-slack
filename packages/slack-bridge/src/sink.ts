@@ -1,6 +1,7 @@
 import { toSlackMetadata, type TaskUpdate } from '@ge-slack/contracts';
 import type {
   AnswerView,
+  AwaitingView,
   AutomationPlanView,
   ConnectView,
   LandedView,
@@ -10,6 +11,7 @@ import type {
 } from '@ge-slack/runtime';
 import {
   answerBlocks,
+  awaitingBlocks,
   automationPlanBlocks,
   connectBlocks,
   landedBlocks,
@@ -205,6 +207,21 @@ export class SlackTurnSink implements TurnSink {
     await this.closeStreamWith([]);
     // Connect prompts are always private to the person who has to act on them.
     await this.private(connectBlocks(c), 'Connect Gemini Enterprise');
+    await this.idle();
+  }
+
+  async awaiting(a: AwaitingView): Promise<void> {
+    await this.closeStreamWith([]);
+    const text = `${a.agentTitle} is waiting for you`;
+    if (this.target.mode === 'unattended') {
+      await must(this.api, 'chat.postMessage', { channel: this.target.ownerId, text });
+    } else if (this.target.mode === 'ephemeral') {
+      // A new private message: never replace the answer (e.g. the research plan) it refers to.
+      await this.ephemeral(awaitingBlocks(a), text, false);
+    } else {
+      // Continuing is the invoker's call alone, so the controls are private to them.
+      await this.private(awaitingBlocks(a), text);
+    }
     await this.idle();
   }
 

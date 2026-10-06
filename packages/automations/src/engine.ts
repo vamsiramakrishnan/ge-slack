@@ -342,6 +342,11 @@ export class OutcomeSink implements TurnSink {
   retire(text: string) {
     return this.inner.retire(text);
   }
+  awaiting(a: Parameters<TurnSink['awaiting']>[0]) {
+    // Unattended runs can't continue a paused agent (admission refuses those agents anyway).
+    this.outcome = 'failed';
+    return this.inner.awaiting(a);
+  }
   notice(kind: Parameters<TurnSink['notice']>[0], text: string) {
     if (kind === 'denied' || kind === 'policy') this.outcome = 'denied';
     else if (kind === 'error') this.outcome = 'failed';

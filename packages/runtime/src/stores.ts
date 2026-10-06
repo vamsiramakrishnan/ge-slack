@@ -1,4 +1,6 @@
 import type {
+  AgentHandle,
+  AwaitingReason,
   ActuationKind,
   ActuationOutcome,
   ActuationResult,
@@ -65,6 +67,26 @@ export interface StoredAnswer {
   shareable?: boolean;
 }
 
+/**
+ * An agent turn paused for its invoker (ADR-0002). Only the invoker may continue it, once, under
+ * the same principal; the agent's own session/context carries the conversation, so nothing from
+ * Slack is stored here beyond the invoker's last request text (re-sent after authorization).
+ */
+export interface AgentContinuation {
+  id: string;
+  teamId: string;
+  invokerId: string;
+  origin: Origin;
+  invocation: Invocation;
+  agentAlias: string;
+  agentId: string;
+  reason: AwaitingReason;
+  handle: AgentHandle;
+  identity: string;
+  lastText: string;
+  expiresAt: number;
+}
+
 export interface LedgerEntry {
   changeId: string;
   teamId: string;
@@ -118,6 +140,16 @@ export class RuntimeStores {
   }
   takeResume(id: string) {
     return this.kv.take<{ origin: Origin; invocation: Invocation }>(`resume/${id}`);
+  }
+
+  saveContinuation(c: AgentContinuation, now: number) {
+    return this.kv.set(`agent/${c.id}`, c, { ttlMs: Math.max(1, c.expiresAt - now) });
+  }
+  getContinuation(id: string) {
+    return this.kv.get<AgentContinuation>(`agent/${id}`);
+  }
+  takeContinuation(id: string) {
+    return this.kv.take<AgentContinuation>(`agent/${id}`);
   }
 
   saveAnswer(a: StoredAnswer) {

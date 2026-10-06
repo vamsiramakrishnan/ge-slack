@@ -1,4 +1,6 @@
 import type {
+  AgentEntry,
+  AwaitingReason,
   ActuationRequest,
   ActuationResult,
   ApprovalClass,
@@ -115,6 +117,8 @@ export interface WorkspaceConfigPort {
   unit(teamId: string, channel: string): Promise<ResearchUnit | undefined>;
   setUnit(teamId: string, channel: string, unit: ResearchUnit): Promise<void>;
   catalog(teamId: string): Promise<GroundSource[]>;
+  /** Gemini Enterprise agents addressable with `@alias` (ADR-0002). */
+  agents(teamId: string): Promise<AgentEntry[]>;
 }
 
 export interface AutomationPort {
@@ -146,6 +150,20 @@ export interface AnswerView {
   followUps: boolean;
   /** Durable provenance for the answer message itself (attached as `ge_provenance` metadata). */
   provenance?: WriteProvenance;
+  /** The agent that answered, shown in the footer (e.g. "Deep Research", "Triage bot · A2A"). */
+  via?: string;
+  /** Some connectors were skipped for lack of authorization: link to Gemini Enterprise. */
+  authorizeUrl?: string;
+}
+
+/** An agent paused for the invoker: start a research plan, answer a question, or authorize. */
+export interface AwaitingView {
+  continuationId: string;
+  reason: AwaitingReason;
+  agentTitle: string;
+  invokerId: string;
+  /** Where to authorize connectors/agents (Gemini Enterprise web app; deployment config). */
+  authorizeUrl?: string;
 }
 
 export interface PlanEffectView {
@@ -234,6 +252,8 @@ export interface TurnSink {
   notice(kind: NoticeKind, text: string): Promise<void>;
   /** The invoker closed the card (cancel / dry run): replace it with a final line. */
   retire(text: string): Promise<void>;
+  /** An agent is waiting on the invoker (Deep Research plan, A2A input or authorization). */
+  awaiting(a: AwaitingView): Promise<void>;
 }
 
 export interface LinkStarter {

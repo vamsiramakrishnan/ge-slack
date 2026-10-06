@@ -7,6 +7,7 @@ import {
   IntentSchema,
 } from '@ge-slack/contracts';
 import {
+  agentReplyModal,
   composerModal,
   homeView,
   planEditModal,
@@ -385,4 +386,48 @@ export async function openPlanEditor(
     view: planEditModal({ planId, effects }),
   });
   return undefined;
+}
+
+/**
+ * Continue a paused agent (ADR-0002). The answer renders where the original turn did (agent DM
+ * thread, mention thread, or privately), using the click's fresh `response_url`; refusals go only
+ * to the clicker.
+ */
+export async function continueAgent(
+  c: Container,
+  p: { id: string; userId: string; reply?: string; responseUrl?: string; clicker: Origin },
+): Promise<void> {
+  const peek = await c.stores.getContinuation(p.id);
+  const sink =
+    peek && peek.invokerId === p.userId
+      ? c.sinkFor(withResponseUrl(peek.origin, p.responseUrl), peek.invocation)
+      : c.sinkFor(p.clicker);
+  await c.orch.continueAgent(p.id, p.userId, p.reply, sink);
+}
+
+export async function openAgentReply(
+  c: Container,
+  triggerId: string,
+  id: string,
+  userId: string,
+): Promise<string | undefined> {
+  const k = await c.stores.getContinuation(id);
+  if (!k) return 'That agent conversation expired — ask again.';
+  if (k.invokerId !== userId) return `Only <@${k.invokerId}> can reply to this agent.`;
+  const agent = (await c.workspace.agents(k.teamId)).find((a) => a.alias === k.agentAlias);
+  await c.api.call('views.open', {
+    trigger_id: triggerId,
+    view: agentReplyModal({
+      continuationId: id,
+      agentTitle: agent?.title ?? `@${k.agentAlias}`,
+      reason: k.reason,
+    }),
+  });
+  return undefined;
+}
+
+/** The stored origin's response_url is stale by now; use the click's, or none (postEphemeral). */
+function withResponseUrl(origin: Origin, responseUrl: string | undefined): Origin {
+  const { responseUrl: _stale, ...rest } = origin;
+  return responseUrl ? { ...rest, responseUrl } : rest;
 }

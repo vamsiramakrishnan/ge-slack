@@ -2,7 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { fromSlackMetadata, type ActuationRequest } from '@ge-slack/contracts';
 import { SlackSurface } from './surface.js';
 import { SlackTurnSink, defaultResponsePoster } from './sink.js';
-import { answerBlocks, markdownBlocks, planBlocks, citationElements } from './blocks.js';
+import {
+  agentReplyModal,
+  answerBlocks,
+  awaitingBlocks,
+  markdownBlocks,
+  planBlocks,
+  citationElements,
+} from './blocks.js';
 import type { SlackApi, SlackApiResponse } from './slack-api.js';
 
 type Handler = (args: Record<string, unknown>) => SlackApiResponse | Promise<SlackApiResponse>;
@@ -830,5 +837,54 @@ describe('stage-2 security regressions', () => {
       { from: [], maxMessages: 10, actionToken: 't' },
     );
     expect(ctx.messages.map((m) => m.text)).toEqual(['public']);
+  });
+});
+
+describe('agent blocks (ADR-0002)', () => {
+  const base = { continuationId: 'k1', agentTitle: 'Deep <Research>', invokerId: 'U1' };
+  it('offers start / change for a research plan and escapes the title', () => {
+    const blocks = awaitingBlocks({ ...base, reason: 'research-plan' });
+    const json = JSON.stringify(blocks);
+    expect(json).toContain('ge_agent_start');
+    expect(json).toContain('ge_agent_reply');
+    expect(json).toContain('Deep &lt;Research&gt;');
+  });
+  it('only links https authorize URLs', () => {
+    const ok = JSON.stringify(
+      awaitingBlocks({ ...base, reason: 'auth-required', authorizeUrl: 'https://ge.example/a' }),
+    );
+    expect(ok).toContain('"url":"https://ge.example/a"');
+    expect(ok).toContain('ge_agent_retry');
+    const bad = JSON.stringify(
+      awaitingBlocks({ ...base, reason: 'auth-required', authorizeUrl: 'javascript:alert(1)' }),
+    );
+    expect(bad).not.toContain('javascript');
+  });
+  it('shows which agent answered and a modal for replies', () => {
+    const blocks = answerBlocks(
+      {
+        turnId: 't',
+        text: 'x',
+        sources: [],
+        identity: { kind: 'user', label: 'alex@acme.com' },
+        grounded: false,
+        related: [],
+        warnings: [],
+        shareable: false,
+        followUps: false,
+        via: 'Triage · A2A',
+        authorizeUrl: 'https://ge.example/a',
+      },
+      { includeText: false },
+    );
+    const json = JSON.stringify(blocks);
+    expect(json).toContain('via Triage · A2A');
+    expect(json).toContain('Authorize sources');
+    const modal = agentReplyModal({
+      continuationId: 'k1',
+      agentTitle: 'Triage',
+      reason: 'input-required',
+    });
+    expect(modal.private_metadata).toBe('k1');
   });
 });

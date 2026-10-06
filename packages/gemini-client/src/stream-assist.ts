@@ -1,4 +1,4 @@
-import type { AnswerProvenance, AssistEvent, SourceRef } from '@ge-slack/contracts';
+import type { AgentKind, AnswerProvenance, AssistEvent, SourceRef } from '@ge-slack/contracts';
 import { streamAssistUrl, type GeminiClientConfig, type GeminiSkillRoute } from './config.js';
 import { DeStreamAssistResponseSchema } from './de-types.js';
 import { parseJsonArrayStream } from './json-stream.js';
@@ -15,10 +15,19 @@ export interface AssistTurn {
   dataStores?: string[];
   /** Restrict grounding to a NotebookLM notebook. */
   notebookId?: string;
-  /** Resume a conversation (agent DM threads). Mutually exclusive with `sessionless`. */
+  /** Resume a conversation (agent DM threads, Deep Research phase 2). */
   session?: string;
-  /** Planner/command turns are isolated v1alpha requests (ge-msft default). */
+  /**
+   * Isolated turn: no session is resumed and the returned one is dropped. The v1alpha
+   * `isSessionLess` field is gone from the current schema (rev 20260927), so this omits `session`.
+   */
   sessionless?: boolean;
+  /**
+   * Address one Gemini Enterprise agent instead of the default assistant (ADR-0002). Only valid on
+   * the `default` route: skills and agents can't be combined in one prompt. `a2a` agents go
+   * through the A2A proxy (`A2aClient`), with `contextId`/`taskId` continuing a task.
+   */
+  agent?: { kind: AgentKind; agentId: string; contextId?: string; taskId?: string };
   /** Provenance identity string, e.g. `user:alex@acme.com` / `service:ge@p.iam…`. */
   identity: string;
   signal?: AbortSignal;
@@ -64,6 +73,9 @@ export class StreamAssistClient {
     let session = turn.sessionless ? undefined : turn.session;
     const invokedSkills: string[] = [];
     const related: string[] = [];
+    const unauthorized = new Set<string>();
+    const connectorNames = new Map<string, string>();
+    let researchPlan = false;
     let blocked = false;
     let failed = false;
 
@@ -73,6 +85,12 @@ export class StreamAssistClient {
         if (!parsed.success) continue;
         const data = parsed.data;
         if (!turn.sessionless) session = data.sessionInfo?.session ?? session;
+        for (const [k, v] of Object.entries(data.answer?.connectorDisplayNames ?? {})) {
+          connectorNames.set(k, v);
+        }
+        for (const e of data.connectorAuthErrors ?? []) {
+          if (e.dataConnector) unauthorized.add(e.dataConnector);
+        }
         for (const s of data.invokedSkills ?? []) {
           const name = s.displayName ?? s.name;
           if (name && !invokedSkills.includes(name)) invokedSkills.push(name);
@@ -103,7 +121,12 @@ export class StreamAssistClient {
           const gc = reply.groundedContent;
           const content = gc?.content;
           const text = content?.text;
-          if (text && content?.thought === true) {
+          const kind = gc?.contentMetadata?.contentKind?.toUpperCase();
+          if (kind === 'RESEARCH_PLAN') researchPlan = true;
+          if (content?.file?.fileId && content.file.mimeType) {
+            yield { type: 'file', mimeType: content.file.mimeType, fileId: content.file.fileId };
+          }
+          if (text && (content?.thought === true || kind === 'RESEARCH_QUESTION')) {
             const activity = compact(text);
             if (activity) yield { type: 'activity', text: activity };
           } else if (text) {
@@ -143,8 +166,14 @@ export class StreamAssistClient {
       return;
     }
     if (related.length) yield { type: 'related-questions', questions: related };
+    if (unauthorized.size) {
+      yield {
+        type: 'connector-auth',
+        connectors: [...unauthorized].map((c) => connectorNames.get(c) ?? connectorLabel(c)),
+      };
+    }
     const payload: AnswerProvenance = {
-      agentId: agentId(this.config, invokedSkills),
+      agentId: agentId(this.config, invokedSkills, turn.agent?.agentId),
       identity: turn.identity,
       timestamp: new Date().toISOString(),
       sources: [...citations.values()].map((s) => ({
@@ -156,6 +185,9 @@ export class StreamAssistClient {
       ...(session ? { sessionId: session } : {}),
     };
     yield { type: 'provenance', payload };
+    if (researchPlan && session) {
+      yield { type: 'awaiting', reason: 'research-plan', handle: { session } };
+    }
     yield { type: 'done' };
   }
 
@@ -200,6 +232,12 @@ export function buildStreamAssistRequest(
   if (turn.sessionless && turn.session && turn.session !== '-') {
     throw new StreamRequestError('Sessionless requests cannot resume an existing session.');
   }
+  if (turn.agent && turn.route !== 'default') {
+    throw new StreamRequestError('Skills and agents cannot be combined in one turn.');
+  }
+  if (turn.agent?.kind === 'a2a') {
+    throw new StreamRequestError('A2A agents are called through the A2A proxy, not streamAssist.');
+  }
   const { resources, mentions } = skillsForRoute(cfg, turn.route);
   const mentionText = mentions.length
     ? mentions.map((m) => `[${m.label}](mention://?uri=${encodeURIComponent(m.uri)})`).join(' ')
@@ -207,14 +245,17 @@ export function buildStreamAssistRequest(
   const out: Record<string, unknown> = {
     query: { text: mentionText ? `${mentionText} ${turn.text}` : turn.text || ' ' },
   };
-  if (turn.sessionless) out.isSessionLess = true;
-  else if (turn.session) out.session = turn.session;
+  if (!turn.sessionless && turn.session) out.session = turn.session;
   if (cfg.modelId) out.generationSpec = { modelId: cfg.modelId };
-  if (resources.length) {
+  if (turn.agent) {
+    out.agentsSpec = { agentSpecs: [{ agentId: turn.agent.agentId }] };
+  } else if (resources.length && cfg.skillAgentsSpec !== false) {
     out.agentsSpec = {
       agentSpecs: resources.map((name) => ({ agentId: name.split('/').at(-1) ?? name })),
     };
   }
+  // Connector write-back is never served on this path: writes go through ge-slack's own gate.
+  if (!cfg.engineActions) out.actionSpec = { actionDisabled: true };
   const dataStoreSpecs = (turn.dataStores ?? []).map((dataStore) => ({ dataStore }));
   const filter = turn.notebookId
     ? `notebookId: ANY("${turn.notebookId.replace(/"/g, '')}")`
@@ -244,9 +285,16 @@ function skillsForRoute(
   }
 }
 
-function agentId(cfg: GeminiClientConfig, skills: string[]): string {
+function agentId(cfg: GeminiClientConfig, skills: string[], agent?: string): string {
   const base = `gemini-enterprise:${cfg.assistant.engine}`;
+  if (agent) return `${base}/agent:${agent}`;
   return skills.length ? `${base}/${skills.join('+')}` : base;
+}
+
+/** `projects/…/collections/jira-fed_123/dataConnector` → `jira-fed_123`. */
+export function connectorLabel(resource: string): string {
+  const m = /collections\/([^/]+)\/dataConnector/.exec(resource);
+  return m?.[1] ?? resource.split('/').filter(Boolean).at(-1) ?? 'a connector';
 }
 
 function compact(text: string): string | undefined {

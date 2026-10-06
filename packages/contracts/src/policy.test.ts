@@ -3,6 +3,7 @@ import { decidePrincipal, type PrincipalDecisionInput } from './principal.js';
 import { approvalClassOf, canAutoApply } from './actuation.js';
 import { fromSlackMetadata, toSlackMetadata, type WriteProvenance } from './provenance.js';
 import { deriveOutput, isActuating } from './intent.js';
+import { AgentEntrySchema, admitAgent, type AgentEntry } from './agents.js';
 
 const base: PrincipalDecisionInput = {
   policy: 'user-only',
@@ -129,5 +130,67 @@ describe('intent routing', () => {
     expect(isActuating('draft')).toBe(true);
     expect(isActuating('ask')).toBe(false);
     expect(deriveOutput('review')).toBe('annotation');
+  });
+});
+
+describe('admitAgent (ADR-0002)', () => {
+  const agents: AgentEntry[] = [
+    {
+      alias: 'research',
+      title: 'Deep Research',
+      kind: 'deep-research',
+      agentId: 'deep_research',
+      serviceAllowed: false,
+    },
+    { alias: 'triage', title: 'Triage', kind: 'a2a', agentId: '42', serviceAllowed: true },
+  ];
+  const input = {
+    verb: 'ask' as const,
+    grounds: [
+      { kind: 'alias' as const, alias: 'triage' },
+      { kind: 'alias' as const, alias: 'jira' },
+    ],
+    principal: 'user' as const,
+    unattended: false,
+    scope: 'thread',
+  };
+  it('splits the agent from the remaining grounds; A2A agents get no data stores', () => {
+    const r = admitAgent(input, agents);
+    expect(r).toEqual({ ok: true, agent: agents[1], grounds: [] });
+    const plain = admitAgent({ ...input, grounds: [{ kind: 'alias', alias: 'jira' }] }, agents);
+    expect(plain).toEqual({
+      ok: true,
+      agent: undefined,
+      grounds: [{ kind: 'alias', alias: 'jira' }],
+    });
+  });
+  it('never forwards workspace search hits to an A2A agent', () => {
+    expect(admitAgent({ ...input, scope: 'search' }, agents)).toMatchObject({
+      ok: false,
+      reason: 'search',
+    });
+  });
+  it('fails closed for the service and for unattended pauses', () => {
+    const research = [{ kind: 'alias' as const, alias: 'research' }];
+    expect(admitAgent({ ...input, grounds: research, principal: 'service' }, agents)).toMatchObject(
+      { ok: false, reason: 'service' },
+    );
+    expect(admitAgent({ ...input, grounds: research, unattended: true }, agents)).toMatchObject({
+      ok: false,
+      reason: 'unattended',
+    });
+    expect(admitAgent({ ...input, verb: 'rewrite' }, agents)).toMatchObject({
+      ok: false,
+      reason: 'write-verb',
+    });
+  });
+  it('rejects agent ids that are not a terminal segment', () => {
+    expect(
+      AgentEntrySchema.safeParse({ ...agents[0], agentId: 'projects/p/agents/1' }).success,
+    ).toBe(false);
+    expect(
+      AgentEntrySchema.parse({ alias: 'x', title: 'X', kind: 'assistant', agentId: '1' })
+        .serviceAllowed,
+    ).toBe(false);
   });
 });

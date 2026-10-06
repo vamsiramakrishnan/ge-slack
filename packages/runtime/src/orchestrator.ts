@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   KIND_LABELS,
+  admitAgent,
   canAutoApply,
   isActuating,
   isUnattended,
@@ -9,12 +10,15 @@ import {
   principalLabel,
   renderInvocation,
   type ActuationParams,
+  type AgentEntry,
+  type AgentHandle,
   type ActuationRequest,
   type CmdEffect,
   type CmdLine,
   type CommandPlan,
   type Invocation,
   type Origin,
+  type AssistEvent,
   type ParsedCommand,
   type Principal,
   type SourceRef,
@@ -38,7 +42,13 @@ import {
   scopeChannel,
   type GroundResolution,
 } from './resolve.js';
-import { PLAN_TTL_MS, RuntimeStores, type PendingPlan, type StoredAnswer } from './stores.js';
+import {
+  PLAN_TTL_MS,
+  RuntimeStores,
+  type AgentContinuation,
+  type PendingPlan,
+  type StoredAnswer,
+} from './stores.js';
 import type {
   AutomationPort,
   CapturedContext,
@@ -69,6 +79,8 @@ export interface OrchestratorDeps {
   maxMessages?: number;
   maxExecutorTurns?: number;
   maxEffects?: number;
+  /** Gemini Enterprise web app, where people authorize connectors and agents (deep link). */
+  appUrl?: string;
 }
 
 type Turn = {
@@ -82,9 +94,14 @@ type Turn = {
   allowedChannels: Set<string>;
   readChannels: Set<string>;
   externallyShared: boolean;
+  /** The `@agent` this turn addresses, if any (ADR-0002). */
+  agent?: AgentEntry;
   /** Aborted by Slack's stop button (`agent_session_stopped`). */
   signal?: AbortSignal;
 };
+
+/** How long a paused agent (research plan, A2A question) waits for its invoker. */
+export const AGENT_CONTINUATION_TTL_MS = 60 * 60_000;
 
 export interface RunOptions {
   signal?: AbortSignal;
@@ -148,6 +165,11 @@ export class Orchestrator {
       if (!turn) return;
       if (opts.signal) turn.signal = opts.signal;
       warnings.push(...turn.grounds.warnings);
+      // A named agent answers the request itself; Slack writes still need plan → approve.
+      if (turn.agent) {
+        await this.chat(inv, origin, sink, turn, warnings);
+        return;
+      }
       const actionable = inv.inferredVerb && looksActionable(inv.instruction);
       if (!isActuating(inv.verb) && !actionable) {
         await this.chat(inv, origin, sink, turn, warnings);
@@ -185,7 +207,7 @@ export class Orchestrator {
     inv: Invocation,
     origin: Origin,
     sink: TurnSink,
-    opts: RunOptions = {},
+    opts: RunOptions & { resume?: boolean } = {},
   ): Promise<Turn | undefined> {
     const { surface, config, identity } = this.deps;
     const scope = resolveScope(inv, origin);
@@ -309,11 +331,38 @@ export class Orchestrator {
       return undefined;
     }
 
-    const [catalog, unit] = await Promise.all([
+    const [catalog, unit, agents] = await Promise.all([
       config.catalog(origin.teamId),
       channel ? config.unit(origin.teamId, channel) : Promise.resolve(undefined),
+      config.agents(origin.teamId),
     ]);
-    const grounds = resolveGrounds(inv, catalog, unit, principal, policy);
+    const admission = admitAgent(
+      {
+        verb: inv.verb,
+        grounds: inv.grounds,
+        principal: principal.kind,
+        unattended: isUnattended(origin),
+        scope: scope.kind,
+      },
+      agents,
+    );
+    if (!admission.ok) {
+      await sink.notice('denied', admission.message);
+      return undefined;
+    }
+    const agent = admission.agent;
+    // Agents ground only on sources named in the request (never the channel's @unit); A2A agents
+    // bring their own tools, so data stores aren't sent to them at all.
+    const grounds =
+      agent && (agent.kind === 'a2a' || !admission.grounds.some((g) => g.kind === 'alias'))
+        ? { dataStores: [], titles: [], warnings: [] }
+        : resolveGrounds(
+            { ...inv, grounds: admission.grounds },
+            catalog,
+            agent ? undefined : unit,
+            principal,
+            policy,
+          );
     const badge: IdentityBadge = {
       kind: principal.kind,
       label: principalLabel(principal),
@@ -321,6 +370,22 @@ export class Orchestrator {
     };
 
     await sink.begin(this.title(inv, scope, info?.name));
+    if (opts.resume) {
+      // Continuing a paused agent: its session already holds the conversation; nothing is re-read.
+      return {
+        principal,
+        readChannels: new Set(),
+        externallyShared,
+        tokens: resolved.tokens,
+        identity: resolved.identity,
+        badge,
+        scope,
+        grounds,
+        ctx: undefined,
+        allowedChannels: new Set(),
+        ...(agent ? { agent } : {}),
+      };
+    }
     await sink.task({
       id: 'capture',
       title: scope.kind === 'search' ? 'Searching Slack' : 'Reading the conversation',
@@ -358,7 +423,9 @@ export class Orchestrator {
       id: 'ground',
       title: grounds.titles.length
         ? `Grounded on ${grounds.titles.slice(0, 3).join(', ')}`
-        : 'Grounded on the conversation only',
+        : agent
+          ? `Routed to ${agent.title}`
+          : 'Grounded on the conversation only',
       status: 'complete',
     });
 
@@ -380,6 +447,7 @@ export class Orchestrator {
       grounds,
       ctx,
       allowedChannels,
+      ...(agent ? { agent } : {}),
     };
   }
 
@@ -439,18 +507,33 @@ export class Orchestrator {
     sink: TurnSink,
     turn: Turn,
     warnings: string[],
+    resume?: { handle: AgentHandle; text: string },
   ): Promise<void> {
-    await sink.task({
-      id: 'ask',
-      title: `Asking Gemini Enterprise ${asWho(turn.principal)}`,
-      status: 'in_progress',
-    });
+    const agent = turn.agent;
+    const who = agent
+      ? `${agent.title} ${asWho(turn.principal)}`
+      : `Gemini Enterprise ${asWho(turn.principal)}`;
+    await sink.task({ id: 'ask', title: `Asking ${who}`, status: 'in_progress' });
+    const text = resume?.text ?? composeChatPrompt(inv, turn.ctx);
+    // Deep Research needs its session for phase 2; A2A agents continue their context/task.
+    const session = resume?.handle.session;
     const events = this.deps.gemini.stream(turn.tokens, {
-      text: composeChatPrompt(inv, turn.ctx),
+      text,
       route: 'default',
       dataStores: turn.grounds.dataStores,
       ...(turn.grounds.notebookId ? { notebookId: turn.grounds.notebookId } : {}),
-      sessionless: true,
+      ...(session ? { session } : {}),
+      sessionless: agent?.kind !== 'deep-research',
+      ...(agent
+        ? {
+            agent: {
+              kind: agent.kind,
+              agentId: agent.agentId,
+              ...(resume?.handle.contextId ? { contextId: resume.handle.contextId } : {}),
+              ...(resume?.handle.taskId ? { taskId: resume.handle.taskId } : {}),
+            },
+          }
+        : {}),
       identity: turn.identity,
       ...(turn.signal ? { signal: turn.signal } : {}),
     });
@@ -458,6 +541,9 @@ export class Orchestrator {
     let related: string[] = [];
     let provenance;
     let complete = false;
+    let unauthorized: string[] = [];
+    let files = 0;
+    let awaiting: Extract<AssistEvent, { type: 'awaiting' }> | undefined;
     // Model output is sanitized on every path, including the live stream (M2).
     const sanitizer = new StreamSanitizer(this.knownUsers(turn.ctx, inv, origin));
     // Workflow steps return their answer as step outputs (the workflow decides where it lands);
@@ -470,6 +556,9 @@ export class Orchestrator {
       } else if (e.type === 'citation') sources.push(e.source);
       else if (e.type === 'related-questions') related = e.questions;
       else if (e.type === 'provenance') provenance = e.payload;
+      else if (e.type === 'connector-auth') unauthorized = e.connectors;
+      else if (e.type === 'file') files++;
+      else if (e.type === 'awaiting') awaiting = e;
       else if (e.type === 'policy') {
         await sink.task({ id: 'ask', title: 'Blocked by policy', status: 'error' });
         await sink.notice('policy', e.reason);
@@ -495,11 +584,38 @@ export class Orchestrator {
     }
     const tail = sanitizer.finish();
     if (tail && !unattended) await sink.token(tail);
-    const text = sanitizer.text;
-    await sink.task({ id: 'ask', title: `Answered ${asWho(turn.principal)}`, status: 'complete' });
+    const answerText = sanitizer.text;
+    await sink.task({
+      id: 'ask',
+      title: awaiting
+        ? `${agent?.title ?? 'The agent'} is waiting for you`
+        : `Answered ${asWho(turn.principal)}`,
+      status: 'complete',
+    });
+    if (unauthorized.length) {
+      warnings.unshift(this.connectorAuthWarning(unauthorized, turn.principal));
+    }
+    if (files) {
+      warnings.push(
+        `${agent?.title ?? 'Gemini Enterprise'} also made ${files === 1 ? 'a file' : `${files} files`} (e.g. an audio summary) — open it in Gemini Enterprise.`,
+      );
+    }
+    if (agent?.kind === 'a2a') {
+      warnings.push(
+        `${agent.title} is a custom agent: its answer isn't screened by Gemini Enterprise Model Armor.`,
+      );
+    }
     if (unattended) {
       // Unattended answers are writes like any other: gate, provenance, ledger, undo (H4).
-      await this.landUnattendedAnswer(text, sources, provenance?.agentId, inv, origin, sink, turn);
+      await this.landUnattendedAnswer(
+        answerText,
+        sources,
+        provenance?.agentId,
+        inv,
+        origin,
+        sink,
+        turn,
+      );
       return;
     }
     const turnId = this.newId();
@@ -508,7 +624,7 @@ export class Orchestrator {
       teamId: origin.teamId,
       invokerId: origin.userId,
       origin,
-      text,
+      text: answerText,
       ...(provenance ? { provenance } : {}),
       principal: turn.identity,
       shareable: turn.scope.kind !== 'search',
@@ -516,7 +632,7 @@ export class Orchestrator {
     await this.deps.stores.saveAnswer(stored);
     await sink.answer({
       turnId,
-      text,
+      text: answerText,
       sources,
       identity: turn.badge,
       grounded: sources.length > 0,
@@ -538,12 +654,122 @@ export class Orchestrator {
         approval: 'human',
         edited: false,
         timestamp: this.now().toISOString(),
-        contentHash: await contentHash(text),
+        contentHash: await contentHash(answerText),
         sources: sources
           .slice(0, 20)
           .map((s) => ({ title: s.title, ...(s.uri ? { uri: s.uri } : {}) })),
       },
+      ...(agent ? { via: agent.kind === 'a2a' ? `${agent.title} · A2A` : agent.title } : {}),
+      ...(unauthorized.length && turn.principal.kind === 'user' && this.deps.appUrl
+        ? { authorizeUrl: this.deps.appUrl }
+        : {}),
     });
+    if (awaiting && agent) await this.pauseAgent(awaiting, agent, inv, origin, sink, turn, text);
+  }
+
+  private connectorAuthWarning(names: string[], principal: Principal): string {
+    const list = names.slice(0, 5).map(displayName).join(', ');
+    if (principal.kind === 'service') {
+      return `Skipped sources the Gemini service isn't authorized for: ${list}. Ask an admin.`;
+    }
+    return `Skipped sources you haven't authorized yet: ${list}. Authorize them in Gemini Enterprise (Manage your data), then ask again.`;
+  }
+
+  /** Save a paused agent turn and show the invoker how to continue it (ADR-0002). */
+  private async pauseAgent(
+    e: Extract<AssistEvent, { type: 'awaiting' }>,
+    agent: AgentEntry,
+    inv: Invocation,
+    origin: Origin,
+    sink: TurnSink,
+    turn: Turn,
+    lastText: string,
+  ): Promise<void> {
+    const c: AgentContinuation = {
+      id: this.newId(),
+      teamId: origin.teamId,
+      invokerId: origin.userId,
+      origin,
+      invocation: inv,
+      agentAlias: agent.alias,
+      agentId: agent.agentId,
+      reason: e.reason,
+      handle: e.handle,
+      identity: turn.identity,
+      lastText,
+      expiresAt: this.now().getTime() + AGENT_CONTINUATION_TTL_MS,
+    };
+    await this.deps.stores.saveContinuation(c, this.now().getTime());
+    await sink.awaiting({
+      continuationId: c.id,
+      reason: e.reason,
+      agentTitle: agent.title,
+      invokerId: origin.userId,
+      ...(this.deps.appUrl ? { authorizeUrl: this.deps.appUrl } : {}),
+    });
+  }
+
+  /**
+   * Continue a paused agent: start a Deep Research plan (optionally refined), answer an A2A
+   * agent's question, or retry after authorizing. Invoker only, once, same principal, and the
+   * membership gate is re-checked like an approval.
+   */
+  async continueAgent(
+    id: string,
+    userId: string,
+    reply: string | undefined,
+    sink: TurnSink,
+  ): Promise<void> {
+    const peek = await this.deps.stores.getContinuation(id);
+    if (!peek || peek.expiresAt < this.now().getTime()) {
+      await sink.notice('info', 'That agent conversation expired — ask again.');
+      return;
+    }
+    if (peek.invokerId !== userId) {
+      await sink.notice('denied', `Only <@${peek.invokerId}> can continue this.`);
+      return;
+    }
+    const text = reply?.trim().slice(0, 4000);
+    if (peek.reason === 'input-required' && !text) {
+      await sink.notice('clarify', 'Type an answer for the agent first.');
+      return;
+    }
+    const c = await this.deps.stores.takeContinuation(id);
+    if (!c) {
+      await sink.notice('info', 'That was already continued.');
+      return;
+    }
+    try {
+      const turn = await this.admit(c.invocation, c.origin, sink, { resume: true });
+      if (!turn) return;
+      if (turn.identity !== c.identity) {
+        await sink.notice(
+          'denied',
+          'This agent conversation was started under a different identity. Ask again to start a new one.',
+        );
+        return;
+      }
+      if (!turn.agent || turn.agent.agentId !== c.agentId) {
+        await sink.notice('info', `@${c.agentAlias} is no longer available here.`);
+        return;
+      }
+      const next =
+        c.reason === 'research-plan'
+          ? text
+            ? `Revise the research plan: ${text}`
+            : 'Start Research'
+          : c.reason === 'input-required'
+            ? text!
+            : c.lastText;
+      await this.chat(c.invocation, c.origin, sink, turn, [], { handle: c.handle, text: next });
+    } catch (err) {
+      if (err instanceof IdentityRevokedError) {
+        await sink.notice('denied', err.message);
+        return;
+      }
+      console.error(`[ge-slack] agent continuation failed: ${safeMessage(err)}`);
+      await sink.notice('error', 'Something went wrong continuing that. Ask again.');
+    }
   }
 
   private knownUsers(
@@ -1492,4 +1718,14 @@ export function safeMessage(err: unknown): string {
   const m = err instanceof Error ? err.message : String(err);
   // Never echo anything that looks like a bearer credential.
   return m.replace(/(ya29\.|xox[abpr]-|eyJ)[\w.-]+/g, '[redacted]').slice(0, 300);
+}
+
+/** Connector names come from the engine: one bounded line, no control characters (escaped at render). */
+function displayName(raw: string): string {
+  const one = raw
+    .replace(/[\p{Cc}\p{Cf}]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 60);
+  return one || 'a connector';
 }

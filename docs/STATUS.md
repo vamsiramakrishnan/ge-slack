@@ -22,6 +22,7 @@ against live Slack or a live Gemini Enterprise engine.**
 | Live receipts, findings `data_table`, Lists, canvas sections, Real-time Search | Implemented | unit-tested against a recording Slack API; `plan`/`data_table` acceptance via `chat.postMessage`/`response_url` is unverified live, so every rich card retries with classic blocks on `invalid_blocks` |
 | Canvas *reading* | Implemented | `canvases.getContent` (markdown); falls back to file preview |
 | `canvas-edit` undo | Not reversible | Slack doesn't expose prior section content; shown as such |
+| Agents (ADR-0002): `@agent` catalog, chat agents and Deep Research via `agentsSpec`, A2A proxy client, paused-agent continuations, connector-auth prompts, `actionDisabled`, `isSessionLess` removed | Implemented | unit-tested against scripted streams; **no live probe yet** (ADR-0002 § Live probes) |
 
 ## Security review (2026-10-05)
 
@@ -77,4 +78,7 @@ No criticals. All findings fixed with regression tests:
 5. Confirm `plan` and `data_table` blocks render in `chat.postMessage` and `response_url` updates
    (or that the classic fallback fires); create a List on a paid workspace and check the checklist
    fallback on a free one; run `@Gemini ask scope:search("…")` and confirm guests are refused.
-5. Cloud Scheduler → `/cron/tick`; reaction and keyword triggers; a Workflow Builder step.
+6. Cloud Scheduler → `/cron/tick`; reaction and keyword triggers; a Workflow Builder step.
+7. Agents (ADR-0002 § Live probes): `@research` plan → Start research under WIF; an A2A agent's
+   `INPUT_REQUIRED` round trip; `connectorAuthErrors` with an unauthorized connector;
+   `actionDisabled` accepted.

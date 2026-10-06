@@ -31,6 +31,16 @@ export interface GeminiClientConfig {
   commandSkills?: string[];
   commandSkillMentions?: GeminiSkillMention[];
   /**
+   * Also name skills in `agentsSpec` (alongside the mention marker). ge-msft re-verified this live
+   * in 2026-08; an earlier probe saw 500s. Set false to route skills by mention only. Default true.
+   */
+  skillAgentsSpec?: boolean;
+  /**
+   * Let the engine serve connector actions on streamAssist. Default false: ge-slack sends
+   * `actionSpec.actionDisabled` so every write goes through its own approval gate.
+   */
+  engineActions?: boolean;
+  /**
    * Optional transparent egress proxy (CORS/audit). The bearer token is attached to it, so it
    * must be https (localhost http allowed for dev only).
    */
@@ -83,6 +93,16 @@ export function collectionResourceName(p: AssistantPath): string {
 
 export function dataStoreResourceName(p: AssistantPath, dataStoreId: string): string {
   return `${collectionResourceName(p)}/dataStores/${dataStoreId}`;
+}
+
+/** Gemini Enterprise A2A proxy for a full-code agent (`v1` only). */
+export function a2aStreamUrl(cfg: GeminiClientConfig, agentId: string): string {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(agentId)) throw new Error(`Invalid agent id: ${agentId}`);
+  if (cfg.proxyUrl) return `${proxyBase(cfg.proxyUrl)}/a2a/${agentId}/message:stream`;
+  return (
+    `${discoveryEngineHost(cfg.assistant.location)}/v1/${assistantResourceName(cfg.assistant)}` +
+    `/agents/${agentId}/a2a/v1/message:stream`
+  );
 }
 
 export function streamAssistUrl(cfg: GeminiClientConfig): string {

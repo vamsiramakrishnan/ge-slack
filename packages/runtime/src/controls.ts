@@ -1,4 +1,5 @@
 import {
+  agentKindLabel,
   INTENT_DESCRIPTIONS,
   IntentSchema,
   describeTrigger,
@@ -141,6 +142,16 @@ export async function handleControl(
           (c) => `• \`@${c.alias}\` — ${c.title}${c.serviceAllowed ? ' · service-allowed' : ''}`,
         ),
       ];
+      const agents = await config.agents(origin.teamId);
+      if (agents.length) {
+        lines.push(
+          '*Agents* (one per request; they answer, and you approve anything posted):',
+          ...agents.map(
+            (a) =>
+              `• \`@${a.alias}\` — ${a.title} · ${agentKindLabel(a.kind)}${a.serviceAllowed ? ' · service-allowed' : ''}`,
+          ),
+        );
+      }
       await sink.notice('info', lines.join('\n'));
       return;
     }

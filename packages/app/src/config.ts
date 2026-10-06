@@ -1,6 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
-import { GroundSourceSchema, type GroundSource } from '@ge-slack/contracts';
+import {
+  AgentEntrySchema,
+  GroundSourceSchema,
+  type AgentEntry,
+  type GroundSource,
+} from '@ge-slack/contracts';
 
 /**
  * Deployment configuration, validated at boot. Missing or placeholder values fail fast — the bot
@@ -68,6 +73,17 @@ const EnvSchema = z.object({
   FIRESTORE_DATABASE: z.string().optional(),
   GE_SOURCES_JSON: z.string().optional(),
   GE_SOURCES_FILE: z.string().optional(),
+  /** `@agent` catalog (ADR-0002): JSON array of {alias,title,kind,agentId,serviceAllowed}. */
+  GE_AGENTS_JSON: z.string().optional(),
+  GE_AGENTS_FILE: z.string().optional(),
+  /** Gemini Enterprise web app URL, where people authorize connectors and agents. */
+  GE_APP_URL: z
+    .string()
+    .url()
+    .refine((u) => u.startsWith('https://'), 'GE_APP_URL must be https')
+    .optional(),
+  /** Mention-only skill routing (omit skills from agentsSpec). */
+  GE_SKILL_AGENTS_SPEC: z.enum(['on', 'off']).default('on'),
   GE_EMAIL_BINDING: z.enum(['enforce', 'off']).default('enforce'),
   GE_EMAIL_DOMAIN_ALIASES: z.string().optional(),
   GE_CRON_SECRET: z.string().min(24).optional(),
@@ -75,7 +91,10 @@ const EnvSchema = z.object({
   NODE_ENV: z.string().default('development'),
 });
 
-export type AppConfig = z.infer<typeof EnvSchema> & { sources: GroundSource[] };
+export type AppConfig = z.infer<typeof EnvSchema> & {
+  sources: GroundSource[];
+  agents: AgentEntry[];
+};
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const parsed = EnvSchema.safeParse(env);
@@ -123,7 +142,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const raw =
     c.GE_SOURCES_JSON ?? (c.GE_SOURCES_FILE ? readFileSync(c.GE_SOURCES_FILE, 'utf8') : '[]');
   const sources = z.array(GroundSourceSchema).parse(JSON.parse(raw));
-  return { ...c, sources };
+  const rawAgents =
+    c.GE_AGENTS_JSON ?? (c.GE_AGENTS_FILE ? readFileSync(c.GE_AGENTS_FILE, 'utf8') : '[]');
+  const agents = z.array(AgentEntrySchema).parse(JSON.parse(rawAgents));
+  // One `@` namespace: an alias must mean exactly one source or one agent.
+  const taken = new Set(['unit', 'this', 'web', ...sources.map((s) => s.alias.toLowerCase())]);
+  for (const a of agents) {
+    const k = a.alias.toLowerCase();
+    if (taken.has(k)) throw new Error(`Agent alias @${a.alias} collides with a source or keyword.`);
+    taken.add(k);
+  }
+  return { ...c, sources, agents };
 }
 
 export function domainAliases(text: string | undefined): Record<string, string> {

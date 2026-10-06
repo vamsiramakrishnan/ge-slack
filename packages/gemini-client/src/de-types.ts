@@ -74,6 +74,7 @@ export const DeAssistantContentSchema = z
       })
       .passthrough()
       .optional(),
+    file: z.object({ mimeType: z.string(), fileId: z.string() }).passthrough().optional(),
     codeExecutionResult: z
       .object({
         outcome: z.string(),
@@ -87,6 +88,11 @@ export const DeAssistantContentSchema = z
 export const DeGroundedContentSchema = z
   .object({
     content: DeAssistantContentSchema.optional(),
+    /** In doc examples but not the schema (e.g. Deep Research `RESEARCH_PLAN`). */
+    contentMetadata: z
+      .object({ contentKind: z.string().optional(), contentId: z.string().optional() })
+      .passthrough()
+      .optional(),
     textGroundingMetadata: DeTextGroundingMetadataSchema.optional(),
   })
   .passthrough();
@@ -150,6 +156,8 @@ export interface DeAssistAnswer {
   answerSkippedReasons?: string[];
   relatedQuestions?: string[];
   customerPolicyEnforcementResult?: DeCustomerPolicyEnforcementResult;
+  /** Connector resource → display name. */
+  connectorDisplayNames?: Record<string, string>;
   [k: string]: unknown;
 }
 
@@ -161,6 +169,7 @@ export const DeAssistAnswerSchema: z.ZodType<DeAssistAnswer> = z
     answerSkippedReasons: z.array(z.string()).optional(),
     relatedQuestions: z.array(z.string()).optional(),
     customerPolicyEnforcementResult: DeCustomerPolicyEnforcementResultSchema.optional(),
+    connectorDisplayNames: z.record(z.string()).optional(),
   })
   .passthrough();
 
@@ -175,6 +184,12 @@ export interface DeStreamAssistResponse {
   sessionInfo?: { session?: string; [k: string]: unknown };
   invokedSkills?: Array<{ name?: string; displayName?: string; [k: string]: unknown }>;
   assistToken?: string;
+  /** Connectors that failed authentication; the request proceeded without them. */
+  connectorAuthErrors?: Array<{
+    dataConnector?: string;
+    errorMessage?: string;
+    [k: string]: unknown;
+  }>;
   [k: string]: unknown;
 }
 
@@ -184,5 +199,12 @@ export const DeStreamAssistResponseSchema: z.ZodType<DeStreamAssistResponse> = z
     sessionInfo: DeSessionInfoSchema.optional(),
     invokedSkills: z.array(DeInvokedSkillSchema).optional(),
     assistToken: z.string().optional(),
+    connectorAuthErrors: z
+      .array(
+        z
+          .object({ dataConnector: z.string().optional(), errorMessage: z.string().optional() })
+          .passthrough(),
+      )
+      .optional(),
   })
   .passthrough();

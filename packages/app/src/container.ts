@@ -2,6 +2,8 @@ import { isUnattended, type Automation, type Invocation, type Origin } from '@ge
 import {
   ImpersonatedTokenSource,
   MetadataServerTokenSource,
+  A2aClient,
+  GeminiEnterpriseClient,
   StreamAssistClient,
   type GeminiClientConfig,
 } from '@ge-slack/gemini-client';
@@ -165,8 +167,12 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
     ...(cfg.GE_COMMANDER_SKILL_MENTION
       ? { commandSkillMentions: [cfg.GE_COMMANDER_SKILL_MENTION] }
       : {}),
+    ...(cfg.GE_SKILL_AGENTS_SPEC === 'off' ? { skillAgentsSpec: false } : {}),
   };
-  const streamClient = new StreamAssistClient(gemini, fetchImpl);
+  const streamClient = new GeminiEnterpriseClient(
+    new StreamAssistClient(gemini, fetchImpl),
+    new A2aClient(gemini, fetchImpl),
+  );
 
   const surface = new SlackSurface(deps.api, {
     teamId: cfg.SLACK_TEAM_ID,
@@ -174,7 +180,7 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
     ...(cfg.SLACK_APP_ID ? { appId: cfg.SLACK_APP_ID } : {}),
     domain: cfg.SLACK_TEAM_DOMAIN,
   });
-  const workspace = new KvWorkspaceConfig(kv, cfg.sources);
+  const workspace = new KvWorkspaceConfig(kv, cfg.sources, cfg.agents);
   const stores = new RuntimeStores(kv);
   const engine = new AutomationEngine(kv);
   const orch = new Orchestrator({
@@ -204,6 +210,7 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
       start: (p) => linker.start({ ...p }),
     },
     timeZone: cfg.GE_TIME_ZONE,
+    ...(cfg.GE_APP_URL ? { appUrl: cfg.GE_APP_URL } : {}),
   });
   const postResponse = deps.postResponse ?? defaultResponsePoster;
 

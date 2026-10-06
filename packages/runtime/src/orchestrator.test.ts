@@ -1,12 +1,18 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { parseCommand, type Origin, type Principal } from '@ge-slack/contracts';
+import {
+  parseCommand,
+  type AgentEntry,
+  type AssistEvent,
+  type Origin,
+  type Principal,
+} from '@ge-slack/contracts';
 import { MemoryStore } from '@ge-slack/identity';
 import type { Resolved, ResolveInput } from '@ge-slack/identity';
 import { Orchestrator } from './orchestrator.js';
 import { RuntimeStores } from './stores.js';
 import { KvWorkspaceConfig } from './workspace-config.js';
 import { FakeGemini, FakeSurface, RecordingSink } from './testing.js';
-import type { IdentityPort, LandedView, PlanView } from './ports.js';
+import type { AnswerView, AwaitingView, IdentityPort, LandedView, PlanView } from './ports.js';
 import { neutralize, renderContext } from './prompt.js';
 
 const PL = 'https://acme.slack.com/archives/C0ENG/p1700000000000100';
@@ -77,6 +83,29 @@ class FakeIdentity implements IdentityPort {
 }
 
 const NOW = new Date('2026-10-05T10:00:00Z');
+const AGENTS: AgentEntry[] = [
+  {
+    alias: 'research',
+    title: 'Deep Research',
+    kind: 'deep-research',
+    agentId: 'deep_research',
+    serviceAllowed: false,
+  },
+  {
+    alias: 'helpdesk',
+    title: 'IT helpdesk',
+    kind: 'assistant',
+    agentId: '15492003793394502655',
+    serviceAllowed: true,
+  },
+  {
+    alias: 'triage',
+    title: 'Incident triage',
+    kind: 'a2a',
+    agentId: '4242',
+    serviceAllowed: false,
+  },
+];
 const origin = (o: Partial<Origin> = {}): Origin => ({
   entry: 'mention',
   teamId: 'T1',
@@ -114,20 +143,24 @@ function setup(script: Array<string | import('@ge-slack/contracts').AssistEvent[
   });
   const gemini = new FakeGemini(script);
   const identity = new FakeIdentity();
-  const config = new KvWorkspaceConfig(kv, [
-    {
-      alias: 'runbooks',
-      title: 'Incident runbooks',
-      dataStore: 'projects/p/locations/eu/collections/default_collection/dataStores/runbooks',
-      serviceAllowed: true,
-    },
-    {
-      alias: 'hr',
-      title: 'HR policies',
-      dataStore: 'projects/p/locations/eu/collections/default_collection/dataStores/hr',
-      serviceAllowed: false,
-    },
-  ]);
+  const config = new KvWorkspaceConfig(
+    kv,
+    [
+      {
+        alias: 'runbooks',
+        title: 'Incident runbooks',
+        dataStore: 'projects/p/locations/eu/collections/default_collection/dataStores/runbooks',
+        serviceAllowed: true,
+      },
+      {
+        alias: 'hr',
+        title: 'HR policies',
+        dataStore: 'projects/p/locations/eu/collections/default_collection/dataStores/hr',
+        serviceAllowed: false,
+      },
+    ],
+    AGENTS,
+  );
   let id = 0;
   const orch = new Orchestrator({
     surface,
@@ -141,6 +174,7 @@ function setup(script: Array<string | import('@ge-slack/contracts').AssistEvent[
     },
     now: () => NOW,
     newId: () => `id${++id}`,
+    appUrl: 'https://vertexaisearch.cloud.google.com/home/cid/abc',
   });
   return { orch, surface, gemini, identity, config, kv };
 }
@@ -653,5 +687,188 @@ describe('next stage: action items, findings toggles, receipts, search', () => {
     expect(late.last('plan')).toBeUndefined();
     await orch.approve(plan.planId, 'U0ALEX', new RecordingSink());
     expect(surface.actuated).toHaveLength(2);
+  });
+});
+
+describe('agents (ADR-0002)', () => {
+  const planEvents = (session: string): AssistEvent[] => [
+    { type: 'token', text: '1. Survey vendors\n2. Compare pricing' },
+    {
+      type: 'provenance',
+      payload: {
+        agentId: 'ge:eng/agent:deep_research',
+        identity: 'user:alex@acme.com',
+        timestamp: 't',
+        sources: [],
+        contentHash: 'h',
+        sessionId: session,
+      },
+    },
+    { type: 'awaiting', reason: 'research-plan', handle: { session } },
+    { type: 'done' },
+  ];
+
+  it('routes @research to Deep Research with its own session and pauses on the plan', async () => {
+    const { orch, gemini } = setup([planEvents('projects/1/sessions/77'), 'Final report.']);
+    const sink = await run(orch, 'ask @research "vector DB pricing"');
+    const turn = gemini.turns[0]!;
+    expect(turn.agent).toEqual({ kind: 'deep-research', agentId: 'deep_research' });
+    expect(turn.sessionless).toBe(false);
+    expect(turn.route).toBe('default');
+    // Agents don't inherit the channel's @unit.
+    expect(turn.dataStores).toEqual([]);
+    expect(sink.last<AnswerView>('answer')?.via).toBe('Deep Research');
+    const wait = sink.last<AwaitingView>('awaiting')!;
+    expect(wait.reason).toBe('research-plan');
+
+    // Someone else can't start it.
+    const other = new RecordingSink();
+    await orch.continueAgent(wait.continuationId, 'U0MAYA', undefined, other);
+    expect(other.last<{ kind: string }>('notice')?.kind).toBe('denied');
+
+    const go = new RecordingSink();
+    await orch.continueAgent(wait.continuationId, 'U0ALEX', undefined, go);
+    const second = gemini.turns[1]!;
+    expect(second.text).toBe('Start Research');
+    expect(second.session).toBe('projects/1/sessions/77');
+    expect(second.agent).toEqual({ kind: 'deep-research', agentId: 'deep_research' });
+    expect(go.tokens).toBe('Final report.');
+    // Nothing from Slack is re-read on continuation.
+    expect(
+      go.events.some((e) => e.type === 'task' && (e.value as { id: string }).id === 'capture'),
+    ).toBe(false);
+
+    // Exactly once.
+    const again = new RecordingSink();
+    await orch.continueAgent(wait.continuationId, 'U0ALEX', undefined, again);
+    expect(gemini.turns).toHaveLength(2);
+  });
+
+  it('refines a research plan with the invoker’s words', async () => {
+    const { orch, gemini } = setup([planEvents('s/1'), planEvents('s/1')]);
+    const wait = (await run(orch, 'ask @research "x"')).last<AwaitingView>('awaiting')!;
+    await orch.continueAgent(
+      wait.continuationId,
+      'U0ALEX',
+      'focus on EU vendors',
+      new RecordingSink(),
+    );
+    expect(gemini.turns[1]!.text).toBe('Revise the research plan: focus on EU vendors');
+  });
+
+  it('continues an A2A task with the invoker’s answer, and refuses a changed identity', async () => {
+    const asks: AssistEvent[] = [
+      { type: 'token', text: 'Which environment?' },
+      {
+        type: 'awaiting',
+        reason: 'input-required',
+        handle: { contextId: 'projects/1/sessions/9', taskId: 't1' },
+      },
+      { type: 'done' },
+    ];
+    const { orch, gemini, identity } = setup([asks, 'Rolled back prod.', asks]);
+    const sink = await run(orch, 'ask @triage "is checkout down?"');
+    expect(gemini.turns[0]!.agent).toEqual({ kind: 'a2a', agentId: '4242' });
+    const answer = sink.last<AnswerView>('answer')!;
+    expect(answer.via).toBe('Incident triage · A2A');
+    expect(answer.warnings.join(' ')).toContain('Model Armor');
+    const wait = sink.last<AwaitingView>('awaiting')!;
+    expect(wait.reason).toBe('input-required');
+
+    const empty = new RecordingSink();
+    await orch.continueAgent(wait.continuationId, 'U0ALEX', '  ', empty);
+    expect(empty.last<{ kind: string }>('notice')?.kind).toBe('clarify');
+
+    await orch.continueAgent(wait.continuationId, 'U0ALEX', 'prod', new RecordingSink());
+    expect(gemini.turns[1]!.text).toBe('prod');
+    expect(gemini.turns[1]!.agent).toEqual({
+      kind: 'a2a',
+      agentId: '4242',
+      contextId: 'projects/1/sessions/9',
+      taskId: 't1',
+    });
+
+    const w2 = (await run(orch, 'ask @triage "again"')).last<AwaitingView>('awaiting')!;
+    // The person re-linked as someone else in between → refused, nothing sent.
+    const original = identity.resolve.bind(identity);
+    identity.resolve = async (i) => {
+      const r = await original(i);
+      return r.ok ? { ...r, identity: 'user:other@acme.com' } : r;
+    };
+    const changed = new RecordingSink();
+    await orch.continueAgent(w2.continuationId, 'U0ALEX', 'prod', changed);
+    expect(changed.last<{ text: string }>('notice')?.text).toMatch(/different identity/);
+    expect(gemini.turns).toHaveLength(3);
+  });
+
+  it('re-checks membership when continuing', async () => {
+    const asks: AssistEvent[] = [
+      { type: 'token', text: '?' },
+      { type: 'awaiting', reason: 'input-required', handle: { contextId: 'c', taskId: 't' } },
+      { type: 'done' },
+    ];
+    const { orch, gemini, surface } = setup([asks]);
+    const wait = (await run(orch, 'ask @triage "x"')).last<AwaitingView>('awaiting')!;
+    surface.members.get('C0ENG')!.delete('U0ALEX');
+    const s = new RecordingSink();
+    await orch.continueAgent(wait.continuationId, 'U0ALEX', 'prod', s);
+    expect(s.last<{ kind: string }>('notice')?.kind).toBe('denied');
+    expect(gemini.turns).toHaveLength(1);
+  });
+
+  it('refuses write verbs, two agents, service without permission, and unattended pauses', async () => {
+    const { orch, gemini, config } = setup([]);
+    const write = await run(orch, 'draft @research "a post"');
+    expect(write.last<{ text: string }>('notice')?.text).toMatch(/answers questions/);
+    const two = await run(orch, 'ask @research @triage "x"');
+    expect(two.last<{ text: string }>('notice')?.text).toMatch(/One agent per request/);
+    await config.setChannelPolicy('T1', 'C0ENG', {
+      identity: 'service-only',
+      serviceGrounds: [],
+      serviceMayRead: true,
+      autoApply: false,
+    });
+    const svc = await run(orch, 'ask @research "x"');
+    expect(svc.last<{ text: string }>('notice')?.text).toMatch(
+      /isn't available to the Gemini service/,
+    );
+    await config.setChannelPolicy('T1', 'C0ENG', {
+      identity: 'user-only',
+      serviceGrounds: [],
+      serviceMayRead: false,
+      autoApply: false,
+    });
+    const cron = await run(
+      orch,
+      'ask @triage "x"',
+      origin({ entry: 'schedule', automationId: 'a1' }),
+    );
+    expect(cron.last<{ text: string }>('notice')?.text).toMatch(/automation/);
+    expect(gemini.turns).toHaveLength(0);
+  });
+
+  it('a service-allowed assistant agent grounds only on named sources', async () => {
+    const { orch, gemini } = setup(['Reset your VPN token.']);
+    await run(orch, 'ask @helpdesk @runbooks "vpn broken"');
+    expect(gemini.turns[0]!.agent).toEqual({ kind: 'assistant', agentId: '15492003793394502655' });
+    expect(gemini.turns[0]!.sessionless).toBe(true);
+    expect(gemini.turns[0]!.dataStores).toEqual([
+      'projects/p/locations/eu/collections/default_collection/dataStores/runbooks',
+    ]);
+  });
+
+  it('says which connectors were skipped and links to Gemini Enterprise to authorize', async () => {
+    const { orch } = setup([
+      [
+        { type: 'token', text: 'Partial answer.' },
+        { type: 'connector-auth', connectors: ['Jira\u202e', 'Sales<force>'] },
+        { type: 'done' },
+      ],
+    ]);
+    const answer = (await run(orch, 'ask "status?"')).last<AnswerView>('answer')!;
+    expect(answer.warnings[0]).toBe(
+      "Skipped sources you haven't authorized yet: Jira, Sales<force>. Authorize them in Gemini Enterprise (Manage your data), then ask again.",
+    );
+    expect(answer.authorizeUrl).toBe('https://vertexaisearch.cloud.google.com/home/cid/abc');
   });
 });

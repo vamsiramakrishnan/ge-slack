@@ -10,6 +10,7 @@ import {
 import type {
   AnswerView,
   AutomationPlanView,
+  AwaitingView,
   ConnectView,
   IdentityBadge,
   LandedView,
@@ -104,12 +105,17 @@ export function answerBlocks(a: AnswerView, opts: { includeText: boolean }): Blo
     type: 'context',
     elements: [
       mrkdwn(
-        `${identityLine(a.identity)} · ${a.sources.length} source${a.sources.length === 1 ? '' : 's'} · ${a.grounded ? 'grounded' : '*ungrounded* — no sources backed this answer'}`,
+        `${identityLine(a.identity)}${a.via ? ` · via ${esc(a.via)}` : ''} · ${a.sources.length} source${a.sources.length === 1 ? '' : 's'} · ${a.grounded ? 'grounded' : '*ungrounded* — no sources backed this answer'}`,
       ),
     ],
   });
   const actions: Block[] = [];
   if (a.shareable) actions.push(button('Share to channel', ACTIONS.share, a.turnId, 'primary'));
+  if (a.authorizeUrl && isHttpsUrl(a.authorizeUrl)) {
+    actions.push(
+      button('Authorize sources', ACTIONS.agentAuthorize, a.turnId, undefined, a.authorizeUrl),
+    );
+  }
   if (a.followUps) actions.push(button('Draft follow-up', ACTIONS.followUp, a.turnId));
   for (const [i, q] of a.related.slice(0, 2).entries()) {
     actions.push(
@@ -462,6 +468,87 @@ const NOTICE_ICON: Record<NoticeKind, string> = {
   denied: '🔒',
   clarify: '❓',
 };
+
+/**
+ * An agent paused for its invoker (ADR-0002). The card is private to the invoker; the runtime
+ * also refuses anyone else's click.
+ */
+export function awaitingBlocks(a: AwaitingView): Block[] {
+  const title = esc(a.agentTitle);
+  const id = a.continuationId;
+  const lead =
+    a.reason === 'research-plan'
+      ? `*${title} drafted a research plan.* Start it as is, or tell it what to change.`
+      : a.reason === 'input-required'
+        ? `*${title} needs an answer from you* to continue.`
+        : `*${title} needs your authorization* before it can continue. Authorize it in Gemini Enterprise, then try again.`;
+  const actions: Block[] =
+    a.reason === 'research-plan'
+      ? [
+          button('Start research', ACTIONS.agentStart, id, 'primary'),
+          button('Change the plan', ACTIONS.agentReply, id),
+        ]
+      : a.reason === 'input-required'
+        ? [button('Reply', ACTIONS.agentReply, id, 'primary')]
+        : [
+            ...(a.authorizeUrl && isHttpsUrl(a.authorizeUrl)
+              ? [button('Authorize', ACTIONS.agentAuthorize, id, 'primary', a.authorizeUrl)]
+              : []),
+            button('Try again', ACTIONS.agentRetry, id),
+          ];
+  return [
+    { type: 'section', text: mrkdwn(`✦ ${lead}`) },
+    { type: 'actions', elements: actions },
+    {
+      type: 'context',
+      elements: [
+        mrkdwn(
+          a.reason === 'research-plan'
+            ? 'Deep Research can take several minutes. Nothing is posted until you share it.'
+            : 'Only you can continue this. It expires in an hour.',
+        ),
+      ],
+    },
+  ];
+}
+
+export function agentReplyModal(p: {
+  continuationId: string;
+  agentTitle: string;
+  reason: AwaitingView['reason'];
+}): Record<string, unknown> {
+  const plan = p.reason === 'research-plan';
+  return {
+    type: 'modal',
+    callback_id: CALLBACKS.agentReply,
+    title: plain(plan ? 'Change the plan' : 'Reply to the agent'),
+    submit: plain(plan ? 'Revise plan' : 'Send'),
+    close: plain('Back'),
+    private_metadata: p.continuationId,
+    blocks: [
+      {
+        type: 'input',
+        block_id: 'reply',
+        label: plain(
+          (plan ? `What should ${p.agentTitle} change?` : `Your answer for ${p.agentTitle}`).slice(
+            0,
+            150,
+          ),
+        ),
+        element: {
+          type: 'plain_text_input',
+          action_id: 'v',
+          multiline: true,
+          max_length: 4000,
+        },
+      },
+    ],
+  };
+}
+
+function isHttpsUrl(u: string): boolean {
+  return /^https:\/\/[^\s|<>]+$/.test(u);
+}
 
 export function noticeBlocks(kind: NoticeKind, text: string): Block[] {
   const lead = kind === 'clarify' ? '*Gemini needs a detail before it can do this:*\n' : '';

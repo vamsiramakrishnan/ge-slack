@@ -59,6 +59,9 @@ export class CollectingSink implements TurnSink {
   async executing() {}
   async landed() {}
   async retire() {}
+  async awaiting() {
+    this.error = 'That agent needs a person to respond, so it can’t run in a workflow step.';
+  }
   async notice(kind: Parameters<TurnSink['notice']>[0], text: string) {
     if (kind !== 'info') this.error = text.slice(0, 500);
     else if (!this.text) this.text = text;

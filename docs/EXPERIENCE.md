@@ -71,6 +71,13 @@ being in a channel is not authority to read it for someone who isn't (§6).
 | `@<alias>` | a GE data store / connector alias from the catalog (`@policies`, `@jira`, `@drive`) |
 | `@this` | only the scope itself — no external grounding |
 | `@web` | allow GE web grounding if the engine permits it |
+| `@<agent>` | an admin-registered Gemini Enterprise agent answers instead of the default assistant (ADR-0002): `@research` (Deep Research), `@helpdesk` (a Workflow Builder chat agent), `@triage` (an A2A agent). One per request, chat verbs only; the footer says `via <agent>` |
+
+**Agents that pause.** Deep Research first returns a plan. A private card then offers **Start
+research** or **Change the plan**, and nothing runs until the invoker clicks. An A2A agent that
+needs an answer or an authorization shows **Reply** or **Authorize** · **Try again**, again only to
+the invoker. Continuing re-checks membership and refuses a changed identity, like plan approval.
+Answers that skipped unauthorized connectors name them and show **Authorize sources**.
 
 Slack turns `@word` into a user mention only when a user named `word` exists. The parser therefore
 reads `<@U…>` as **people** (filters, assignees) and literal `@alias` tokens as **grounds**. In the

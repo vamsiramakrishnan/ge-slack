@@ -7,6 +7,8 @@ commander skills. Read before changing anything:
 - `docs/EXPERIENCE.md` — the UX spec. UI/UX decisions are made here first; code follows it.
 - `docs/ADR-0001-slack-architecture-and-dual-principal-identity.md` — identity (user via OIDC+WIF,
   licensed service account, keyless), membership gate, channel policy.
+- `docs/ADR-0002-agents-connectors-and-skills.md` — how agents (`@alias`: chat agents, Deep
+  Research, A2A), connectors and skills are invoked; agents answer, never write.
 - `docs/STATUS.md` — what is verified (fakes) vs. not yet run live.
 
 ## Boundaries

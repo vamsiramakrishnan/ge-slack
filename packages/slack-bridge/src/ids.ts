@@ -21,6 +21,11 @@ export const ACTIONS = {
   /** Per-row Post/Skip on a review findings table; suffixed `_<n>` (unique per block). */
   findingToggle: 'ge_finding_toggle',
   openPolicy: 'ge_open_policy',
+  /** Paused agents (ADR-0002): start a research plan, open the reply modal, retry, authorize. */
+  agentStart: 'ge_agent_start',
+  agentReply: 'ge_agent_reply',
+  agentRetry: 'ge_agent_retry',
+  agentAuthorize: 'ge_agent_authorize',
 } as const;
 
 export const CALLBACKS = {
@@ -33,6 +38,7 @@ export const CALLBACKS = {
   messageReview: 'ge_msg_review',
   messageCanvas: 'ge_msg_canvas',
   globalNew: 'ge_global_new',
+  agentReply: 'ge_agent_reply_modal',
 } as const;
 
 export const WORKFLOW_STEPS = {

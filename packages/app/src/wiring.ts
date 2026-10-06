@@ -15,6 +15,8 @@ import {
   openComposer,
   suggestedPrompts,
   viewedChannel,
+  continueAgent,
+  openAgentReply,
   openPlanEditor,
   openPolicy,
   publishHome,
@@ -294,6 +296,17 @@ export function register(app: App, c: Container, botUserId: () => string | undef
     )();
   });
 
+  app.view(CALLBACKS.agentReply, async ({ ack, body, view }) => {
+    await ack();
+    const reply = String(
+      (view.state.values.reply?.v as { value?: string } | undefined)?.value ?? '',
+    );
+    const clicker: Origin = { entry: 'button', teamId: team, userId: body.user.id };
+    await guard('agent-reply', () =>
+      continueAgent(c, { id: view.private_metadata, userId: body.user.id, reply, clicker }),
+    )();
+  });
+
   app.view(CALLBACKS.policy, async ({ ack, body, view }) => {
     const error = await onPolicySubmit(
       c,
@@ -329,6 +342,29 @@ export function register(app: App, c: Container, botUserId: () => string | undef
   onAction(ACTIONS.share, (b) =>
     c.orch.share(actionValue(b), b.user.id, c.sinkFor(clickOrigin(c, b))),
   );
+  onAction(ACTIONS.agentStart, (b) =>
+    continueAgent(c, {
+      id: actionValue(b),
+      userId: b.user.id,
+      clicker: clickOrigin(c, b),
+      ...(b.response_url ? { responseUrl: b.response_url } : {}),
+    }),
+  );
+  onAction(ACTIONS.agentRetry, (b) =>
+    continueAgent(c, {
+      id: actionValue(b),
+      userId: b.user.id,
+      clicker: clickOrigin(c, b),
+      ...(b.response_url ? { responseUrl: b.response_url } : {}),
+    }),
+  );
+  onAction(ACTIONS.agentReply, async (b) => {
+    const err = await openAgentReply(c, b.trigger_id, actionValue(b), b.user.id);
+    if (err) await c.sinkFor(clickOrigin(c, b)).notice('denied', err);
+  });
+  onAction(ACTIONS.agentAuthorize, async () => {
+    /* URL button: Slack opens Gemini Enterprise; nothing to do server-side. */
+  });
   onAction(ACTIONS.useService, (b) =>
     c.orch.resume(actionValue(b), b.user.id, c.sinkFor(clickOrigin(c, b)), true),
   );

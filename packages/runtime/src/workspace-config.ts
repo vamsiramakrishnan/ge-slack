@@ -1,6 +1,7 @@
 import {
   ChannelPolicySchema,
   DEFAULT_CHANNEL_POLICY,
+  type AgentEntry,
   type ChannelPolicy,
   type GroundSource,
   type ResearchUnit,
@@ -17,6 +18,7 @@ export class KvWorkspaceConfig implements WorkspaceConfigPort {
   constructor(
     private readonly kv: KeyValueStore,
     private readonly staticCatalog: GroundSource[],
+    private readonly staticAgents: AgentEntry[] = [],
   ) {}
 
   async channelPolicy(teamId: string, channel: string): Promise<ChannelPolicy> {
@@ -40,5 +42,9 @@ export class KvWorkspaceConfig implements WorkspaceConfigPort {
 
   async catalog(_teamId: string): Promise<GroundSource[]> {
     return this.staticCatalog;
+  }
+
+  async agents(_teamId: string): Promise<AgentEntry[]> {
+    return this.staticAgents;
   }
 }

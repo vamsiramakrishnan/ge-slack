@@ -123,6 +123,17 @@ describe('config', () => {
     expect(load({ ...kms, GE_STORE: 'firestore', GE_EMAIL_BINDING: 'off' })).toThrow(/enforce/);
     expect(load({ ...kms, GE_STORE: 'firestore' })).not.toThrow();
   });
+  it('loads the @agent catalog and refuses aliases that collide with sources or keywords', () => {
+    const agent = (alias: string) =>
+      JSON.stringify([{ alias, title: 'A', kind: 'assistant', agentId: '123' }]);
+    const load = (extra: Record<string, unknown>) =>
+      loadConfig({ ...ENV, ...extra } as unknown as NodeJS.ProcessEnv);
+    expect(load({ GE_AGENTS_JSON: agent('helpdesk') }).agents[0]!.alias).toBe('helpdesk');
+    expect(() => load({ GE_AGENTS_JSON: agent('web') })).toThrow(/collides/);
+    const firstSource = (JSON.parse(String(ENV.GE_SOURCES_JSON)) as Array<{ alias: string }>)[0]!;
+    expect(() => load({ GE_AGENTS_JSON: agent(firstSource.alias) })).toThrow(/collides/);
+    expect(() => load({ GE_APP_URL: 'http://ge.example' })).toThrow(/https/);
+  });
 });
 
 describe('slash command', () => {
