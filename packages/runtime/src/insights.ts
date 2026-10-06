@@ -177,6 +177,7 @@ export function denialReason(text: string): string {
   if (/connect|link/.test(t)) return 'needs-link';
   if (/agent|one agent|answers questions|automation/.test(t)) return 'agent-rules';
   if (/only <@/.test(t)) return 'not-invoker';
+  if (/licence/.test(t)) return 'no-licence';
   if (/identity/.test(t)) return 'identity-changed';
   return 'policy';
 }
@@ -226,6 +227,10 @@ export function observingSink(
       // A connect prompt isn't a denial: the request resumes after linking.
       turn('connect');
       return sink.connect(c);
+    },
+    licence: (l) => {
+      turn('denied', { reason: 'no-licence' });
+      return sink.licence(l);
     },
     executing: (p) => sink.executing(p),
     landed: (l) => {

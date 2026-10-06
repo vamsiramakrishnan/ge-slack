@@ -105,6 +105,12 @@ export interface SurfacePort {
     userId: string,
     file: { name: string; title: string; content: string; comment?: string },
   ): Promise<{ ok: boolean; message: string }>;
+  /** Post (or, with `ts`, update) a licence request card in the admins' channel (EXPERIENCE §11). */
+  licenceRequestCard(
+    channel: string,
+    view: LicenceRequestView,
+    ts?: string,
+  ): Promise<{ channel: string; ts: string }>;
 }
 
 export interface GeminiPort {
@@ -119,7 +125,14 @@ export interface IdentityPort {
     teamId: string,
     userId: string,
   ): Promise<
-    { email: string; provider: string; allowUnattended: boolean; linkedAt: string } | undefined
+    | {
+        email: string;
+        subject: string;
+        provider: string;
+        allowUnattended: boolean;
+        linkedAt: string;
+      }
+    | undefined
   >;
   unlink(teamId: string, userId: string): Promise<void>;
   setAllowUnattended(teamId: string, userId: string, allow: boolean): Promise<boolean>;
@@ -278,6 +291,32 @@ export interface ConnectView {
   resumeId?: string;
 }
 
+/** No licence for the linked identity (EXPERIENCE §11): request one, or use the service. */
+export interface LicenceView {
+  status: 'unlicensed' | 'blocked';
+  message: string;
+  /** Offer "Request a licence" (a requests channel is configured and the person isn't blocked). */
+  requestable: boolean;
+  /** An open request already exists (ISO time). */
+  requestedAt?: string;
+  offerService: boolean;
+  serviceSources: string[];
+  /** Re-run the request as the Gemini service ("Answer with the Gemini service"). */
+  resumeId?: string;
+}
+
+/** A licence request as admins see it; no message content, just who and what. */
+export interface LicenceRequestView {
+  requestId: string;
+  requesterId: string;
+  email: string;
+  status: 'open' | 'approved' | 'assigned' | 'declined';
+  at: string;
+  /** Approving assigns the licence directly (`GE_LICENCE_CONFIG`). */
+  assignOnApprove: boolean;
+  decidedBy?: string;
+}
+
 export interface LandedView {
   planId: string;
   title: string;
@@ -310,6 +349,8 @@ export interface TurnSink {
   plan(p: PlanView): Promise<void>;
   automationPlan(p: AutomationPlanView): Promise<void>;
   connect(c: ConnectView): Promise<void>;
+  /** The linked identity has no licence (EXPERIENCE §11). Private to the invoker. */
+  licence(l: LicenceView): Promise<void>;
   /** Approved: the card switches to a live receipt (every change in progress). */
   executing(p: PlanView): Promise<void>;
   landed(l: LandedView): Promise<void>;

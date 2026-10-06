@@ -7,3 +7,4 @@ export { withRetry, HttpError, defaultIsRetriable, type RetryOptions } from './r
 export { contentHash } from './hash.js';
 export * from './a2a.js';
 export * from './connector-mcp.js';
+export * from './licences.js';

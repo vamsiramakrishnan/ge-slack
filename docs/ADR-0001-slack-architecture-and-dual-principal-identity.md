@@ -1,6 +1,7 @@
 # ADR-0001 — Slack architecture and dual-principal identity
 
-**Status:** Accepted (2026-10-05). Inherits ge-msft ADR-0001 (client-direct), ADR-0004 (command
+**Status:** Accepted (2026-10-05); amended by ADR-0003 (licence onboarding; per-automation
+delegation grants replace the account-wide run-as-me switch in §5). Inherits ge-msft ADR-0001 (client-direct), ADR-0004 (command
 protocol / actuation), ADR-0008 (surface-commander algebra) and ADR-0015 (shared dispatch).
 
 ## Context

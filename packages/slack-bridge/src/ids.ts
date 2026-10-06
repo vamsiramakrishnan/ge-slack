@@ -32,6 +32,10 @@ export const ACTIONS = {
   exportLedger: 'ge_export_ledger',
   /** Cancel one of your background jobs; value = job id. */
   jobCancel: 'ge_job_cancel',
+  /** Licence onboarding (EXPERIENCE §11): ask for a licence; admins approve/decline (`<user>:<id>`). */
+  licenceRequest: 'ge_licence_request',
+  licenceApprove: 'ge_licence_approve',
+  licenceDecline: 'ge_licence_decline',
 } as const;
 
 export const CALLBACKS = {

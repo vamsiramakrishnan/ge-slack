@@ -8,6 +8,7 @@ import {
 } from './stream-assist.js';
 import { A2aClient, GeminiEnterpriseClient } from './a2a.js';
 import { ConnectorMcpClient } from './connector-mcp.js';
+import { LicenceDirectory } from './licences.js';
 import {
   a2aStreamUrl,
   discoveryEngineHost,
@@ -641,5 +642,91 @@ describe('ConnectorMcpClient', () => {
     m = 0;
     expect(await new ConnectorMcpClient(cfg, unauth).listTools(t, 'c')).toEqual([]);
     expect(t.invalidate).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('LicenceDirectory (userStores.userLicenses)', () => {
+  const tokens: TokenSource = { getAccessToken: async () => 'admin-token' };
+  const reply = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+
+  it('looks one principal up on the regional user store with an exact, quoted filter', async () => {
+    const fetchImpl = vi.fn(async () =>
+      reply({
+        userLicenses: [
+          { userPrincipal: 'ALEX@acme.com', licenseAssignmentState: 'NO_LICENSE_ATTEMPTED_LOGIN' },
+        ],
+      }),
+    );
+    const d = new LicenceDirectory(cfg, 'default_user_store', fetchImpl as unknown as typeof fetch);
+    expect(await d.lookup(tokens, 'alex@acme.com')).toEqual({ status: 'unlicensed' });
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(
+      url.startsWith(
+        'https://discoveryengine.eu.rep.googleapis.com/v1alpha/projects/p1/locations/eu/userStores/default_user_store/userLicenses?',
+      ),
+    ).toBe(true);
+    expect(new URL(url).searchParams.get('filter')).toBe('user_principal = "alex@acme.com"');
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer admin-token');
+  });
+
+  it('maps states, never takes another person’s row, and fails to unknown', async () => {
+    const mk = (body: unknown, status = 200) =>
+      new LicenceDirectory(cfg, undefined, (async () => reply(body, status)) as typeof fetch);
+    expect(
+      await mk({
+        userLicenses: [{ userPrincipal: 'alex@acme.com', licenseAssignmentState: 'ASSIGNED' }],
+      }).lookup(tokens, 'alex@acme.com'),
+    ).toEqual({ status: 'assigned' });
+    expect(
+      await mk({
+        userLicenses: [{ userPrincipal: 'alex@acme.com', licenseAssignmentState: 'BLOCKED' }],
+      }).lookup(tokens, 'alex@acme.com'),
+    ).toEqual({ status: 'blocked' });
+    expect(
+      await mk({
+        userLicenses: [{ userPrincipal: 'maya@acme.com', licenseAssignmentState: 'ASSIGNED' }],
+      }).lookup(tokens, 'alex@acme.com'),
+    ).toEqual({ status: 'unknown', reason: 'not-found' });
+    expect(await mk({ error: 'nope' }, 403).lookup(tokens, 'alex@acme.com')).toEqual({
+      status: 'unknown',
+      reason: 'http_403',
+    });
+    const dead = new LicenceDirectory(cfg, undefined, (async () => {
+      throw new Error('down');
+    }) as typeof fetch);
+    expect(await dead.lookup(tokens, 'alex@acme.com')).toEqual({
+      status: 'unknown',
+      reason: 'network',
+    });
+    await expect(mk({}).lookup(tokens, 'a"\nb')).rejects.toThrow(/Invalid licence principal/);
+  });
+
+  it('assigns one principal to one validated licence config', async () => {
+    const fetchImpl = vi.fn(async () => reply({ name: 'operations/1' }));
+    const d = new LicenceDirectory(cfg, undefined, fetchImpl as unknown as typeof fetch);
+    expect(await d.assign(tokens, 'alex@acme.com', 'not-a-config')).toEqual({
+      ok: false,
+      code: 'bad_config',
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(
+      await d.assign(tokens, 'alex@acme.com', 'projects/p1/locations/eu/licenseConfigs/std'),
+    ).toEqual({ ok: true });
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe(
+      'https://discoveryengine.eu.rep.googleapis.com/v1alpha/projects/p1/locations/eu/userStores/default_user_store:batchUpdateUserLicenses',
+    );
+    expect(JSON.parse(String(init.body))).toEqual({
+      inlineSource: {
+        userLicenses: [
+          {
+            userPrincipal: 'alex@acme.com',
+            licenseConfig: 'projects/p1/locations/eu/licenseConfigs/std',
+          },
+        ],
+        updateMask: 'licenseConfig',
+      },
+    });
   });
 });

@@ -56,6 +56,9 @@ export class CollectingSink implements TurnSink {
   async connect(c: Parameters<TurnSink['connect']>[0]) {
     this.error = c.message;
   }
+  async licence(l: Parameters<TurnSink['licence']>[0]) {
+    this.error = l.message;
+  }
   async executing() {}
   async landed() {}
   async retire() {}

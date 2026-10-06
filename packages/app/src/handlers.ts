@@ -14,7 +14,7 @@ import {
   policyModal,
   type ComposerPrefill,
 } from '@ge-slack/slack-bridge';
-import { insightsLines, rememberNote } from '@ge-slack/runtime';
+import { insightsLines, licenceSummary, rememberNote } from '@ge-slack/runtime';
 import type { Container } from './container.js';
 
 /**
@@ -294,6 +294,9 @@ export async function publishHome(c: Container, userId: string): Promise<void> {
     isAdmin && c.cfg.features.has('analytics')
       ? insightsLines(await c.telemetry.summary(team, 7))
       : undefined;
+  const licence = linked
+    ? await licenceSummary(c.orch, team, userId).catch(() => undefined)
+    : undefined;
   const connectUrl = linked
     ? undefined
     : await c.linker.start({ teamId: team, slackUserId: userId });
@@ -318,6 +321,7 @@ export async function publishHome(c: Container, userId: string): Promise<void> {
       isAdmin,
       ...(insights ? { insights } : {}),
       jobs: jobs.map((j) => ({ id: j.id, title: j.title, startedAt: j.startedAt })),
+      ...(licence ? { licence: { line: licence.line, requestable: licence.requestable } } : {}),
     }),
   });
 }

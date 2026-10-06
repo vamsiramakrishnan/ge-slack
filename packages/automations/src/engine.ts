@@ -332,6 +332,11 @@ export class OutcomeSink implements TurnSink {
     this.lastMessage = c.message;
     return this.inner.connect(c);
   }
+  licence(l: Parameters<TurnSink['licence']>[0]) {
+    this.outcome = 'denied';
+    this.lastMessage = l.message;
+    return this.inner.licence(l);
+  }
   executing(p: Parameters<TurnSink['executing']>[0]) {
     return this.inner.executing(p);
   }

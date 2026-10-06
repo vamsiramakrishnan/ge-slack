@@ -16,6 +16,8 @@ import type {
   ConversationInfo,
   GeminiPort,
   LandedView,
+  LicenceRequestView,
+  LicenceView,
   NoticeKind,
   PlanView,
   ResolvedScope,
@@ -47,6 +49,9 @@ export class RecordingSink implements TurnSink {
   }
   async connect(c: ConnectView) {
     this.events.push({ type: 'connect', value: c });
+  }
+  async licence(l: LicenceView) {
+    this.events.push({ type: 'licence', value: l });
   }
   async executing(p: PlanView) {
     this.events.push({ type: 'executing', value: p });
@@ -170,6 +175,11 @@ export class FakeSurface implements SurfacePort {
   async sendFile(userId: string, file: { name: string; title: string; content: string }) {
     this.files.push({ userId, name: file.name, content: file.content });
     return { ok: true, message: 'Sent to your DM.' };
+  }
+  licenceCards: Array<{ channel: string; view: LicenceRequestView; ts?: string }> = [];
+  async licenceRequestCard(channel: string, view: LicenceRequestView, ts?: string) {
+    this.licenceCards.push({ channel, view, ...(ts ? { ts } : {}) });
+    return { channel, ts: ts ?? `card.${this.licenceCards.length}` };
   }
 }
 

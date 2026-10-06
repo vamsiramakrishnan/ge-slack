@@ -56,6 +56,27 @@ account), the skills, the Slack app, and the bot deployment.
 - Never create a key for it. The service principal only reads channels and sources that a Slack
   admin allow-lists per channel in App Home → Admin.
 
+### Licence lookups and requests (optional, EXPERIENCE §11, ADR-0003 §1)
+
+- Gemini looks up each linked person's licence through an **admin-plane identity**. By default
+  that is the runtime service account. To keep it separate, set
+  `GE_LICENCE_ADMIN_SERVICE_ACCOUNT=<sa>`; the runtime SA then needs
+  `roles/iam.serviceAccountTokenCreator` on that account only.
+- Grant that identity a custom role with `discoveryengine.userLicenses.list`. Add
+  `discoveryengine.userStores.batchUpdateUserLicenses` only if approvals should assign licences.
+  Don't add these grants to the GE-licensed service account.
+- `GE_LICENCE_USER_STORE` (default `default_user_store`).
+- `GE_LICENCE_PRINCIPAL`: `email` (default) or `subject`. This is the field your user store keys
+  people by: a federated user's email when the WIF provider maps it, else the IdP subject. Check
+  with `userLicenses.list` once.
+- `GE_LICENCE_REQUESTS_CHANNEL=C…`: a private channel for admins. Invite the bot. Without it,
+  people are told to ask their admin.
+- `GE_LICENCE_APPROVERS=U…,U…`: who can decide, besides workspace admins/owners.
+- `GE_LICENCE_CONFIG=projects/<p>/locations/<GE_LOCATION>/licenseConfigs/<id>`: approving then
+  assigns that licence. Leave it unset to assign in the console yourself.
+- Turn the whole feature off with `GE_FEATURES=-licences`. If the lookup isn't set up, it does
+  nothing: every request still goes to Gemini Enterprise, which enforces licences itself.
+
 ## 3. Skills
 
 Build and upload `skill/slack-command-planner` and `skill/slack-surface-commander`

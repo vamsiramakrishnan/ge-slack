@@ -3,7 +3,15 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { App, BlockAction } from '@slack/bolt';
 import type { Origin } from '@ge-slack/contracts';
 import { ACTIONS, CALLBACKS, WORKFLOW_STEPS } from '@ge-slack/slack-bridge';
-import { cancelJob, forgetNote, safeMessage, showStats } from '@ge-slack/runtime';
+import {
+  cancelJob,
+  decideLicence,
+  forgetNote,
+  licenceSummary,
+  requestLicence,
+  safeMessage,
+  showStats,
+} from '@ge-slack/runtime';
 import { runWorkflowStep } from '@ge-slack/automations';
 import type { Container } from './container.js';
 import {
@@ -432,6 +440,36 @@ export function register(app: App, c: Container, botUserId: () => string | undef
     await cancelJob(c.orch, team, actionValue(b), b.user.id, c.sinkFor(clickOrigin(c, b)));
     await publishHome(c, b.user.id);
   });
+  onAction(ACTIONS.licenceRequest, async (b) => {
+    const origin = clickOrigin(c, b);
+    // From App Home there is no conversation: the outcome goes to the person's DM.
+    const sinkOrigin: Origin =
+      actionValue(b) === 'home' ? { ...origin, channelId: b.user.id } : origin;
+    await requestLicence(c.orch, origin, c.sinkFor(sinkOrigin));
+    await publishHome(c, b.user.id).catch(() => undefined);
+  });
+  for (const [id, decision] of [
+    [ACTIONS.licenceApprove, 'approve'],
+    [ACTIONS.licenceDecline, 'decline'],
+  ] as const) {
+    onAction(id, async (b) => {
+      const [requesterId, requestId] = actionValue(b).split(':');
+      if (!requesterId || !requestId) return;
+      // The card is shared in the admins' channel: notices go privately to the clicker, never
+      // through response_url (which would replace the card for everyone).
+      const { responseUrl: _drop, ...origin } = clickOrigin(c, b);
+      await decideLicence(
+        c.orch,
+        team,
+        requesterId,
+        requestId,
+        b.user.id,
+        decision,
+        c.sinkFor({ ...origin, entry: 'slash' }),
+      );
+      await publishHome(c, requesterId).catch(() => undefined);
+    });
+  }
   onAction(ACTIONS.exportLedger, async (b) => {
     // From App Home: the CSV lands in the admin's DM; the outcome notice follows it there.
     const origin = clickOrigin(c, b);
@@ -582,6 +620,20 @@ export function routes(c: Container) {
             'You can close this tab and return to Slack.',
           );
           await publishHome(c, outcome.slackUserId).catch(() => undefined);
+          // Say straight away if the identity they linked has no licence (EXPERIENCE §11).
+          const licence = await licenceSummary(c.orch, outcome.teamId, outcome.slackUserId, {
+            fresh: true,
+          }).catch(() => undefined);
+          if (licence && licence.status !== 'assigned' && licence.status !== 'unknown') {
+            await c.surface
+              .notifyUser(outcome.slackUserId, {
+                text:
+                  licence.status === 'blocked'
+                    ? '✦ Connected — but your Gemini Enterprise access is blocked by an admin, so Gemini can’t answer as you yet.'
+                    : `✦ Connected — but you don’t have a Gemini Enterprise licence yet.${licence.requestable ? ' Open the Gemini app’s *Home* tab and click *Request a licence*.' : ' Ask your Gemini Enterprise admin for one.'}`,
+              })
+              .catch(() => undefined);
+          }
           if (outcome.resumeId) {
             const pending = await c.stores.takeResume(outcome.resumeId);
             if (pending && pending.origin.userId === outcome.slackUserId) {

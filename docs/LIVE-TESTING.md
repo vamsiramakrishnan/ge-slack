@@ -81,3 +81,24 @@ you allow-listed. If it doesn't, stop: the rest can't work on this tenant yet.
 | A connector you haven't authorized in Gemini Enterprise | receipt: "not authorized for jira — authorize it in Gemini Enterprise and try again" |
 | `/gemini draft …` in a `service-only` channel | only `serviceAllowed` tools are offered (none, in the example) |
 | App Home ledger / `/gemini stats export` | the action is listed (kind `connector-action`, outcome) |
+
+## 6. Licence onboarding (`licences`, on by default)
+
+Set `GE_LICENCE_REQUESTS_CHANNEL` (and invite the bot). Grant the admin-plane identity
+`discoveryengine.userLicenses.list`. Use one test user **with** a licence and one **without**.
+First run `curl -H "Authorization: Bearer $(gcloud auth print-access-token)"
+"https://discoveryengine.$GE_LOCATION.rep.googleapis.com/v1alpha/projects/$GE_PROJECT/locations/$GE_LOCATION/userStores/default_user_store/userLicenses?filter=user_principal%20%3D%20%22<email>%22"`.
+It must return that user's row. If `userPrincipal` isn't the email, set
+`GE_LICENCE_PRINCIPAL=subject`.
+
+| Step | Expect |
+|---|---|
+| Unlicensed user: `/gemini connect` | after the browser says Connected, a DM: "Connected — but you don't have a Gemini Enterprise licence yet…" |
+| Unlicensed user: `/gemini summarize` in a `user-only` channel | private *licence needed* card with *Request a licence*, no service button; nothing read (no task cards) |
+| Same, `user-preferred` channel with the service configured | the card also offers *Answer with the Gemini service*; clicking answers with 🏢 |
+| **Request a licence** | a card in the requests channel with the user and email; the requester sees "Requested"; a second click says "You asked on …" |
+| The requester (or a non-admin) clicks **Approve** in the requests channel | refused, privately; the card is unchanged |
+| An admin clicks **Approve** (no `GE_LICENCE_CONFIG`) | card: "Approved — assign it in the Gemini Enterprise console"; requester DM; admin told to assign in the console |
+| With `GE_LICENCE_CONFIG`: **Approve and assign** | the user store shows the licence ASSIGNED; card "Licence assigned by @admin"; requester DM "You have a licence now"; their next request answers |
+| Remove a licence in the console, ask again within 6 h | the answer fails with 403, then the licence card (fresh lookup), not a bare error |
+| `/gemini diag` | a *Licence* line matching the user store |

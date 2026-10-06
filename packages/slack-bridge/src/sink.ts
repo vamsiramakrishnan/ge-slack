@@ -6,6 +6,7 @@ import type {
   AutomationPlanView,
   ConnectView,
   LandedView,
+  LicenceView,
   NoticeKind,
   PlanView,
   TurnSink,
@@ -16,6 +17,7 @@ import {
   memoryBlocks,
   automationPlanBlocks,
   connectBlocks,
+  licenceBlocks,
   landedBlocks,
   noticeBlocks,
   planBlocks,
@@ -209,6 +211,13 @@ export class SlackTurnSink implements TurnSink {
     await this.closeStreamWith([]);
     // Connect prompts are always private to the person who has to act on them.
     await this.private(connectBlocks(c), 'Connect Gemini Enterprise');
+    await this.idle();
+  }
+
+  async licence(l: LicenceView): Promise<void> {
+    await this.closeStreamWith([]);
+    // Like connect prompts: only the person who has to act sees it.
+    await this.private(licenceBlocks(l), 'Gemini Enterprise licence needed');
     await this.idle();
   }
 

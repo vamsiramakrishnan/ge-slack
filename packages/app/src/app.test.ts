@@ -110,6 +110,30 @@ function fakeRes() {
 }
 
 describe('config', () => {
+  it('licence assignment is pinned to GE_LOCATION and needs an approvals channel', () => {
+    const env = (o: Record<string, string>) => ({ ...ENV, ...o }) as unknown as NodeJS.ProcessEnv;
+    expect(() =>
+      loadConfig(
+        env({
+          GE_LICENCE_CONFIG: 'projects/p/locations/us/licenseConfigs/std',
+          GE_LICENCE_REQUESTS_CHANNEL: 'C0LIC',
+        }),
+      ),
+    ).toThrow(/residency/);
+    expect(() =>
+      loadConfig(env({ GE_LICENCE_CONFIG: 'projects/p/locations/eu/licenseConfigs/std' })),
+    ).toThrow(/GE_LICENCE_REQUESTS_CHANNEL/);
+    expect(() => loadConfig(env({ GE_LICENCE_APPROVERS: 'U1,not-a-user' }))).toThrow();
+    const ok = loadConfig(
+      env({
+        GE_LICENCE_CONFIG: 'projects/p/locations/eu/licenseConfigs/std',
+        GE_LICENCE_REQUESTS_CHANNEL: 'C0LIC',
+        GE_LICENCE_APPROVERS: 'U0A, U0B',
+      }),
+    );
+    expect(ok.features.has('licences')).toBe(true);
+  });
+
   it('fails fast without a residency pin, vault key, or WIF for OIDC', () => {
     expect(() => loadConfig({ ...ENV, GE_LOCATION: '' } as unknown as NodeJS.ProcessEnv)).toThrow(
       /GE_LOCATION/,
