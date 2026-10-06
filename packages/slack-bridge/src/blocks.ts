@@ -664,6 +664,8 @@ export interface HomeData {
   automations: Automation[];
   ledger: LedgerEntry[];
   isAdmin: boolean;
+  /** Admin insights lines (mrkdwn, content-free), when analytics is on. */
+  insights?: string[];
 }
 
 export function homeView(d: HomeData): Record<string, unknown> {
@@ -799,6 +801,15 @@ export function homeView(d: HomeData): Record<string, unknown> {
         accessory: button('Channel policy…', ACTIONS.openPolicy, 'policy'),
       },
     );
+    if (d.insights?.length) {
+      blocks.push({
+        type: 'section',
+        text: mrkdwn(
+          `*📊 Insights* — no message content, no user identities\n${d.insights.join('\n')}`,
+        ),
+        accessory: button('Export ledger (CSV)', ACTIONS.exportLedger, 'export'),
+      });
+    }
   }
   return { type: 'home', blocks: blocks.slice(0, 100) };
 }

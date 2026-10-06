@@ -8,3 +8,4 @@ export * from './orchestrator.js';
 export * from './workspace-config.js';
 export * from './memory.js';
 export * from './diag.js';
+export * from './insights.js';

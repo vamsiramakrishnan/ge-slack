@@ -925,3 +925,55 @@ describe('memory blocks (stage 3)', () => {
     expect(json).toContain('1 forgotten');
   });
 });
+
+describe('admin surface (stage 3)', () => {
+  it('admins only from this team; files go to the DM through the external upload flow', async () => {
+    const api = new FakeSlack({
+      'users.info': (a) => ({
+        ok: true,
+        user: {
+          is_admin: a.user === 'U0ADM',
+          team_id: a.user === 'U0EXT' ? 'T9' : 'T1',
+          ...(a.user === 'U0EXT' ? { is_admin: true } : {}),
+        },
+      }),
+      'conversations.open': () => ({ ok: true, channel: { id: 'D0ADM' } }),
+      'files.getUploadURLExternal': () => ({
+        ok: true,
+        upload_url: 'https://files.slack.com/upload/v1/abc',
+        file_id: 'F1',
+      }),
+    });
+    const posted: Array<{ url: string; body: string }> = [];
+    const fetchImpl = (async (url: string, init: RequestInit) => {
+      posted.push({ url, body: new TextDecoder().decode(init.body as Uint8Array) });
+      return new Response('OK');
+    }) as unknown as typeof fetch;
+    const s = new SlackSurface(api, { teamId: 'T1', fetchImpl });
+    expect(await s.isWorkspaceAdmin('U0ADM')).toBe(true);
+    expect(await s.isWorkspaceAdmin('U0ALEX')).toBe(false);
+    expect(await s.isWorkspaceAdmin('U0EXT')).toBe(false);
+    const r = await s.sendFile('U0ADM', { name: 'l.csv', title: 'Ledger', content: 'a,b\n' });
+    expect(r.ok).toBe(true);
+    expect(posted).toEqual([{ url: 'https://files.slack.com/upload/v1/abc', body: 'a,b\n' }]);
+    const done = api.calls.find((x) => x.method === 'files.completeUploadExternal')!;
+    expect(done.args).toMatchObject({
+      channel_id: 'D0ADM',
+      files: [{ id: 'F1', title: 'Ledger' }],
+    });
+
+    const evil = new SlackSurface(
+      new FakeSlack({
+        'conversations.open': () => ({ ok: true, channel: { id: 'D1' } }),
+        'files.getUploadURLExternal': () => ({
+          ok: true,
+          upload_url: 'https://evil.example/x',
+          file_id: 'F',
+        }),
+      }),
+      { teamId: 'T1', fetchImpl },
+    );
+    expect((await evil.sendFile('U1', { name: 'x', title: 'x', content: 'x' })).ok).toBe(false);
+    expect(posted).toHaveLength(1);
+  });
+});

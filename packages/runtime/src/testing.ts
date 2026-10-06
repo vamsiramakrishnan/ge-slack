@@ -158,6 +158,15 @@ export class FakeSurface implements SurfacePort {
   async userEmail() {
     return 'alex@acme.com';
   }
+  admins = new Set<string>();
+  files: Array<{ userId: string; name: string; content: string }> = [];
+  async isWorkspaceAdmin(userId: string) {
+    return this.admins.has(userId);
+  }
+  async sendFile(userId: string, file: { name: string; title: string; content: string }) {
+    this.files.push({ userId, name: file.name, content: file.content });
+    return { ok: true, message: 'Sent to your DM.' };
+  }
 }
 
 /** Scripted Gemini: each call pops the next response text (or a custom event list). */

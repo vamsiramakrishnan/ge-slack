@@ -62,12 +62,14 @@ import type {
   LinkStarter,
   PlanView,
   ResolvedScope,
+  InsightsPort,
   SurfacePort,
   TelemetryPort,
   TurnSink,
   WorkspaceConfigPort,
 } from './ports.js';
 import { notesFor } from './memory.js';
+import { observingSink } from './insights.js';
 import { handleControl } from './controls.js';
 
 export interface OrchestratorDeps {
@@ -91,6 +93,7 @@ export interface OrchestratorDeps {
   /** Build identifier shown by `/gemini diag` (e.g. the git sha / Cloud Run revision). */
   version?: string;
   telemetry?: TelemetryPort;
+  insights?: InsightsPort;
 }
 
 type Turn = {
@@ -183,6 +186,16 @@ export class Orchestrator {
     warnings: string[] = [],
     opts: RunOptions = {},
   ): Promise<void> {
+    sink = observingSink(
+      this,
+      origin.teamId,
+      {
+        verb: inv.verb,
+        entry: origin.entry,
+        ...(origin.channelId ? { channel: origin.channelId } : {}),
+      },
+      sink,
+    );
     try {
       const turn = await this.admit(inv, origin, sink, opts);
       if (!turn) return;
@@ -1261,6 +1274,7 @@ export class Orchestrator {
     edits: Record<string, string> = {},
   ): Promise<void> {
     const peek = await this.deps.stores.getPlan(planId);
+    if (peek) sink = observingSink(this, peek.teamId, { verb: peek.invocation.verb }, sink);
     if (!peek) {
       await sink.notice('info', 'This plan expired or was already handled — run it again.');
       return;

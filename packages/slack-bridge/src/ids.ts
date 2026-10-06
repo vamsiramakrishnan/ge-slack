@@ -28,6 +28,8 @@ export const ACTIONS = {
   agentAuthorize: 'ge_agent_authorize',
   /** Forget one channel note; value `<channel>:<noteId>`. */
   memoryForget: 'ge_memory_forget',
+  /** Admin: DM the 30-day ledger CSV. */
+  exportLedger: 'ge_export_ledger',
 } as const;
 
 export const CALLBACKS = {

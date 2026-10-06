@@ -9,6 +9,7 @@ import {
 } from '@ge-slack/contracts';
 import { runDiagnostics } from './diag.js';
 import { forgetNote, rememberNote, showMemory } from './memory.js';
+import { showStats } from './insights.js';
 import type { Orchestrator } from './orchestrator.js';
 import type { TurnSink } from './ports.js';
 
@@ -47,6 +48,10 @@ export async function handleControl(
 
     case 'forget':
       await forgetNote(orch, origin, { n: Number(args[0]) }, sink);
+      return;
+
+    case 'stats':
+      await showStats(orch, origin, args, sink);
       return;
 
     case 'diag': {

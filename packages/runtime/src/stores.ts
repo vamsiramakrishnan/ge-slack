@@ -171,6 +171,15 @@ export class RuntimeStores {
     return this.kv.get<StoredAnswer>(`answer/${id}`);
   }
 
+  /** Team-wide ledger since a time (admin export). */
+  async ledgerSince(teamId: string, sinceMs: number): Promise<LedgerEntry[]> {
+    const all = await this.kv.list<LedgerEntry>(`ledger/${teamId}/`);
+    return all
+      .map((x) => x.value)
+      .filter((e) => Date.parse(e.at) >= sinceMs)
+      .sort((a, b) => a.at.localeCompare(b.at));
+  }
+
   record(e: LedgerEntry) {
     return this.kv.set(`ledger/${e.teamId}/${e.changeId}`, e);
   }

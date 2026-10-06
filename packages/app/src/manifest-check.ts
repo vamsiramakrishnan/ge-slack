@@ -20,6 +20,7 @@ export const REQUIRED_BOT_SCOPES = [
   'groups:history',
   'groups:read',
   'files:read', // canvas fallback: files.info preview
+  'files:write', // admin ledger export (CSV DM'd to the admin only)
   'im:history',
   'im:read', // conversations.info on DMs
   'im:write',

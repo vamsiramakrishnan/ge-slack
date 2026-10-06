@@ -43,3 +43,16 @@ Reinstall the app from the manifest first: it adds the *Remember this* message s
 | Run `remember` in a channel you're not in (e.g. by URL) | denied |
 | `@Gemini ask @<a2a agent> …` without naming the scope | no notes sent (A2A rule) |
 | `/gemini remember when we moved the freeze?` (no quotes) | treated as a question, not a note |
+
+## 3. Admin insights
+
+Reinstall from the manifest: it adds `files:write` (used only to DM the ledger CSV to the admin who
+asks).
+
+| Step | Expect |
+|---|---|
+| A non-admin runs `/gemini stats` | denied: insights are for workspace admins |
+| An admin runs a few asks, a denied `summarize #channel-you're-not-in`, and 👍 on an answer, then `/gemini stats` | requests counted, `not-member 1` under top denials, 👍 1 |
+| App Home as an admin | 📊 Insights block under Admin with **Export ledger (CSV)** |
+| **Export ledger** / `/gemini stats export` | the CSV arrives in your DM with Gemini, with ids, outcomes and links only; no message text |
+| `GE_FEATURES=-analytics` | no Insights block; `/gemini stats` says it's switched off |

@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { App, BlockAction } from '@slack/bolt';
 import type { Origin } from '@ge-slack/contracts';
 import { ACTIONS, CALLBACKS, WORKFLOW_STEPS } from '@ge-slack/slack-bridge';
-import { forgetNote, safeMessage } from '@ge-slack/runtime';
+import { forgetNote, safeMessage, showStats } from '@ge-slack/runtime';
 import { runWorkflowStep } from '@ge-slack/automations';
 import type { Container } from './container.js';
 import {
@@ -400,13 +400,20 @@ export function register(app: App, c: Container, botUserId: () => string | undef
   onAction(ACTIONS.feedback, async (b) => {
     const v = actionValue(b);
     const [dir, turnId] = v.split(':');
-    if (turnId && (dir === 'up' || dir === 'down'))
+    if (turnId && (dir === 'up' || dir === 'down')) {
+      c.orch.observe(team, { kind: 'feedback', outcome: dir });
       await c.stores.recordFeedback(
         team,
         turnId,
         b.user.id,
         dir === 'up' ? 'positive' : 'negative',
       );
+    }
+  });
+  onAction(ACTIONS.exportLedger, async (b) => {
+    // From App Home: the CSV lands in the admin's DM; the outcome notice follows it there.
+    const origin = clickOrigin(c, b);
+    await showStats(c.orch, origin, ['export'], c.sinkFor(origin));
   });
   onAction(ACTIONS.followUp, async (b) => {
     const a = await c.stores.getAnswer(actionValue(b));

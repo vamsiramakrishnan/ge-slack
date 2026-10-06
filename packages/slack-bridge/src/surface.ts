@@ -46,6 +46,8 @@ export interface SlackSurfaceOptions {
   now?: () => number;
   /** Max pages of conversations.members to scan before failing closed. */
   maxMemberPages?: number;
+  /** For the external file upload step (files.getUploadURLExternal → POST bytes). */
+  fetchImpl?: typeof fetch;
   /**
    * Client used for writes and undo. Must not auto-retry (a retried chat.postMessage can land
    * twice); the app passes a WebClient with retries disabled (M6). Defaults to the read client.
@@ -141,6 +143,52 @@ export class SlackSurface implements SurfacePort {
   }
 
   /** Guests (single/multi-channel) can't search the workspace. Fails closed. */
+  /** Workspace admins/owners (admin insights, ledger export). Fails closed. */
+  async isWorkspaceAdmin(userId: string): Promise<boolean> {
+    try {
+      const r = await must(this.api, 'users.info', { user: userId });
+      const u = r.user as { is_admin?: boolean; is_owner?: boolean; team_id?: string };
+      return Boolean((u.is_admin || u.is_owner) && (!u.team_id || u.team_id === this.opts.teamId));
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * DM a file to one person (ledger export): files.getUploadURLExternal → POST the bytes →
+   * files.completeUploadExternal into their DM. Never shared to a channel.
+   */
+  async sendFile(
+    userId: string,
+    file: { name: string; title: string; content: string; comment?: string },
+  ): Promise<{ ok: boolean; message: string }> {
+    try {
+      const im = await must(this.writeApi, 'conversations.open', { users: userId });
+      const channel = (im.channel as { id?: string } | undefined)?.id;
+      if (!channel) return { ok: false, message: 'Could not open a DM.' };
+      const bytes = new TextEncoder().encode(file.content);
+      const up = await must(this.writeApi, 'files.getUploadURLExternal', {
+        filename: file.name,
+        length: bytes.byteLength,
+      });
+      const url = String(up.upload_url ?? '');
+      if (!/^https:\/\/files\.slack\.com\//.test(url)) {
+        return { ok: false, message: 'Slack returned an unexpected upload URL.' };
+      }
+      const f = this.opts.fetchImpl ?? ((i, init) => globalThis.fetch(i, init));
+      const res = await f(url, { method: 'POST', body: bytes });
+      if (!res.ok) return { ok: false, message: `Upload failed (${res.status}).` };
+      await must(this.writeApi, 'files.completeUploadExternal', {
+        files: [{ id: up.file_id, title: file.title }],
+        channel_id: channel,
+        ...(file.comment ? { initial_comment: file.comment } : {}),
+      });
+      return { ok: true, message: 'Sent to your DM.' };
+    } catch (err) {
+      return { ok: false, message: `Upload failed: ${slackErrorCode(err) ?? 'error'}` };
+    }
+  }
+
   async isGuest(userId: string): Promise<boolean> {
     try {
       const r = await must(this.api, 'users.info', { user: userId });

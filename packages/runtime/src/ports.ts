@@ -17,6 +17,7 @@ import type {
   SourceRef,
   TaskUpdate,
   TelemetryEvent,
+  InsightsSummary,
   Trigger,
   WriteProvenance,
 } from '@ge-slack/contracts';
@@ -91,6 +92,13 @@ export interface SurfacePort {
   /** Is this file a canvas, and which conversations is it shared in? (canvas membership gate) */
   canvasAccess(id: string): Promise<{ isCanvas: boolean; channels: string[] }>;
   userEmail(userId: string): Promise<string | undefined>;
+  /** Workspace admin/owner of this team (insights, ledger export). Fails closed. */
+  isWorkspaceAdmin(userId: string): Promise<boolean>;
+  /** DM one person a file (ledger export). */
+  sendFile(
+    userId: string,
+    file: { name: string; title: string; content: string; comment?: string },
+  ): Promise<{ ok: boolean; message: string }>;
 }
 
 export interface GeminiPort {
@@ -125,6 +133,10 @@ export interface WorkspaceConfigPort {
 /** Admin insights sink (EXPERIENCE §10). Records carry no content and no user identities. */
 export interface TelemetryPort {
   record(teamId: string, e: TelemetryEvent): Promise<void>;
+}
+
+export interface InsightsPort {
+  summary(teamId: string, days?: number): Promise<InsightsSummary>;
 }
 
 export interface AutomationPort {

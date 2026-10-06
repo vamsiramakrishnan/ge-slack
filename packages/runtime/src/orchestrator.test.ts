@@ -21,6 +21,7 @@ import type {
   PlanView,
 } from './ports.js';
 import { forgetNote } from './memory.js';
+import { KvTelemetry } from './insights.js';
 import { neutralize, renderContext } from './prompt.js';
 
 const PL = 'https://acme.slack.com/archives/C0ENG/p1700000000000100';
@@ -186,6 +187,8 @@ function setup(script: Array<string | import('@ge-slack/contracts').AssistEvent[
     appUrl: 'https://vertexaisearch.cloud.google.com/home/cid/abc',
     features: new Set(['memory', 'analytics', 'jobs', 'diag', 'connector-actions'] as const),
     version: 'test',
+    telemetry: new KvTelemetry(kv, () => NOW),
+    insights: new KvTelemetry(kv, () => NOW),
   });
   return { orch, surface, gemini, identity, config, kv };
 }
@@ -1025,5 +1028,65 @@ describe('channel memory (stage 3)', () => {
     expect(off.last<{ text: string }>('notice')!.text).toMatch(/switched off/);
     await run(orch, 'ask "q"');
     expect(gemini.turns[0]!.text).not.toContain('<channel_memory>');
+  });
+});
+
+describe('admin insights (stage 3)', () => {
+  it('records outcomes without content, and only admins see them', async () => {
+    const { orch, surface, kv } = setup(['Answer with secret details.']);
+    const telemetry = new KvTelemetry(kv, () => NOW);
+    (orch.deps as { telemetry?: unknown; insights?: unknown }).telemetry = telemetry;
+    (orch.deps as { insights?: unknown }).insights = telemetry;
+    await run(orch, 'summarize this thread');
+    await run(orch, 'summarize <#C0SECRET>');
+    await telemetry.record('T1', { kind: 'feedback', outcome: 'up' });
+    // Free text is not a valid event field: such an event is dropped, never stored.
+    await telemetry.record('T1', {
+      kind: 'turn',
+      outcome: 'answered',
+      reason: 'Cache evictions again',
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    const stored = JSON.stringify(await kv.list('stat/'));
+    expect(stored).not.toContain('secret');
+    expect(stored).not.toContain('U0ALEX');
+    expect(stored).not.toContain('Cache evictions');
+    const s = await telemetry.summary('T1', 7);
+    expect(s.turns).toBe(2);
+    expect(s.outcomes['turn:answered']).toBe(1);
+    expect(s.denials).toEqual([{ reason: 'not-member', count: 1 }]);
+    expect(s.feedback.up).toBe(1);
+
+    const denied = await run(orch, 'stats', origin({ entry: 'slash' }));
+    expect(denied.last<{ kind: string }>('notice')!.kind).toBe('denied');
+    surface.admins.add('U0ALEX');
+    const shown = (await run(orch, 'stats', origin({ entry: 'slash' }))).last<{ text: string }>(
+      'notice',
+    )!.text;
+    expect(shown).toContain('2 requests');
+    expect(shown).toContain('not-member 1');
+  });
+
+  it('exports the ledger as CSV with formula cells neutralized', async () => {
+    const { orch, surface } = setup([]);
+    surface.admins.add('U0ALEX');
+    await orch.deps.stores.record({
+      changeId: '=HYPERLINK("http://evil")',
+      teamId: 'T1',
+      invokerId: 'U0ALEX',
+      approval: 'human',
+      kind: 'reply',
+      label: 'Reply',
+      outcome: 'applied',
+      principal: 'user:alex@acme.com',
+      at: new Date().toISOString(),
+    });
+    await run(orch, 'stats export', origin({ entry: 'slash' }));
+    const [file] = surface.files;
+    expect(file!.userId).toBe('U0ALEX');
+    expect(file!.content.split('\n')[0]).toBe(
+      'at,change_id,kind,outcome,principal,invoker,approved_by,approval,channel,permalink,undone_at,undone_by,automation_id',
+    );
+    expect(file!.content).toContain(`"'=HYPERLINK(""http://evil"")"`);
   });
 });

@@ -18,7 +18,7 @@ import {
   type KeyValueStore,
   type ServiceIdentity,
 } from '@ge-slack/identity';
-import { KvWorkspaceConfig, Orchestrator, RuntimeStores } from '@ge-slack/runtime';
+import { KvTelemetry, KvWorkspaceConfig, Orchestrator, RuntimeStores } from '@ge-slack/runtime';
 import {
   SlackSurface,
   SlackTurnSink,
@@ -44,6 +44,7 @@ export interface Container {
   engine: AutomationEngine;
   orch: Orchestrator;
   postResponse: ResponsePoster;
+  telemetry: KvTelemetry;
   /** Verifies Cloud Scheduler's OIDC token on /cron/tick. */
   cronVerifier: GoogleIdTokenVerifier;
   /** Pick the right rendering for an origin (EXPERIENCE §3 visibility rules). */
@@ -163,7 +164,9 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
     ...(deps.writeApi ? { writeApi: deps.writeApi } : {}),
     ...(cfg.SLACK_APP_ID ? { appId: cfg.SLACK_APP_ID } : {}),
     domain: cfg.SLACK_TEAM_DOMAIN,
+    fetchImpl,
   });
+  const telemetry = new KvTelemetry(kv);
   const workspace = new KvWorkspaceConfig(kv, cfg.sources, cfg.agents);
   const stores = new RuntimeStores(kv);
   const engine = new AutomationEngine(kv);
@@ -196,6 +199,8 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
     timeZone: cfg.GE_TIME_ZONE,
     ...(cfg.GE_APP_URL ? { appUrl: cfg.GE_APP_URL } : {}),
     features: cfg.features,
+    telemetry,
+    insights: telemetry,
     version: cfg.GE_VERSION ?? cfg.K_REVISION ?? 'dev',
   });
   const postResponse = deps.postResponse ?? defaultResponsePoster;
@@ -284,6 +289,7 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
     orch,
     postResponse,
     cronVerifier: new GoogleIdTokenVerifier(fetchImpl),
+    telemetry,
     sinkFor,
     unattendedSink,
   };

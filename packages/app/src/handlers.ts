@@ -14,7 +14,7 @@ import {
   policyModal,
   type ComposerPrefill,
 } from '@ge-slack/slack-bridge';
-import { rememberNote } from '@ge-slack/runtime';
+import { insightsLines, rememberNote } from '@ge-slack/runtime';
 import type { Container } from './container.js';
 
 /**
@@ -287,6 +287,10 @@ export async function publishHome(c: Container, userId: string): Promise<void> {
     c.stores.recent(team, userId, 10),
     isWorkspaceAdmin(c, userId),
   ]);
+  const insights =
+    isAdmin && c.cfg.features.has('analytics')
+      ? insightsLines(await c.telemetry.summary(team, 7))
+      : undefined;
   const connectUrl = linked
     ? undefined
     : await c.linker.start({ teamId: team, slackUserId: userId });
@@ -309,6 +313,7 @@ export async function publishHome(c: Container, userId: string): Promise<void> {
       automations,
       ledger,
       isAdmin,
+      ...(insights ? { insights } : {}),
     }),
   });
 }
