@@ -66,3 +66,18 @@ asks).
 | **Cancel** in App Home (or Slack's stop button in the agent DM) | the run stops; `/gemini jobs` shows ⏹️ cancelled |
 | Redeploy while a run is going | `/gemini jobs` shows ⚠️ interrupted within a minute; never "running" forever |
 | `@Gemini ask @<a2a agent> …` | listed as a job too; ✅ done when the task completes |
+
+## 5. Connector actions (`GE_FEATURES=default,connector-actions`)
+
+First run `bun run probe --only connector-mcp --connector <collection>`. It must list the tool
+you allow-listed. If it doesn't, stop: the rest can't work on this tenant yet.
+
+| Step | Expect |
+|---|---|
+| In a thread: `@Gemini draft "file a Jira for the cache TTL fix"` | task card "Connector tools available: Jira"; plan card shows `🔌 Connector action: jira · create_issue`, the summary, the exact JSON, and *not reversible* |
+| Someone else clicks **Approve** | refused; only the requester can approve |
+| **Approve** | the issue is created as you; the receipt shows the connector's reply (e.g. `ENG-42`); no Undo button |
+| Remove the tool from the catalog, redeploy, approve an older card | "no longer allowed here; nothing was applied" |
+| A connector you haven't authorized in Gemini Enterprise | receipt: "not authorized for jira — authorize it in Gemini Enterprise and try again" |
+| `/gemini draft …` in a `service-only` channel | only `serviceAllowed` tools are offered (none, in the example) |
+| App Home ledger / `/gemini stats export` | the action is listed (kind `connector-action`, outcome) |

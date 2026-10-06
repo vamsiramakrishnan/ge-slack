@@ -13,6 +13,9 @@ import {
   type AgentEntry,
   type AgentHandle,
   type ActuationRequest,
+  type ActuationKind,
+  type ActuationResult,
+  type AvailableConnectorTool,
   type CmdEffect,
   type CmdLine,
   type CommandPlan,
@@ -62,6 +65,7 @@ import type {
   LinkStarter,
   PlanView,
   ResolvedScope,
+  ConnectorPort,
   InsightsPort,
   SurfacePort,
   TelemetryPort,
@@ -96,6 +100,7 @@ export interface OrchestratorDeps {
   telemetry?: TelemetryPort;
   insights?: InsightsPort;
   jobs?: JobStore;
+  connectors?: ConnectorPort;
 }
 
 type Turn = {
@@ -138,6 +143,11 @@ export type HandleResult = { kind: 'compose' } | { kind: 'done' };
 export class Orchestrator {
   private readonly now: () => Date;
   private readonly newId: () => string;
+  /** tools/list results per principal + connector, briefly (discovery runs on every draft). */
+  private readonly toolCache = new Map<
+    string,
+    { tools: Array<{ name: string; description?: string; inputSchema?: unknown }>; until: number }
+  >();
 
   constructor(readonly deps: OrchestratorDeps) {
     this.now = deps.now ?? (() => new Date());
@@ -1022,6 +1032,60 @@ export class Orchestrator {
 
   // ------------------------------------------------------------------ executor route
 
+  /**
+   * Connector tools this turn may propose with `act` (EXPERIENCE §10): the ones the connector
+   * offers *this principal* (tools/list as them) that an admin allow-listed — and, for the service,
+   * marked serviceAllowed. Discovery failures drop that connector; they never fail the turn.
+   */
+  private async connectorTools(
+    teamId: string,
+    turn: Turn,
+    sink: TurnSink,
+  ): Promise<AvailableConnectorTool[]> {
+    const port = this.deps.connectors;
+    if (!port || !this.deps.features?.has('connector-actions') || turn.agent) return [];
+    const catalog = await this.deps.config.connectors(teamId);
+    const out: AvailableConnectorTool[] = [];
+    for (const c of catalog) {
+      const allowed = c.tools.filter((t) => turn.principal.kind === 'user' || t.serviceAllowed);
+      if (!allowed.length) continue;
+      const key = `${turn.identity}|${c.collection}`;
+      let listed = this.toolCache.get(key);
+      if (!listed || listed.until < Date.now()) {
+        try {
+          listed = {
+            tools: await port.listTools(turn.tokens, c.collection),
+            until: Date.now() + 600_000,
+          };
+          this.toolCache.set(key, listed);
+        } catch {
+          continue;
+        }
+      }
+      for (const t of allowed) {
+        const offered = listed.tools.find((x) => x.name === t.name);
+        if (!offered) continue;
+        const schema = offered.inputSchema ? JSON.stringify(offered.inputSchema) : undefined;
+        out.push({
+          alias: c.alias,
+          title: c.title,
+          collection: c.collection,
+          name: t.name,
+          ...(offered.description ? { description: offered.description.slice(0, 300) } : {}),
+          ...(schema ? { inputSchema: schema.slice(0, 1500) } : {}),
+        });
+      }
+    }
+    if (out.length) {
+      await sink.task({
+        id: 'connectors',
+        title: `Connector tools available: ${[...new Set(out.map((t) => t.title))].join(', ')}`,
+        status: 'complete',
+      });
+    }
+    return out;
+  }
+
   private async execute(
     inv: Invocation,
     origin: Origin,
@@ -1029,7 +1093,16 @@ export class Orchestrator {
     turn: Turn,
     plan?: CommandPlan,
   ): Promise<void> {
-    const kinds = kindsFor(inv.verb, turn.scope);
+    const connectorTools =
+      inv.verb === 'draft' || inv.verb === 'notes'
+        ? await this.connectorTools(origin.teamId, turn, sink)
+        : [];
+    const kinds: ActuationKind[] = [
+      ...kindsFor(inv.verb, turn.scope),
+      ...(connectorTools.length && turn.scope.kind !== 'search'
+        ? (['connector-action'] as const)
+        : []),
+    ];
     const maxTurns = this.deps.maxExecutorTurns ?? 3;
     const maxEffects = this.deps.maxEffects ?? 8;
     let feedback: string | undefined;
@@ -1063,6 +1136,7 @@ export class Orchestrator {
             now: this.now(),
             timeZone: this.deps.timeZone ?? 'UTC',
             memory: turn.memory,
+            connectorTools,
             targets: [...turn.allowedChannels].map((id) => ({
               id,
               label: id === origin.channelId ? 'here' : 'named',
@@ -1122,6 +1196,7 @@ export class Orchestrator {
         knownUsers,
         knownMessages,
         now: this.now(),
+        connectorTools,
       };
       const actionItems: Array<{
         effect: Extract<CmdEffect, { kind: 'action-item' }>;
@@ -1278,6 +1353,7 @@ export class Orchestrator {
         approvalClass: e.approvalClass,
         reversible: e.reversible,
         line: e.line,
+        ...(e.detail ? { detail: e.detail } : {}),
       })),
       identity: badge,
       invokerId: p.invokerId,
@@ -1396,8 +1472,36 @@ export class Orchestrator {
       await sink.notice('info', 'Every change was skipped — nothing was applied.');
       return;
     }
+    // Connector actions: the admin allow-list (and the feature) must still permit each one now.
+    const actions = p.effects.filter(
+      (e) => e.params.kind === 'connector-action' && !skipped.has(e.changeId),
+    );
+    if (actions.length) {
+      const catalog = this.deps.features?.has('connector-actions')
+        ? await this.deps.config.connectors(p.teamId)
+        : [];
+      for (const e of actions) {
+        const a = e.params as Extract<ActuationParams, { kind: 'connector-action' }>;
+        const entry = catalog.find((c) => c.alias === a.connector && c.collection === a.collection);
+        const tool = entry?.tools.find((t) => t.name === a.tool);
+        if (!tool || (resolved.principal.kind === 'service' && !tool.serviceAllowed)) {
+          await sink.notice(
+            'denied',
+            `${a.connector}.${a.tool} is no longer allowed here; nothing was applied.`,
+          );
+          return;
+        }
+      }
+    }
     await sink.executing(this.planView(p, badge));
-    await this.apply(p, resolved.identity, badge, sink, { approval: 'human', approvedBy: userId });
+    await this.apply(
+      p,
+      resolved.identity,
+      badge,
+      sink,
+      { approval: 'human', approvedBy: userId },
+      resolved.tokens,
+    );
   }
 
   /** Tick/untick one change on a pending plan (review findings). Invoker only; re-renders the card. */
@@ -1453,6 +1557,7 @@ export class Orchestrator {
     badge: IdentityBadge,
     sink: TurnSink,
     approval: { approval: 'human' | 'auto'; approvedBy?: string },
+    tokens?: TokenSource,
   ): Promise<void> {
     const results: LandedView['results'] = [];
     const skipped = new Set(p.skipped ?? []);
@@ -1477,7 +1582,10 @@ export class Orchestrator {
       const req: ActuationRequest = { changeId: e.changeId, params: e.params, provenance };
       let res;
       try {
-        res = await this.deps.surface.actuate(req);
+        res =
+          e.params.kind === 'connector-action'
+            ? await this.runConnectorAction(e.changeId, e.params, tokens, approval.approval)
+            : await this.deps.surface.actuate(req);
       } catch (err) {
         // Thrown after dispatch: the write may or may not have landed. Never report success.
         res = {
@@ -1527,6 +1635,44 @@ export class Orchestrator {
       identity: badge,
       skipped: skipped.size,
     });
+  }
+
+  /**
+   * Run an approved connector action as the approver (EXPERIENCE §10). Never auto-applied, never
+   * retried; the connector's reply is shown as a short, cleaned note. Not reversible.
+   */
+  private async runConnectorAction(
+    changeId: string,
+    p: Extract<ActuationParams, { kind: 'connector-action' }>,
+    tokens: TokenSource | undefined,
+    approval: 'human' | 'auto',
+  ): Promise<ActuationResult> {
+    const base = { changeId, kind: p.kind, provenancePersisted: false } as const;
+    const inverse = {
+      op: 'not-reversible' as const,
+      reason: 'Connector actions run outside Slack.',
+    };
+    if (approval !== 'human' || !tokens || !this.deps.connectors) {
+      return {
+        ...base,
+        outcome: 'rejected',
+        error: { code: 'not_allowed', message: 'Connector actions need a person to approve them.' },
+      };
+    }
+    const r = await this.deps.connectors.callTool(tokens, p.collection, p.tool, p.arguments);
+    if (!r.ok) {
+      const why =
+        r.code === 'http_401' || r.code === 'http_403'
+          ? `not authorized for ${p.connector} — authorize it in Gemini Enterprise and try again`
+          : `${p.connector} refused it (${r.code})`;
+      return { ...base, outcome: 'failed', error: { code: r.code, message: why } };
+    }
+    const note = r.text
+      .replace(/[\p{Cc}\p{Cf}]/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 280);
+    return { ...base, outcome: 'applied', inverse, ...(note ? { note } : {}) };
   }
 
   /** Undo one landed change. Only its invoker or approver may; inverses are host-specific. */

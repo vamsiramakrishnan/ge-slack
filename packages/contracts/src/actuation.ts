@@ -15,6 +15,7 @@ export const ActuationKindSchema = z.enum([
   'bookmark',
   'react',
   'action-items',
+  'connector-action',
 ]);
 export type ActuationKind = z.infer<typeof ActuationKindSchema>;
 
@@ -88,6 +89,16 @@ export const ActuationParamsSchema = z.discriminatedUnion('kind', [
     /** Conversation the list is shared to and where the fallback checklist lands. */
     channel: Channel,
     threadTs: Ts.optional(),
+  }),
+  z.object({
+    /** A Gemini Enterprise connector tool call (MCP `tools/call`), run as the approver. */
+    kind: z.literal('connector-action'),
+    connector: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,62}$/),
+    collection: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+    tool: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+    /** Human summary shown on the card (escaped at render). */
+    summary: z.string().min(1).max(300),
+    arguments: z.record(z.unknown()),
   }),
 ]);
 export type ActuationParams = z.infer<typeof ActuationParamsSchema>;
@@ -174,6 +185,7 @@ export function approvalClassOf(p: ActuationParams, originChannel?: string): App
     case 'canvas':
     case 'canvas-edit':
     case 'schedule':
+    case 'connector-action':
       return 'external';
   }
 }
@@ -188,6 +200,7 @@ export const KIND_LABELS: Record<ActuationKind, { emoji: string; label: string; 
   bookmark: { emoji: '🔖', label: 'Add bookmark', undo: 'Undo' },
   react: { emoji: '😀', label: 'Add reaction', undo: 'Undo' },
   'action-items': { emoji: '✅', label: 'Add action items', undo: 'Undo' },
+  'connector-action': { emoji: '🔌', label: 'Connector action', undo: 'Not reversible' },
 };
 
 export interface AutoApplyContext {

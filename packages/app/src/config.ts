@@ -3,7 +3,9 @@ import { z } from 'zod';
 import type { GeminiClientConfig } from '@ge-slack/gemini-client';
 import {
   AgentEntrySchema,
+  ConnectorEntrySchema,
   GroundSourceSchema,
+  type ConnectorEntry,
   parseFeatures,
   type Feature,
   type AgentEntry,
@@ -79,6 +81,9 @@ const EnvSchema = z.object({
   /** `@agent` catalog (ADR-0002): JSON array of {alias,title,kind,agentId,serviceAllowed}. */
   GE_AGENTS_JSON: z.string().optional(),
   GE_AGENTS_FILE: z.string().optional(),
+  /** Connector tools `draft` may propose (EXPERIENCE §10); needs GE_FEATURES +connector-actions. */
+  GE_CONNECTORS_JSON: z.string().optional(),
+  GE_CONNECTORS_FILE: z.string().optional(),
   /** Gemini Enterprise web app URL, where people authorize connectors and agents. */
   GE_APP_URL: z
     .string()
@@ -110,6 +115,7 @@ const EnvSchema = z.object({
 export type AppConfig = z.infer<typeof EnvSchema> & {
   sources: GroundSource[];
   agents: AgentEntry[];
+  connectors: ConnectorEntry[];
   features: Set<Feature>;
 };
 
@@ -171,7 +177,9 @@ export function loadCatalogs(c: {
   GE_SOURCES_FILE?: string | undefined;
   GE_AGENTS_JSON?: string | undefined;
   GE_AGENTS_FILE?: string | undefined;
-}): { sources: GroundSource[]; agents: AgentEntry[] } {
+  GE_CONNECTORS_JSON?: string | undefined;
+  GE_CONNECTORS_FILE?: string | undefined;
+}): { sources: GroundSource[]; agents: AgentEntry[]; connectors: ConnectorEntry[] } {
   const raw =
     c.GE_SOURCES_JSON ?? (c.GE_SOURCES_FILE ? readFileSync(c.GE_SOURCES_FILE, 'utf8') : '[]');
   const sources = z.array(GroundSourceSchema).parse(JSON.parse(raw));
@@ -191,7 +199,16 @@ export function loadCatalogs(c: {
     if (taken.has(k)) throw new Error(`Agent alias @${a.alias} collides with a source or keyword.`);
     taken.add(k);
   }
-  return { sources, agents };
+  const rawConnectors =
+    c.GE_CONNECTORS_JSON ??
+    (c.GE_CONNECTORS_FILE ? readFileSync(c.GE_CONNECTORS_FILE, 'utf8') : '[]');
+  const connectors = z.array(ConnectorEntrySchema).parse(JSON.parse(rawConnectors));
+  const aliases = new Set<string>();
+  for (const k of connectors) {
+    if (aliases.has(k.alias)) throw new Error(`Duplicate connector alias ${k.alias}.`);
+    aliases.add(k.alias);
+  }
+  return { sources, agents, connectors };
 }
 
 /** Only the Gemini Enterprise settings: what `bun run probe` needs (no Slack, IdP or vault). */
@@ -212,12 +229,15 @@ const GeminiEnvSchema = EnvSchema.pick({
   GE_SOURCES_FILE: true,
   GE_AGENTS_JSON: true,
   GE_AGENTS_FILE: true,
+  GE_CONNECTORS_JSON: true,
+  GE_CONNECTORS_FILE: true,
   GE_SERVICE_MODE: true,
   GE_SERVICE_ACCOUNT: true,
 });
 export type GeminiSettings = z.infer<typeof GeminiEnvSchema> & {
   sources: GroundSource[];
   agents: AgentEntry[];
+  connectors: ConnectorEntry[];
 };
 
 export function loadGeminiSettings(env: NodeJS.ProcessEnv = process.env): GeminiSettings {
@@ -231,7 +251,7 @@ export function loadGeminiSettings(env: NodeJS.ProcessEnv = process.env): Gemini
 
 /** The `gemini-client` configuration for these settings (bot and probe use the same one). */
 export function geminiClientConfig(
-  cfg: Omit<GeminiSettings, 'sources' | 'agents'>,
+  cfg: Omit<GeminiSettings, 'sources' | 'agents' | 'connectors'>,
 ): GeminiClientConfig {
   return {
     assistant: {

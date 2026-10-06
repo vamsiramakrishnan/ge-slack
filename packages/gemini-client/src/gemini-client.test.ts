@@ -7,6 +7,7 @@ import {
   type AssistTurn,
 } from './stream-assist.js';
 import { A2aClient, GeminiEnterpriseClient } from './a2a.js';
+import { ConnectorMcpClient } from './connector-mcp.js';
 import {
   a2aStreamUrl,
   discoveryEngineHost,
@@ -557,5 +558,71 @@ describe('token sources', () => {
     expect(
       () => new ImpersonatedTokenSource(base, { targetServiceAccount: 'alice@acme.com' }),
     ).toThrow();
+  });
+});
+
+describe('ConnectorMcpClient', () => {
+  const json = (b: unknown, status = 200) =>
+    new Response(JSON.stringify(b), { status, headers: { 'content-type': 'application/json' } });
+
+  it('lists and calls tools through invokeConnectorMcp, as the caller', async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown>; auth: string | null }> = [];
+    const fetchImpl = (async (url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      calls.push({ url, body, auth: new Headers(init.headers).get('authorization') });
+      return body.method === 'tools/list'
+        ? json({
+            result: {
+              tools: [{ name: 'create_issue', description: 'd', inputSchema: {} }, { bad: 1 }],
+            },
+          })
+        : json({ result: { content: [{ type: 'text', text: 'ENG-42' }, { type: 'image' }] } });
+    }) as unknown as typeof fetch;
+    const c = new ConnectorMcpClient(cfg, fetchImpl);
+    expect(await c.listTools(tokens(), 'jira-fed_1')).toEqual([
+      { name: 'create_issue', description: 'd', inputSchema: {} },
+    ]);
+    expect(await c.callTool(tokens(), 'jira-fed_1', 'create_issue', { a: 1 })).toEqual({
+      ok: true,
+      text: 'ENG-42',
+    });
+    expect(calls[0]!.url).toBe(
+      'https://discoveryengine.eu.rep.googleapis.com/v1alpha/projects/p1/locations/eu/collections/jira-fed_1/dataConnector:invokeConnectorMcp',
+    );
+    expect(calls[1]!.body).toEqual({
+      method: 'tools/call',
+      params: { name: 'create_issue', arguments: { a: 1 } },
+      engine: 'projects/p1/locations/eu/collections/default_collection/engines/eng',
+    });
+    expect(calls.every((x) => x.auth === 'Bearer tok')).toBe(true);
+    expect(() =>
+      new ConnectorMcpClient(cfg, fetchImpl).listTools(tokens(), '../x'),
+    ).rejects.toThrow();
+  });
+
+  it('reports tool errors, never retries a failure, re-sends once on 401', async () => {
+    let n = 0;
+    const fail = (async () => {
+      n++;
+      return json({}, 503);
+    }) as unknown as typeof fetch;
+    const r = await new ConnectorMcpClient(cfg, fail).callTool(tokens(), 'c', 't', {});
+    expect(r).toMatchObject({ ok: false, code: 'http_503' });
+    expect(n).toBe(1);
+    const isErr = (async () =>
+      json({
+        result: { isError: true, content: [{ type: 'text', text: 'no project' }] },
+      })) as unknown as typeof fetch;
+    expect(await new ConnectorMcpClient(cfg, isErr).callTool(tokens(), 'c', 't', {})).toEqual({
+      ok: false,
+      code: 'tool_error',
+      message: 'no project',
+    });
+    const t = tokens();
+    let m = 0;
+    const unauth = (async () =>
+      ++m === 1 ? json({}, 401) : json({ result: { content: [] } })) as unknown as typeof fetch;
+    expect((await new ConnectorMcpClient(cfg, unauth).callTool(t, 'c', 't', {})).ok).toBe(true);
+    expect(t.invalidate).toHaveBeenCalledTimes(1);
   });
 });

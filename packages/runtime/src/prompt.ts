@@ -4,6 +4,7 @@ import {
   renderConfirmedPlan,
   type ActuationKind,
   type ChannelNote,
+  type AvailableConnectorTool,
   type CommandPlan,
   type Invocation,
 } from '@ge-slack/contracts';
@@ -137,6 +138,8 @@ export interface CommandPromptInput {
   /** Conversations effects may target (ids), with labels. */
   targets: Array<{ id: string; label: string }>;
   memory?: ChannelNote[];
+  /** Connector tools usable with `act` this turn (descriptions are connector-provided: data). */
+  connectorTools?: ReadonlyArray<AvailableConnectorTool>;
 }
 
 /** Executor route: emit exactly one ```cmd program (slack-surface-commander skill). */
@@ -158,6 +161,15 @@ export function composeCommandPrompt(p: CommandPromptInput): string {
     renderCmdSignature(p.kinds),
     `targets you may post to: ${p.targets.map((t) => `<#${t.id}> (${t.label})`).join(', ') || 'only the current thread'}`,
     `now: ${p.now.toISOString()} · user time zone: ${p.timeZone}`,
+    ...(p.connectorTools?.length
+      ? [
+          'connector tools (act only when the request asks for this; one act per real change):',
+          ...p.connectorTools.map(
+            (t) =>
+              `- ${t.alias}.${t.name} (${neutralize(t.title)})${t.description ? ` — ${neutralize(t.description)}` : ''}${t.inputSchema ? ` · arguments schema: ${neutralize(t.inputSchema)}` : ''}`,
+          ),
+        ]
+      : []),
     '</capabilities>',
     `Task: ${verbGuide[p.inv.verb] ?? ''} ${TONE[p.inv.flags.tone ?? 'neutral'] ?? ''}`.trim(),
     'Output exactly one closed ```cmd fence and nothing else. Use only permalinks, channel ids and user ids that appear above. End with `done`.',

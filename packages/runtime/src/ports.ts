@@ -1,5 +1,6 @@
 import type {
   AgentEntry,
+  ConnectorEntry,
   AwaitingReason,
   ActuationRequest,
   ActuationResult,
@@ -133,6 +134,22 @@ export interface WorkspaceConfigPort {
   catalog(teamId: string): Promise<GroundSource[]>;
   /** Gemini Enterprise agents addressable with `@alias` (ADR-0002). */
   agents(teamId: string): Promise<AgentEntry[]>;
+  /** Connector tools an admin allow-listed for `act` (EXPERIENCE §10). */
+  connectors(teamId: string): Promise<ConnectorEntry[]>;
+}
+
+/** Gemini Enterprise connector tools (`invokeConnectorMcp`), always as the turn's principal. */
+export interface ConnectorPort {
+  listTools(
+    tokens: TokenSource,
+    collection: string,
+  ): Promise<Array<{ name: string; description?: string; inputSchema?: unknown }>>;
+  callTool(
+    tokens: TokenSource,
+    collection: string,
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ ok: true; text: string } | { ok: false; code: string; message: string }>;
 }
 
 /** Admin insights sink (EXPERIENCE §10). Records carry no content and no user identities. */
@@ -216,6 +233,8 @@ export interface PlanEffectView {
   label: string;
   /** Short human preview of what will land. */
   preview: string;
+  /** Exact payload (connector-action arguments as pretty JSON). */
+  detail?: string;
   approvalClass: ApprovalClass;
   reversible: boolean;
   line: string;

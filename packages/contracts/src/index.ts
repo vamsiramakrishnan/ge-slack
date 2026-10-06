@@ -15,3 +15,4 @@ export * from './agents.js';
 export * from './features.js';
 export * from './memory.js';
 export * from './telemetry.js';
+export * from './connectors.js';

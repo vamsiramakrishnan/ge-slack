@@ -45,6 +45,7 @@ effects  reply "text"                     reply <permalink> "text"
          schedule <#C…> <ISO-8601 with offset> "text"
          remind <@U…> <ISO-8601 with offset> "text"
          bookmark "Title" <https://…>
+         act <connector>.<tool> "one-line summary" """{json arguments}"""   (only listed connector tools)
          react <permalink> :emoji:
 control  done | help
 ```
@@ -52,6 +53,22 @@ control  done | help
 Strings: `"…"` on one line with escapes `\"`, `\\`, `\n`; `"""…"""` for multi-line text (a
 newline right after the opening `"""` is dropped). `# comment` lines are ignored. Types, laws and
 edge cases: [references/algebra.md](references/algebra.md).
+
+### Connector actions (`act`)
+
+Only when the capability signature lists **connector tools** (e.g. `jira.create_issue`) *and* the
+request or confirmed plan asks for that outcome ("file a ticket", "open an incident"):
+
+- one `act` per real change; the summary is the human one-liner shown on the approval card;
+- the arguments are a single JSON object matching the listed schema — no comments, no trailing
+  commas, no `NaN`; use only facts from the request and `<slack_context>`;
+- never put secrets, tokens or links you were not given into arguments;
+- `act` runs in another system and **cannot be undone**: when in doubt, draft a reply instead and
+  let the person ask for the action.
+
+```
+act jira.create_issue "Cache TTL 30s → 300s" """{"project": "ENG", "summary": "Cache TTL 30s → 300s", "description": "From #eng thread: evictions spiking; raise TTL."}"""
+```
 
 ## Laws
 

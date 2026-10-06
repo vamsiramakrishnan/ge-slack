@@ -1,0 +1,8 @@
+[
+  {
+    "alias": "jira",
+    "title": "Jira",
+    "collection": "jira-fed_1779469629030",
+    "tools": [{ "name": "create_issue", "serviceAllowed": false }]
+  }
+]

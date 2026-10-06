@@ -262,6 +262,13 @@ export function planBlocks(p: PlanView, opts: RenderOptions = { rich: true }): B
           `*${e.index}.* ${e.label}${CLASS_BADGE[e.approvalClass] ?? ''} · ${e.reversible ? 'reversible ↺' : '*not reversible*'}\n>${esc(e.preview)}`,
         ),
       });
+      if (e.detail) {
+        // The exact arguments that will run (connector actions): shown verbatim, inert.
+        blocks.push({
+          type: 'section',
+          text: mrkdwn(`\`\`\`${esc(e.detail.replace(/```/g, "'''")).slice(0, 2900)}\`\`\``),
+        });
+      }
     }
   }
   const program = p.effects.map((e) => e.line).join('\n');

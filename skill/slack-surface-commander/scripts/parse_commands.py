@@ -37,6 +37,7 @@ CMD_EFFECT_VERBS = (
     "bookmark",
     "react",
     "action",
+    "act",
 )
 CMD_CONTROL_VERBS = ("done", "help")
 CMD_VERBS = CMD_READ_VERBS + CMD_EFFECT_VERBS + CMD_CONTROL_VERBS
@@ -53,7 +54,17 @@ EFFECT_VERB_TO_KIND = {
     "bookmark": "bookmark",
     "react": "react",
     "action": "action-items",
+    "act": "connector-action",
 }
+
+# cmd.ts: act <connector>.<tool> "summary" """{json arguments}"""
+_ACT_TARGET = re.compile(r"^@?([a-z0-9][a-z0-9_-]{0,62})\.([A-Za-z0-9_-]{1,64})$")
+MAX_ACT_ARGS_CHARS = 8000
+
+
+def _reject_constant(name: str):
+    # JSON.parse rejects NaN / Infinity; json.loads accepts them — keep the mirror strict.
+    raise ValueError(name)
 
 _DUE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 
@@ -421,6 +432,33 @@ def parse_statement(line: str, toks: list) -> dict:
         if not ref or not m:
             return err("react <permalink> :emoji:")
         return _effect({"kind": "react", "target": ref, "emoji": m.group(1)}, line)
+
+    if verb == "act":
+        usage = 'act <connector>.<tool> "summary" """{json arguments}"""'
+        target = _at(pos, 0)
+        m = _ACT_TARGET.match(target["text"]) if target and target["kind"] == "word" else None
+        summary = _str(pos, 1)
+        raw = _str(pos, 2)
+        if not m or not summary or raw is None:
+            return err(usage)
+        if len(raw.encode("utf-16-le")) // 2 > MAX_ACT_ARGS_CHARS:  # JS string length
+            return err(f"act: arguments are limited to {MAX_ACT_ARGS_CHARS} characters")
+        try:
+            args_obj = json.loads(raw, parse_constant=_reject_constant)
+        except ValueError:
+            return err("act: arguments must be a JSON object")
+        if not isinstance(args_obj, dict):
+            return err("act: arguments must be a JSON object")
+        return _effect(
+            {
+                "kind": "connector-action",
+                "connector": m.group(1),
+                "tool": m.group(2),
+                "summary": summary,
+                "arguments": args_obj,
+            },
+            line,
+        )
 
     guess = _closest(verb, CMD_VERBS)
     return err(f'unknown verb "{verb}"' + (f' — did you mean "{guess}"?' if guess else ""))

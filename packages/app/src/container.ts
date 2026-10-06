@@ -3,6 +3,7 @@ import {
   ImpersonatedTokenSource,
   MetadataServerTokenSource,
   A2aClient,
+  ConnectorMcpClient,
   GeminiEnterpriseClient,
   StreamAssistClient,
   type GeminiClientConfig,
@@ -175,7 +176,8 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
   });
   const telemetry = new KvTelemetry(kv);
   const jobs = new JobStore(kv);
-  const workspace = new KvWorkspaceConfig(kv, cfg.sources, cfg.agents);
+  const workspace = new KvWorkspaceConfig(kv, cfg.sources, cfg.agents, cfg.connectors);
+  const connectorClient = new ConnectorMcpClient(gemini, fetchImpl);
   const stores = new RuntimeStores(kv);
   const engine = new AutomationEngine(kv);
   const orch = new Orchestrator({
@@ -210,6 +212,10 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
     telemetry,
     insights: telemetry,
     jobs,
+    connectors: {
+      listTools: (t, c) => connectorClient.listTools(t, c),
+      callTool: (t, c, n, a) => connectorClient.callTool(t, c, n, a),
+    },
     version: cfg.GE_VERSION ?? cfg.K_REVISION ?? 'dev',
   });
   const postResponse = deps.postResponse ?? defaultResponsePoster;

@@ -23,3 +23,9 @@
 {"id": "action-bad-due", "program": "```cmd\naction <@U0MAYA> \"x\" due=next-week\naction\ndone\n```", "ok": false, "kinds": [], "reads": 0, "errors": 2, "done": true}
 {"id": "canvas-edit-heading", "program": "```cmd\ncanvas-edit F07ABC123 \"\"\"## Status\nShipped\"\"\" heading=\"Status\"\ndone\n```", "ok": true, "kinds": ["canvas-edit"], "reads": 0, "errors": 0, "done": true}
 {"id": "canvas-edit-both", "program": "```cmd\ncanvas-edit F07ABC123 \"\"\"x\"\"\" section=temp:C:1 heading=\"Status\"\ndone\n```", "ok": false, "kinds": [], "reads": 0, "errors": 1, "done": true}
+{"id": "act-jira", "program": "```cmd\nread thread\nreply \"Filing the TTL fix\"\nact jira.create_issue \"Cache TTL 30s → 300s\" \"\"\"{\"project\": \"ENG\", \"summary\": \"Cache TTL 30s → 300s\", \"labels\": [\"cache\"]}\"\"\"\ndone\n```", "ok": true, "kinds": ["reply", "connector-action"], "reads": 1, "errors": 0, "done": true}
+{"id": "act-at-alias", "program": "```cmd\nact @servicenow.create_incident \"Checkout 500s\" \"\"\"{}\"\"\"\ndone\n```", "ok": true, "kinds": ["connector-action"], "reads": 0, "errors": 0, "done": true}
+{"id": "act-bad-json", "program": "```cmd\nact jira.create_issue \"x\" \"\"\"{project: ENG}\"\"\"\ndone\n```", "ok": false, "kinds": [], "reads": 0, "errors": 1, "done": true}
+{"id": "act-array-args", "program": "```cmd\nact jira.create_issue \"x\" \"\"\"[1, 2]\"\"\"\ndone\n```", "ok": false, "kinds": [], "reads": 0, "errors": 1, "done": true}
+{"id": "act-nan", "program": "```cmd\nact jira.create_issue \"x\" \"\"\"{\"n\": NaN}\"\"\"\ndone\n```", "ok": false, "kinds": [], "reads": 0, "errors": 1, "done": true}
+{"id": "act-no-tool", "program": "```cmd\nact jira \"x\" \"\"\"{}\"\"\"\ndone\n```", "ok": false, "kinds": [], "reads": 0, "errors": 1, "done": true}

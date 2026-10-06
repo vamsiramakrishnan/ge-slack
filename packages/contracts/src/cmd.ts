@@ -1,5 +1,6 @@
 import { parsePermalink } from './scope.js';
 import type { ActuationKind } from './actuation.js';
+import { MAX_ACT_ARGS_CHARS } from './connectors.js';
 
 /**
  * The model-facing ```cmd algebra for Slack (ge-msft ADR-0004/0008). The executor skill emits
@@ -42,7 +43,14 @@ export type CmdEffect =
   | { kind: 'schedule'; channel: string; at: string; text: string }
   | { kind: 'remind'; user: string; at: string; text: string }
   | { kind: 'bookmark'; title: string; link: string }
-  | { kind: 'react'; target: MessageRef; emoji: string };
+  | { kind: 'react'; target: MessageRef; emoji: string }
+  | {
+      kind: 'connector-action';
+      connector: string;
+      tool: string;
+      summary: string;
+      arguments: Record<string, unknown>;
+    };
 
 export type CmdLine =
   | { verb: 'read'; target: 'thread' | 'channel' | MessageRef; sinceText?: string; line: string }
@@ -64,6 +72,7 @@ export const CMD_EFFECT_VERBS = [
   'bookmark',
   'react',
   'action',
+  'act',
 ] as const;
 export const CMD_CONTROL_VERBS = ['done', 'help'] as const;
 export const CMD_VERBS = [...CMD_READ_VERBS, ...CMD_EFFECT_VERBS, ...CMD_CONTROL_VERBS];
@@ -80,6 +89,7 @@ export const EFFECT_VERB_TO_KIND: Record<(typeof CMD_EFFECT_VERBS)[number], Actu
   bookmark: 'bookmark',
   react: 'react',
   action: 'action-items',
+  act: 'connector-action',
 };
 
 export type FenceResult =
@@ -363,6 +373,41 @@ export function parseStatement(line: string, toks: Tok[]): CmdLine {
       if (!ref || !emoji) return err('react <permalink> :emoji:');
       return { verb: 'effect', effect: { kind: 'react', target: ref, emoji }, line };
     }
+    case 'act': {
+      // act <connector>.<tool> "summary" """{json arguments}"""
+      const usage = 'act <connector>.<tool> "summary" """{json arguments}"""';
+      const target = positional[0];
+      const m =
+        target?.kind === 'word'
+          ? /^@?([a-z0-9][a-z0-9_-]{0,62})\.([A-Za-z0-9_-]{1,64})$/.exec(target.text)
+          : null;
+      const summary = str(positional, 1);
+      const raw = str(positional, 2);
+      if (!m || !summary || raw === undefined) return err(usage);
+      if (raw.length > MAX_ACT_ARGS_CHARS) {
+        return err(`act: arguments are limited to ${MAX_ACT_ARGS_CHARS} characters`);
+      }
+      let parsedArgs: unknown;
+      try {
+        parsedArgs = JSON.parse(raw);
+      } catch {
+        return err('act: arguments must be a JSON object');
+      }
+      if (!parsedArgs || typeof parsedArgs !== 'object' || Array.isArray(parsedArgs)) {
+        return err('act: arguments must be a JSON object');
+      }
+      return {
+        verb: 'effect',
+        effect: {
+          kind: 'connector-action',
+          connector: m[1]!,
+          tool: m[2]!,
+          summary,
+          arguments: parsedArgs as Record<string, unknown>,
+        },
+        line,
+      };
+    }
     default: {
       const guess = closest(verb, CMD_VERBS);
       return err(`unknown verb "${verb}"${guess ? ` — did you mean "${guess}"?` : ''}`);
@@ -428,6 +473,8 @@ export function renderCmdSignature(kinds: readonly ActuationKind[]): string {
     remind: 'remind <@person> <ISO-8601 with offset> "text"',
     bookmark: 'bookmark "Title" <https://…>',
     react: 'react <permalink> :emoji:',
+    'connector-action':
+      'act <connector>.<tool> "what this does, in one line" """{json arguments}"""   (only the tools listed under connector tools)',
   };
   return [
     'reads:   read thread | read channel [since=24h] | read <permalink> | search "query"',

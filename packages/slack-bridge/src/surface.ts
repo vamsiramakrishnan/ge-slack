@@ -672,6 +672,17 @@ export class SlackSurface implements SurfacePort {
 
     try {
       switch (p.kind) {
+        case 'connector-action':
+          // Connector actions run through Gemini Enterprise (runtime ConnectorPort), never Slack.
+          return {
+            ...base,
+            outcome: 'rejected',
+            provenancePersisted: false,
+            error: {
+              code: 'not_a_slack_write',
+              message: 'Connector actions are not Slack writes.',
+            },
+          };
         case 'reply':
         case 'post': {
           const r = await must(this.writeApi, 'chat.postMessage', {

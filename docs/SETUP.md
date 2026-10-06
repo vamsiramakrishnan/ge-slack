@@ -26,6 +26,13 @@ account), the skills, the Slack app, and the bot deployment.
    least 30 minutes if you register it.
 7. If skill turns return 500s on your tenant, set `GE_SKILL_AGENTS_SPEC=off` (route skills by
    mention only).
+8. **Connector actions (optional).** Set `GE_FEATURES=default,connector-actions` and list allowed
+   tools in `GE_CONNECTORS_FILE` (see `connectors.example.json`):
+   - `collection` is the connector's collection id, as shown in its data store resource name.
+   - Only tools named there, *and* offered to the person by the connector, can be proposed.
+   - Mark `serviceAllowed` only for side-effect-free tools.
+   - Run `bun run probe --only connector-mcp --connector <collection>` first: the API is in the
+     schema but not the guides.
 
 ## 2. Identities
 

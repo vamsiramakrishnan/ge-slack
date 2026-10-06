@@ -2,9 +2,11 @@ import { randomUUID } from 'node:crypto';
 import {
   ActuationParamsSchema,
   KIND_LABELS,
+  MAX_ACT_ARGS_CHARS,
   approvalClassOf,
   type ActuationParams,
   type ApprovalClass,
+  type AvailableConnectorTool,
   type CmdEffect,
 } from '@ge-slack/contracts';
 import type { ResolvedScope } from './ports.js';
@@ -20,6 +22,8 @@ export interface CompileContext {
   knownMessages: ReadonlySet<string>;
   now: Date;
   newChangeId?: () => string;
+  /** Connector tools offered to this principal and allow-listed by an admin (EXPERIENCE §10). */
+  connectorTools?: ReadonlyArray<AvailableConnectorTool>;
 }
 
 export interface CompiledEffect {
@@ -30,6 +34,8 @@ export interface CompiledEffect {
   preview: string;
   approvalClass: ApprovalClass;
   reversible: boolean;
+  /** Exact payload shown on the card (connector-action arguments, pretty JSON). */
+  detail?: string;
 }
 
 export type CompileResult = { ok: true; effect: CompiledEffect } | { ok: false; error: string };
@@ -123,6 +129,12 @@ export class StreamSanitizer {
     const ws = s.lastIndexOf(' ', cut - 1);
     return cut === s.length ? cut : Math.max(0, ws + 1);
   }
+}
+
+/** Pretty, bounded JSON for the card (the full arguments are what runs). */
+export function prettyArgs(args: Record<string, unknown>): string {
+  const s = JSON.stringify(args, null, 2);
+  return s.length > 2500 ? `${s.slice(0, 2499)}…` : s;
 }
 
 function preview(text: string): string {
@@ -239,6 +251,27 @@ export function compileEffect(effect: CmdEffect, line: string, ctx: CompileConte
       };
       break;
     }
+    case 'connector-action': {
+      // Only a tool this connector actually offers this principal *and* an admin allow-listed.
+      const tool = ctx.connectorTools?.find(
+        (t) => t.alias === effect.connector && t.name === effect.tool,
+      );
+      if (!tool) {
+        return err(`${effect.connector}.${effect.tool} is not a connector tool available here`);
+      }
+      if (JSON.stringify(effect.arguments).length > MAX_ACT_ARGS_CHARS) {
+        return err(`arguments are limited to ${MAX_ACT_ARGS_CHARS} characters`);
+      }
+      params = {
+        kind: 'connector-action',
+        connector: tool.alias,
+        collection: tool.collection,
+        tool: tool.name,
+        summary: clean(effect.summary).replace(/\s+/g, ' ').trim().slice(0, 300),
+        arguments: effect.arguments,
+      };
+      break;
+    }
     case 'react':
       if (!msgOk(effect.target.channel, effect.target.ts)) {
         return err('that permalink is not a message from the captured context');
@@ -269,6 +302,7 @@ export function compileEffect(effect: CmdEffect, line: string, ctx: CompileConte
       preview: previewOf(p),
       approvalClass: approvalClassOf(p, ctx.originChannel),
       reversible: label.undo !== 'Not reversible',
+      ...(p.kind === 'connector-action' ? { detail: prettyArgs(p.arguments) } : {}),
     },
   };
 }
@@ -290,6 +324,8 @@ function describe(p: ActuationParams): string {
       return `${l} “${mrkdwnEscape(p.title)}”`;
     case 'react':
       return `${l} :${p.emoji}:`;
+    case 'connector-action':
+      return `${l}: ${p.connector} · ${p.tool}`;
     default:
       return l;
   }
@@ -307,6 +343,8 @@ function previewOf(p: ActuationParams): string {
       return preview(p.markdown);
     case 'bookmark':
       return p.link;
+    case 'connector-action':
+      return preview(p.summary);
     case 'react':
       return `:${p.emoji}:`;
     case 'action-items':
