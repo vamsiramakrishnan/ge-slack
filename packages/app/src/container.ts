@@ -27,7 +27,7 @@ import {
   type SlackApi,
 } from '@ge-slack/slack-bridge';
 import { AutomationEngine } from '@ge-slack/automations';
-import { domainAliases, type AppConfig } from './config.js';
+import { domainAliases, geminiClientConfig, type AppConfig } from './config.js';
 import { FirestoreStore } from './firestore-store.js';
 
 /** Everything the Slack handlers need, composed once from config. */
@@ -149,26 +149,7 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
     domainAliases: domainAliases(cfg.GE_EMAIL_DOMAIN_ALIASES),
   });
 
-  const gemini: GeminiClientConfig = {
-    assistant: {
-      project: cfg.GE_PROJECT,
-      location: cfg.GE_LOCATION,
-      engine: cfg.GE_ENGINE,
-      ...(cfg.GE_COLLECTION ? { collection: cfg.GE_COLLECTION } : {}),
-      ...(cfg.GE_ASSISTANT ? { assistant: cfg.GE_ASSISTANT } : {}),
-    },
-    ...(cfg.GE_MODEL_ID ? { modelId: cfg.GE_MODEL_ID } : {}),
-    ...(cfg.GE_PROXY_URL ? { proxyUrl: cfg.GE_PROXY_URL } : {}),
-    ...(cfg.GE_PLANNER_SKILL ? { plannerSkills: [cfg.GE_PLANNER_SKILL] } : {}),
-    ...(cfg.GE_PLANNER_SKILL_MENTION
-      ? { plannerSkillMentions: [cfg.GE_PLANNER_SKILL_MENTION] }
-      : {}),
-    ...(cfg.GE_COMMANDER_SKILL ? { commandSkills: [cfg.GE_COMMANDER_SKILL] } : {}),
-    ...(cfg.GE_COMMANDER_SKILL_MENTION
-      ? { commandSkillMentions: [cfg.GE_COMMANDER_SKILL_MENTION] }
-      : {}),
-    ...(cfg.GE_SKILL_AGENTS_SPEC === 'off' ? { skillAgentsSpec: false } : {}),
-  };
+  const gemini: GeminiClientConfig = geminiClientConfig(cfg);
   const streamClient = new GeminiEnterpriseClient(
     new StreamAssistClient(gemini, fetchImpl),
     new A2aClient(gemini, fetchImpl),

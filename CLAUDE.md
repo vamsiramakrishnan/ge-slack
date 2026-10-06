@@ -35,6 +35,7 @@ commander skills. Read before changing anything:
 ## Commands
 
 ```bash
-bun install && bun run typecheck && bun run test && bun run test:skills && bun run lint
+bun install && bun run typecheck && bun run test && bun run test:skills && bun run lint && bun run manifest:check
 ```
-Done = all of those clean; run the `security-reviewer` agent after identity/provenance changes.
+Done = all of those clean (CI runs the same, plus the Cloud Run render and image build); run the
+`security-reviewer` agent after identity/provenance changes. `bun run probe` checks a live engine.

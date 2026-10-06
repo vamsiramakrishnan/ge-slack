@@ -76,7 +76,8 @@ packages/
   app/            Bolt wiring: slash, mentions, agent DM, shortcuts, modals, App Home, OAuth callback, cron
 skill/            slack-command-planner + slack-surface-commander bundles (+ Python parity parsers)
 manifests/        slack-app.manifest.json
-docs/             EXPERIENCE.md (UX spec), ADR-0001, SETUP.md, STATUS.md, mockups/slack.html
+deploy/           Cloud Run service (service.yaml), render + deploy script, Cloud Scheduler tick
+docs/             EXPERIENCE.md (UX spec), ADR-0001/0002, SETUP.md, STATUS.md, mockups/slack.html
 ```
 
 ## Develop
@@ -87,6 +88,8 @@ bun run typecheck      # tsc -b across workspaces
 bun run test           # vitest
 bun run test:skills    # Python parser parity tests
 bun run lint           # eslint + prettier
+bun run manifest:check # Slack manifest matches the wiring (events, scopes, shortcuts, steps)
+bun run probe          # live, read-only checks against a real Gemini Enterprise engine
 cp .env.example .env   # then fill in; Socket Mode (SLACK_APP_TOKEN) is easiest locally
 bun run dev
 ```
@@ -98,5 +101,6 @@ Real-time Search) is in [docs/SLACK-UX-ADVANCED.md](docs/SLACK-UX-ADVANCED.md).
 
 The UX spec is [docs/EXPERIENCE.md](docs/EXPERIENCE.md) and the visual mockup is
 [docs/mockups/slack.html](docs/mockups/slack.html). [docs/SETUP.md](docs/SETUP.md) covers
-deployment. [docs/STATUS.md](docs/STATUS.md) separates what is verified from what has not yet run
+deployment and the live probes. CI (`.github/workflows/ci.yml`) runs every check above, renders
+the Cloud Run service, and builds the container image. [docs/STATUS.md](docs/STATUS.md) separates what is verified from what has not yet run
 against live Slack or Gemini Enterprise.

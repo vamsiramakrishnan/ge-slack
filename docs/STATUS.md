@@ -81,7 +81,19 @@ No criticals. All findings fixed with regression tests, except M3, which is acce
 | M4 A2A identity not declared | the attestation requires `identity: user-delegated` |
 | L1–L5 | search gates and delivery-channel membership re-run on resume; card wording; A2A echo filter (role spelling + our `messageId`); stop button cancels continuations; no service offer for agents that bar it |
 
+## Tooling
+
+| Area | State | Evidence |
+|---|---|---|
+| CI (typecheck, tests, Python parity, lint, manifest check, Cloud Run render, image build + fail-fast boot) | Implemented | `.github/workflows/ci.yml`; the image was built and booted locally |
+| Manifest drift check | Implemented | unit-tested; passes on the checked-in manifest |
+| Cloud Run deploy (`deploy/`) | Implemented | render tested locally; `deploy.sh` not yet run against a real project |
+| Live probe harness (`bun run probe`) | Implemented | unit-tested against a scripted engine; run against the real regional endpoint with a dummy token (reached it, reported 401 with a hint); not yet run with real credentials |
+
 ## Next live checks
+
+Start with `bun run probe` (SETUP §6): it covers the Gemini Enterprise half of the list below in
+one command.
 
 1. Install the manifest in a sandbox workspace; confirm `chat.startStream` plan/task rendering and
    `markdown` blocks.

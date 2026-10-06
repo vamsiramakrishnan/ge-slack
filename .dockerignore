@@ -6,3 +6,5 @@ node_modules
 skill
 docs
 **/*.test.ts
+deploy
+.github

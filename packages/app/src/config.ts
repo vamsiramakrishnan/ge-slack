@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
+import type { GeminiClientConfig } from '@ge-slack/gemini-client';
 import {
   AgentEntrySchema,
   GroundSourceSchema,
@@ -139,6 +140,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     if (!c.PUBLIC_BASE_URL.startsWith('https://'))
       throw new Error('PUBLIC_BASE_URL must be https in production.');
   }
+  return { ...c, ...loadCatalogs(c) };
+}
+
+/** The `@` catalogs (sources + agents) with their cross-checks; shared by the bot and the probe. */
+export function loadCatalogs(c: {
+  GE_LOCATION: string;
+  GE_SOURCES_JSON?: string | undefined;
+  GE_SOURCES_FILE?: string | undefined;
+  GE_AGENTS_JSON?: string | undefined;
+  GE_AGENTS_FILE?: string | undefined;
+}): { sources: GroundSource[]; agents: AgentEntry[] } {
   const raw =
     c.GE_SOURCES_JSON ?? (c.GE_SOURCES_FILE ? readFileSync(c.GE_SOURCES_FILE, 'utf8') : '[]');
   const sources = z.array(GroundSourceSchema).parse(JSON.parse(raw));
@@ -158,7 +170,68 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     if (taken.has(k)) throw new Error(`Agent alias @${a.alias} collides with a source or keyword.`);
     taken.add(k);
   }
-  return { ...c, sources, agents };
+  return { sources, agents };
+}
+
+/** Only the Gemini Enterprise settings: what `bun run probe` needs (no Slack, IdP or vault). */
+const GeminiEnvSchema = EnvSchema.pick({
+  GE_PROJECT: true,
+  GE_LOCATION: true,
+  GE_ENGINE: true,
+  GE_COLLECTION: true,
+  GE_ASSISTANT: true,
+  GE_MODEL_ID: true,
+  GE_PROXY_URL: true,
+  GE_PLANNER_SKILL: true,
+  GE_PLANNER_SKILL_MENTION: true,
+  GE_COMMANDER_SKILL: true,
+  GE_COMMANDER_SKILL_MENTION: true,
+  GE_SKILL_AGENTS_SPEC: true,
+  GE_SOURCES_JSON: true,
+  GE_SOURCES_FILE: true,
+  GE_AGENTS_JSON: true,
+  GE_AGENTS_FILE: true,
+  GE_SERVICE_MODE: true,
+  GE_SERVICE_ACCOUNT: true,
+});
+export type GeminiSettings = z.infer<typeof GeminiEnvSchema> & {
+  sources: GroundSource[];
+  agents: AgentEntry[];
+};
+
+export function loadGeminiSettings(env: NodeJS.ProcessEnv = process.env): GeminiSettings {
+  const parsed = GeminiEnvSchema.safeParse(env);
+  if (!parsed.success) {
+    const issues = parsed.error.issues.map((i) => `  ${i.path.join('.')}: ${i.message}`).join('\n');
+    throw new Error(`Invalid configuration:\n${issues}`);
+  }
+  return { ...parsed.data, ...loadCatalogs(parsed.data) };
+}
+
+/** The `gemini-client` configuration for these settings (bot and probe use the same one). */
+export function geminiClientConfig(
+  cfg: Omit<GeminiSettings, 'sources' | 'agents'>,
+): GeminiClientConfig {
+  return {
+    assistant: {
+      project: cfg.GE_PROJECT,
+      location: cfg.GE_LOCATION,
+      engine: cfg.GE_ENGINE,
+      ...(cfg.GE_COLLECTION ? { collection: cfg.GE_COLLECTION } : {}),
+      ...(cfg.GE_ASSISTANT ? { assistant: cfg.GE_ASSISTANT } : {}),
+    },
+    ...(cfg.GE_MODEL_ID ? { modelId: cfg.GE_MODEL_ID } : {}),
+    ...(cfg.GE_PROXY_URL ? { proxyUrl: cfg.GE_PROXY_URL } : {}),
+    ...(cfg.GE_PLANNER_SKILL ? { plannerSkills: [cfg.GE_PLANNER_SKILL] } : {}),
+    ...(cfg.GE_PLANNER_SKILL_MENTION
+      ? { plannerSkillMentions: [cfg.GE_PLANNER_SKILL_MENTION] }
+      : {}),
+    ...(cfg.GE_COMMANDER_SKILL ? { commandSkills: [cfg.GE_COMMANDER_SKILL] } : {}),
+    ...(cfg.GE_COMMANDER_SKILL_MENTION
+      ? { commandSkillMentions: [cfg.GE_COMMANDER_SKILL_MENTION] }
+      : {}),
+    ...(cfg.GE_SKILL_AGENTS_SPEC === 'off' ? { skillAgentsSpec: false } : {}),
+  };
 }
 
 export function domainAliases(text: string | undefined): Record<string, string> {

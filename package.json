@@ -19,7 +19,8 @@
     "test:skills": "python3 -m unittest discover -s skill -p 'test_*.py'",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
-    "manifest:check": "bun packages/app/scripts/check-manifest.ts"
+    "manifest:check": "bun packages/app/scripts/check-manifest.ts",
+    "probe": "bun packages/app/scripts/probe.ts"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
