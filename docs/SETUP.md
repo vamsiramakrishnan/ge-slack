@@ -69,10 +69,12 @@ account), the skills, the Slack app, and the bot deployment.
 - `GE_LICENCE_PRINCIPAL`: `email` (default) or `subject`. This is the field your user store keys
   people by: a federated user's email when the WIF provider maps it, else the IdP subject. Check
   with `userLicenses.list` once.
-- `GE_LICENCE_REQUESTS_CHANNEL=C…`: a private channel for admins. Invite the bot. Without it,
+- `GE_LICENCE_REQUESTS_CHANNEL=C…`: a **private, internal** channel for admins (requests to a public or
+  Slack Connect channel are refused, because the card shows emails). Invite the bot. Without it,
   people are told to ask their admin.
 - `GE_LICENCE_APPROVERS=U…,U…`: who can decide, besides workspace admins/owners.
-- `GE_LICENCE_CONFIG=projects/<p>/locations/<GE_LOCATION>/licenseConfigs/<id>`: approving then
+- `GE_LICENCE_CONFIG=projects/<GE_PROJECT>/locations/<GE_LOCATION>/licenseConfigs/<id>`
+  requires its own `GE_LICENCE_ADMIN_SERVICE_ACCOUNT` (not `GE_SERVICE_ACCOUNT`). Approving then
   assigns that licence. Leave it unset to assign in the console yourself.
 - Turn the whole feature off with `GE_FEATURES=-licences`. If the lookup isn't set up, it does
   nothing: every request still goes to Gemini Enterprise, which enforces licences itself.
