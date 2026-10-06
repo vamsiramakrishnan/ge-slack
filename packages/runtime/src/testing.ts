@@ -158,6 +158,10 @@ export class FakeSurface implements SurfacePort {
   async userEmail() {
     return 'alex@acme.com';
   }
+  dms: Array<{ userId: string; text: string; link?: { channel: string; ts: string } }> = [];
+  async notifyUser(userId: string, msg: { text: string; link?: { channel: string; ts: string } }) {
+    this.dms.push({ userId, ...msg });
+  }
   admins = new Set<string>();
   files: Array<{ userId: string; name: string; content: string }> = [];
   async isWorkspaceAdmin(userId: string) {

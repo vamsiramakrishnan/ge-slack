@@ -287,6 +287,9 @@ export async function publishHome(c: Container, userId: string): Promise<void> {
     c.stores.recent(team, userId, 10),
     isWorkspaceAdmin(c, userId),
   ]);
+  const jobs = c.cfg.features.has('jobs')
+    ? (await c.jobs.forUser(team, userId, Date.now())).filter((j) => j.status === 'running')
+    : [];
   const insights =
     isAdmin && c.cfg.features.has('analytics')
       ? insightsLines(await c.telemetry.summary(team, 7))
@@ -314,6 +317,7 @@ export async function publishHome(c: Container, userId: string): Promise<void> {
       ledger,
       isAdmin,
       ...(insights ? { insights } : {}),
+      jobs: jobs.map((j) => ({ id: j.id, title: j.title, startedAt: j.startedAt })),
     }),
   });
 }

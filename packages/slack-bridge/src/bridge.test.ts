@@ -977,3 +977,21 @@ describe('admin surface (stage 3)', () => {
     expect(posted).toHaveLength(1);
   });
 });
+
+describe('job notifications (stage 3)', () => {
+  it('DMs the invoker with a link to the thread, without unfurling', async () => {
+    const api = new FakeSlack({
+      'conversations.open': () => ({ ok: true, channel: { id: 'D1' } }),
+    });
+    await new SlackSurface(api, { teamId: 'T1', domain: 'acme' }).notifyUser('U1', {
+      text: '✦ *Deep Research* finished.',
+      link: { channel: 'C1', ts: '1700000000.000100' },
+    });
+    const post = api.calls.find((c) => c.method === 'chat.postMessage')!;
+    expect(post.args).toMatchObject({
+      channel: 'D1',
+      unfurl_links: false,
+      text: '✦ *Deep Research* finished. <https://acme.slack.com/archives/C1/p1700000000000100|Open the thread>',
+    });
+  });
+});

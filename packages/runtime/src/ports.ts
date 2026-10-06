@@ -94,6 +94,11 @@ export interface SurfacePort {
   userEmail(userId: string): Promise<string | undefined>;
   /** Workspace admin/owner of this team (insights, ledger export). Fails closed. */
   isWorkspaceAdmin(userId: string): Promise<boolean>;
+  /** DM one person a short notice, optionally linking a message (job finished). */
+  notifyUser(
+    userId: string,
+    msg: { text: string; link?: { channel: string; ts: string } },
+  ): Promise<void>;
   /** DM one person a file (ledger export). */
   sendFile(
     userId: string,

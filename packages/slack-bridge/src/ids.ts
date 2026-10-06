@@ -30,6 +30,8 @@ export const ACTIONS = {
   memoryForget: 'ge_memory_forget',
   /** Admin: DM the 30-day ledger CSV. */
   exportLedger: 'ge_export_ledger',
+  /** Cancel one of your background jobs; value = job id. */
+  jobCancel: 'ge_job_cancel',
 } as const;
 
 export const CALLBACKS = {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   parseCommand,
   type AgentEntry,
@@ -22,6 +22,7 @@ import type {
 } from './ports.js';
 import { forgetNote } from './memory.js';
 import { KvTelemetry } from './insights.js';
+import { JobStore, cancelJob, runAsJob, withLiveness } from './jobs.js';
 import { neutralize, renderContext } from './prompt.js';
 
 const PL = 'https://acme.slack.com/archives/C0ENG/p1700000000000100';
@@ -189,6 +190,7 @@ function setup(script: Array<string | import('@ge-slack/contracts').AssistEvent[
     version: 'test',
     telemetry: new KvTelemetry(kv, () => NOW),
     insights: new KvTelemetry(kv, () => NOW),
+    jobs: new JobStore(kv),
   });
   return { orch, surface, gemini, identity, config, kv };
 }
@@ -1088,5 +1090,82 @@ describe('admin insights (stage 3)', () => {
       'at,change_id,kind,outcome,principal,invoker,approved_by,approval,channel,permalink,undone_at,undone_by,automation_id',
     );
     expect(file!.content).toContain(`"'=HYPERLINK(""http://evil"")"`);
+  });
+});
+
+describe('background jobs (stage 3)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('runs A2A agent turns as jobs, lists them, and only the invoker can cancel', async () => {
+    const { orch } = setup(['pong']);
+    await run(orch, 'ask @triage "status?"');
+    const jobs = await orch.deps.jobs!.forUser('T1', 'U0ALEX', Date.now());
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toMatchObject({ status: 'done', title: 'Incident triage in <#C0ENG>' });
+    const listed = (await run(orch, 'jobs', origin({ entry: 'slash' }))).last<{ text: string }>(
+      'notice',
+    )!.text;
+    expect(listed).toContain('✅ Incident triage in <#C0ENG> · done');
+    const s = new RecordingSink();
+    await cancelJob(orch, 'T1', jobs[0]!.id, 'U0MAYA', s);
+    expect(s.last<{ kind: string }>('notice')!.kind).toBe('denied');
+  });
+
+  it('cancels across instances, never overwrites the final status, DMs after long runs', async () => {
+    vi.useFakeTimers({ now: NOW });
+    const { orch, surface } = setup([]);
+    const store = orch.deps.jobs!;
+    let seen: AbortSignal | undefined;
+    const done = runAsJob(
+      orch,
+      origin(),
+      'Deep Research in <#C0ENG>',
+      undefined,
+      async (signal) => {
+        seen = signal;
+        await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve()));
+        return true;
+      },
+    );
+    await vi.advanceTimersByTimeAsync(1);
+    const [job] = await store.forUser('T1', 'U0ALEX', Date.now());
+    expect(job!.status).toBe('running');
+    // Another instance marks the job cancelled in the store; the runner's heartbeat picks it up.
+    await store.save({ ...job!, cancelRequested: true });
+    await vi.advanceTimersByTimeAsync(6_000);
+    await done;
+    expect(seen!.aborted).toBe(true);
+    await vi.advanceTimersByTimeAsync(10_000);
+    const [after] = await store.forUser('T1', 'U0ALEX', Date.now());
+    expect(after!.status).toBe('cancelled');
+    expect(surface.dms).toHaveLength(0);
+
+    const long = runAsJob(orch, origin(), 'Deep Research in <#C0ENG>', undefined, async () => {
+      await new Promise((r) => setTimeout(r, 90_000));
+      return true;
+    });
+    await vi.advanceTimersByTimeAsync(91_000);
+    await long;
+    expect(surface.dms[0]).toMatchObject({
+      userId: 'U0ALEX',
+      text: '✦ *Deep Research in <#C0ENG>* finished.',
+      link: { channel: 'C0ENG', ts: '1700000000.000100' },
+    });
+  });
+
+  it('reports a run whose heartbeat stopped as interrupted', () => {
+    const j = {
+      id: 'j',
+      teamId: 'T1',
+      invokerId: 'U1',
+      title: 't',
+      status: 'running' as const,
+      startedAt: '2026-10-05T09:00:00Z',
+      heartbeatAt: '2026-10-05T09:00:00Z',
+    };
+    expect(withLiveness(j, Date.parse('2026-10-05T09:00:30Z')).status).toBe('running');
+    expect(withLiveness(j, Date.parse('2026-10-05T09:05:00Z')).status).toBe('interrupted');
   });
 });

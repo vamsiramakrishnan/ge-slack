@@ -143,6 +143,22 @@ export class SlackSurface implements SurfacePort {
   }
 
   /** Guests (single/multi-channel) can't search the workspace. Fails closed. */
+  /** A short DM from the app (a job finished), with an optional link to the thread. */
+  async notifyUser(
+    userId: string,
+    msg: { text: string; link?: { channel: string; ts: string } },
+  ): Promise<void> {
+    const im = await must(this.writeApi, 'conversations.open', { users: userId });
+    const channel = (im.channel as { id?: string } | undefined)?.id;
+    if (!channel) return;
+    const href = msg.link ? this.permalink(msg.link.channel, msg.link.ts) : undefined;
+    await must(this.writeApi, 'chat.postMessage', {
+      channel,
+      text: href ? `${msg.text} <${href}|Open the thread>` : msg.text,
+      unfurl_links: false,
+    });
+  }
+
   /** Workspace admins/owners (admin insights, ledger export). Fails closed. */
   async isWorkspaceAdmin(userId: string): Promise<boolean> {
     try {

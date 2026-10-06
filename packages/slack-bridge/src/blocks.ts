@@ -666,6 +666,8 @@ export interface HomeData {
   isAdmin: boolean;
   /** Admin insights lines (mrkdwn, content-free), when analytics is on. */
   insights?: string[];
+  /** Your running background jobs (EXPERIENCE §10). */
+  jobs?: Array<{ id: string; title: string; startedAt: string }>;
 }
 
 export function homeView(d: HomeData): Record<string, unknown> {
@@ -742,6 +744,19 @@ export function homeView(d: HomeData): Record<string, unknown> {
 
   blocks.push(
     { type: 'divider' },
+    ...(d.jobs?.length
+      ? [
+          { type: 'section', text: mrkdwn(`*Running for you (${d.jobs.length})*`) },
+          ...d.jobs.slice(0, 10).map((j) => ({
+            type: 'section',
+            text: mrkdwn(
+              `⏳ ${j.title}\n_started ${j.startedAt.slice(0, 16).replace('T', ' ')} UTC_`,
+            ),
+            accessory: button('Cancel', ACTIONS.jobCancel, j.id, 'danger'),
+          })),
+          { type: 'divider' },
+        ]
+      : []),
     { type: 'section', text: mrkdwn(`*Automations (${d.automations.length})*`) },
   );
   if (!d.automations.length) {

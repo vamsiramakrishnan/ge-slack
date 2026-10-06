@@ -70,6 +70,7 @@ import type {
 } from './ports.js';
 import { notesFor } from './memory.js';
 import { observingSink } from './insights.js';
+import { runAsJob, type JobStore } from './jobs.js';
 import { handleControl } from './controls.js';
 
 export interface OrchestratorDeps {
@@ -94,6 +95,7 @@ export interface OrchestratorDeps {
   version?: string;
   telemetry?: TelemetryPort;
   insights?: InsightsPort;
+  jobs?: JobStore;
 }
 
 type Turn = {
@@ -203,7 +205,16 @@ export class Orchestrator {
       warnings.push(...turn.grounds.warnings);
       // A named agent answers the request itself; Slack writes still need plan → approve.
       if (turn.agent) {
-        await this.chat(inv, origin, sink, turn, warnings);
+        const agent = turn.agent;
+        const long = agent.kind !== 'assistant';
+        if (!long) {
+          await this.chat(inv, origin, sink, turn, warnings);
+          return;
+        }
+        await runAsJob(this, origin, jobTitle(agent.title, origin), turn.signal, (signal) => {
+          turn.signal = signal;
+          return this.chat(inv, origin, sink, turn, warnings);
+        });
         return;
       }
       const actionable = inv.inferredVerb && looksActionable(inv.instruction);
@@ -583,7 +594,7 @@ export class Orchestrator {
     turn: Turn,
     warnings: string[],
     resume?: { handle: AgentHandle; text: string },
-  ): Promise<void> {
+  ): Promise<boolean> {
     const agent = turn.agent;
     const who = agent
       ? `${agent.title} ${asWho(turn.principal)}`
@@ -639,7 +650,7 @@ export class Orchestrator {
       else if (e.type === 'policy') {
         await sink.task({ id: 'ask', title: 'Blocked by policy', status: 'error' });
         await sink.notice('policy', e.reason);
-        return;
+        return false;
       } else if (e.type === 'error') {
         await sink.task({
           id: 'ask',
@@ -647,17 +658,17 @@ export class Orchestrator {
           status: 'error',
         });
         await sink.notice('error', friendlyProviderError(e.code, e.message));
-        return;
+        return false;
       } else if (e.type === 'done') complete = true;
     }
     if (!complete) {
       if (turn.signal?.aborted) {
         await sink.task({ id: 'ask', title: 'Stopped', status: 'error' });
         await sink.notice('info', 'Stopped. Nothing was posted.');
-        return;
+        return false;
       }
       await sink.notice('error', 'The answer was cut off before it finished. Try again.');
-      return;
+      return false;
     }
     const tail = sanitizer.finish();
     if (tail && !unattended) await sink.token(tail);
@@ -693,7 +704,7 @@ export class Orchestrator {
         sink,
         turn,
       );
-      return;
+      return true;
     }
     const turnId = this.newId();
     const stored: StoredAnswer = {
@@ -743,6 +754,7 @@ export class Orchestrator {
       ...(turn.memory.length && !resume ? { memoryNotes: turn.memory.length } : {}),
     });
     if (awaiting && agent) await this.pauseAgent(awaiting, agent, inv, origin, sink, turn);
+    return true;
   }
 
   private connectorAuthWarning(names: string[], principal: Principal): string {
@@ -842,7 +854,19 @@ export class Orchestrator {
             ? text!
             : // Never replay the original request into the task: it could repeat side effects.
               "I've completed the authorization. Please continue the task.";
-      await this.chat(c.invocation, c.origin, sink, turn, [], { handle: c.handle, text: next });
+      await runAsJob(
+        this,
+        c.origin,
+        jobTitle(turn.agent.title, c.origin),
+        turn.signal,
+        (signal) => {
+          turn.signal = signal;
+          return this.chat(c.invocation, c.origin, sink, turn, [], {
+            handle: c.handle,
+            text: next,
+          });
+        },
+      );
     } catch (err) {
       if (err instanceof IdentityRevokedError) {
         await sink.notice('denied', err.message);
@@ -1811,4 +1835,9 @@ function displayName(raw: string): string {
     .trim()
     .slice(0, 60);
   return one || 'a connector';
+}
+
+/** A fixed job label: the agent's admin-set title and where it runs — never captured content. */
+function jobTitle(agentTitle: string, origin: Origin): string {
+  return `${agentTitle}${origin.channelId ? ` in <#${origin.channelId}>` : ''}`;
 }

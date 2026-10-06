@@ -18,7 +18,13 @@ import {
   type KeyValueStore,
   type ServiceIdentity,
 } from '@ge-slack/identity';
-import { KvTelemetry, KvWorkspaceConfig, Orchestrator, RuntimeStores } from '@ge-slack/runtime';
+import {
+  JobStore,
+  KvTelemetry,
+  KvWorkspaceConfig,
+  Orchestrator,
+  RuntimeStores,
+} from '@ge-slack/runtime';
 import {
   SlackSurface,
   SlackTurnSink,
@@ -45,6 +51,7 @@ export interface Container {
   orch: Orchestrator;
   postResponse: ResponsePoster;
   telemetry: KvTelemetry;
+  jobs: JobStore;
   /** Verifies Cloud Scheduler's OIDC token on /cron/tick. */
   cronVerifier: GoogleIdTokenVerifier;
   /** Pick the right rendering for an origin (EXPERIENCE §3 visibility rules). */
@@ -167,6 +174,7 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
     fetchImpl,
   });
   const telemetry = new KvTelemetry(kv);
+  const jobs = new JobStore(kv);
   const workspace = new KvWorkspaceConfig(kv, cfg.sources, cfg.agents);
   const stores = new RuntimeStores(kv);
   const engine = new AutomationEngine(kv);
@@ -201,6 +209,7 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
     features: cfg.features,
     telemetry,
     insights: telemetry,
+    jobs,
     version: cfg.GE_VERSION ?? cfg.K_REVISION ?? 'dev',
   });
   const postResponse = deps.postResponse ?? defaultResponsePoster;
@@ -290,6 +299,7 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
     postResponse,
     cronVerifier: new GoogleIdTokenVerifier(fetchImpl),
     telemetry,
+    jobs,
     sinkFor,
     unattendedSink,
   };

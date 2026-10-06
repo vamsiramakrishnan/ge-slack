@@ -10,6 +10,7 @@ import {
 import { runDiagnostics } from './diag.js';
 import { forgetNote, rememberNote, showMemory } from './memory.js';
 import { showStats } from './insights.js';
+import { showJobs } from './jobs.js';
 import type { Orchestrator } from './orchestrator.js';
 import type { TurnSink } from './ports.js';
 
@@ -48,6 +49,10 @@ export async function handleControl(
 
     case 'forget':
       await forgetNote(orch, origin, { n: Number(args[0]) }, sink);
+      return;
+
+    case 'jobs':
+      await showJobs(orch, origin, sink);
       return;
 
     case 'stats':

@@ -56,3 +56,13 @@ asks).
 | App Home as an admin | 📊 Insights block under Admin with **Export ledger (CSV)** |
 | **Export ledger** / `/gemini stats export` | the CSV arrives in your DM with Gemini, with ids, outcomes and links only; no message text |
 | `GE_FEATURES=-analytics` | no Insights block; `/gemini stats` says it's switched off |
+
+## 4. Background jobs
+
+| Step | Expect |
+|---|---|
+| `@Gemini ask @research "…"` → **Start research** | the thread shows progress; App Home → *Running for you* lists it with **Cancel** |
+| Let it run past a minute | when done, a DM from Gemini: "✦ *Deep Research in #channel* finished. Open the thread" |
+| **Cancel** in App Home (or Slack's stop button in the agent DM) | the run stops; `/gemini jobs` shows ⏹️ cancelled |
+| Redeploy while a run is going | `/gemini jobs` shows ⚠️ interrupted within a minute; never "running" forever |
+| `@Gemini ask @<a2a agent> …` | listed as a job too; ✅ done when the task completes |
