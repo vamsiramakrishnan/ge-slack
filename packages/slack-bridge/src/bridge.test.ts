@@ -1078,6 +1078,7 @@ describe('ADR-0003 blocks', () => {
       answer: 'A',
       sources: ['https://acme.slack.com/archives/C1/p1'],
       channel: 'C1',
+      readChannels: ['C1'],
       dataStoreTitle: 'FAQ',
     };
     expect(ids(faqCardBlocks({ ...base, status: 'open' }))).toEqual([

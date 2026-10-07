@@ -116,6 +116,7 @@ export class SlackSurface implements SurfacePort {
       ...(typeof c.name === 'string' ? { name: c.name } : {}),
       isPrivate: c.is_private === true,
       isIm: c.is_im === true || c.is_mpim === true,
+      isMpim: c.is_mpim === true,
       // Fail toward the stricter policy: any shared signal counts as externally shared.
       isExtShared:
         c.is_ext_shared === true || c.is_pending_ext_shared === true || c.is_shared === true,

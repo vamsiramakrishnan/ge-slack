@@ -74,6 +74,11 @@ export interface StoredAnswer {
   question?: string;
   /** Citation URIs of the answer. */
   sourceUris?: string[];
+  /** Conversations the turn read (FAQ eligibility checks every one, ADR-0003 §5). */
+  readChannels?: string[];
+  /** The turn was answered by an `@agent` or was a workspace search. */
+  agent?: boolean;
+  search?: boolean;
 }
 
 /**

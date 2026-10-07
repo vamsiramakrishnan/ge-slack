@@ -79,7 +79,7 @@ import { notesFor } from './memory.js';
 import { observingSink } from './insights.js';
 import { runAsJob, type JobStore } from './jobs.js';
 import { handleControl } from './controls.js';
-import { delegationOn, delegationVerdict, newGrant, trustFor } from './delegation.js';
+import { delegationOn, delegationVerdict, grantSources, newGrant, trustFor } from './delegation.js';
 import { faqEligible, type FaqService } from './faq.js';
 import {
   licenceGate,
@@ -349,6 +349,7 @@ export class Orchestrator {
     // the account-wide switch no longer authorizes anything.
     let delegated: boolean | undefined;
     let grantExpiresAt: string | undefined;
+    let grantDataStores: string[] | undefined;
     if (isUnattended(origin) && delegationOn(this)) {
       delegated = false;
       if (origin.automationId && inv.flags.as === 'me' && this.deps.automations) {
@@ -367,6 +368,7 @@ export class Orchestrator {
         }
         delegated = true;
         grantExpiresAt = a?.grant?.expiresAt;
+        grantDataStores = a?.grant?.dataStores ?? [];
       }
     }
     const resolved = await identity.resolve({
@@ -489,6 +491,14 @@ export class Orchestrator {
             principal,
             policy,
           );
+    // A delegated run grounds only on sources its owner consented to (ADR-0003 §4).
+    if (grantDataStores && grounds.dataStores.some((d) => !grantDataStores!.includes(d))) {
+      await sink.notice(
+        'denied',
+        'This automation would use sources it wasn’t granted. Renew it in App Home to review them.',
+      );
+      return undefined;
+    }
     const badge: IdentityBadge = {
       kind: principal.kind,
       label: principalLabel(principal),
@@ -788,6 +798,9 @@ export class Orchestrator {
       shareable: turn.scope.kind !== 'search',
       ...(inv.instruction.trim() ? { question: inv.instruction.trim().slice(0, 500) } : {}),
       sourceUris: sources.flatMap((s) => (s.uri ? [s.uri] : [])).slice(0, 20),
+      readChannels: [...turn.readChannels],
+      ...(agent ? { agent: true } : {}),
+      ...(turn.scope.kind === 'search' ? { search: true } : {}),
     };
     await this.deps.stores.saveAnswer(stored);
     await sink.answer({
@@ -806,9 +819,7 @@ export class Orchestrator {
           origin.entry === 'modal' ||
           origin.entry === 'global-shortcut'),
       followUps: Boolean(origin.channelId),
-      ...(turn.scope.kind !== 'search' && !agent && faqEligible(this, stored)
-        ? { faqable: true }
-        : {}),
+      ...(faqEligible(this, stored) ? { faqable: true } : {}),
       provenance: {
         changeId: `ans_${turnId}`,
         agentId: provenance?.agentId ?? 'gemini-enterprise',
@@ -1003,15 +1014,24 @@ export class Orchestrator {
       this.deps.surface.conversationInfo(target),
     ]);
     if (info.isExtShared) return false;
-    // The owner's own DM with the app (e.g. the daily brief): self-scoped, nobody else reads it.
+    // The daily brief's own destination: the owner's 1:1 DM with the app, opened server-side
+    // when they set it up. Never a group DM (`G…`/MPIM), never any other automation (H2).
     if (
       p.kind === 'post' &&
-      info.isIm &&
+      /^D[A-Z0-9]+$/.test(p.channel) &&
+      !info.isMpim &&
       origin.automationId &&
-      p.channel === inv.flags.to &&
-      (await this.deps.surface.isMember(target, origin.userId))
+      this.deps.automations
     ) {
-      return true;
+      const a = await this.deps.automations.get(origin.teamId, origin.automationId);
+      if (
+        a?.template === 'brief' &&
+        a.ownerId === origin.userId &&
+        a.destination === p.channel &&
+        p.channel === inv.flags.to
+      ) {
+        return true;
+      }
     }
     return canAutoApply(p, {
       ...(origin.channelId ? { originChannel: origin.channelId } : {}),
@@ -2064,6 +2084,23 @@ export class Orchestrator {
             grant: {
               channels: [channel],
               destinations: [inv.flags.to ?? channel],
+              sources: await (async () => {
+                const linked = await this.deps.identity.getLinked(origin.teamId, origin.userId);
+                return linked
+                  ? (
+                      await grantSources(
+                        this,
+                        {
+                          teamId: origin.teamId,
+                          ownerId: origin.userId,
+                          channelId: channel,
+                          invocation: inv,
+                        },
+                        linked,
+                      )
+                    ).titles
+                  : [];
+              })(),
               expiresAt: new Date(
                 this.now().getTime() + GRANT_LIMITS.termDays * 86_400_000,
               ).toISOString(),

@@ -69,6 +69,8 @@ export interface ConversationInfo {
   name?: string;
   isPrivate: boolean;
   isIm: boolean;
+  /** A group DM (multi-person IM): never treated as anyone's own DM. */
+  isMpim?: boolean;
   isExtShared: boolean;
 }
 
@@ -299,7 +301,7 @@ export interface AutomationPlanView {
   invokerId: string;
   channelId: string;
   /** What confirming grants when it runs as you (ADR-0003 §4). */
-  grant?: { channels: string[]; destinations: string[]; expiresAt: string };
+  grant?: { channels: string[]; destinations: string[]; sources: string[]; expiresAt: string };
 }
 
 export interface ConnectView {
@@ -342,6 +344,7 @@ export interface FaqCardView {
   answer: string;
   sources: string[];
   channel: string;
+  readChannels: string[];
   dataStoreTitle: string;
   status: 'open' | 'published' | 'rejected' | 'removed' | 'failed';
   decidedBy?: string;

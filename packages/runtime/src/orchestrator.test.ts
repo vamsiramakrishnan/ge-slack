@@ -93,13 +93,15 @@ class FakeIdentity implements IdentityPort {
       identity: 'user:alex@acme.com',
     };
   }
+  allowUnattended = false;
   async getLinked(_t?: string, u?: string) {
     if (u && !this.linked.has(u)) return undefined;
     return {
+      allowUnattended: this.allowUnattended,
       email: u && u !== 'U0ALEX' ? `${u.toLowerCase()}@acme.com` : 'alex@acme.com',
       subject: `sub-${u ?? 'U0ALEX'}`,
       provider: 'oidc',
-      allowUnattended: false,
+
       linkedAt: '2026-10-01T00:00:00Z',
     };
   }
@@ -1890,6 +1892,7 @@ const GRANTED = (over: Partial<DelegationGrant> = {}): DelegationGrant => ({
   subject: 'sub-U0ALEX',
   channels: ['C0ENG'],
   destinations: ['C0DIG'],
+  dataStores: [],
   grantedAt: NOW.toISOString(),
   expiresAt: new Date(NOW.getTime() + 10 * 86_400_000).toISOString(),
   ...over,
@@ -2001,14 +2004,28 @@ describe('delegation grants (ADR-0003 §4)', () => {
     expect(Date.parse(a!.grant!.expiresAt) - NOW.getTime()).toBe(30 * 86_400_000);
   });
 
-  it('sweep: migrates old run-as-me automations, warns once before expiry, pauses when expired', async () => {
-    const { orch, automations, surface } = adr3([]);
+  it('sweep: migrates only owners who had consented, once; warns before expiry; pauses when expired', async () => {
+    const { orch, automations, surface, identity } = adr3([]);
+    // No prior consent (switch off): paused until the owner grants it (security review H3).
+    const unconsented = await meAutomation(automations, undefined);
+    await sweepGrants(orch, 'T1');
+    expect(await automations.get('T1', unconsented.id)).toMatchObject({
+      enabled: false,
+      suspendedReason: 'permission to run as you needed',
+    });
+    expect((await automations.get('T1', unconsented.id))!.grant).toBeUndefined();
+    identity.allowUnattended = true;
     const old = await meAutomation(automations, undefined);
     await sweepGrants(orch, 'T1');
     expect((await automations.get('T1', old.id))!.grant?.expiresAt).toBe(
       new Date(NOW.getTime() + 7 * 86_400_000).toISOString(),
     );
     expect(surface.dms.at(-1)!.text).toMatch(/renew it/i);
+    // Once only: a grant the owner lets lapse or removes is never re-created by the sweep.
+    const { grant: _g, ...bare } = (await automations.get('T1', old.id))!;
+    await automations.update(bare as Automation);
+    await sweepGrants(orch, 'T1');
+    expect((await automations.get('T1', old.id))!.grant).toBeUndefined();
     const soon = await meAutomation(
       automations,
       GRANTED({ expiresAt: new Date(NOW.getTime() + 86_400_000).toISOString() }),
@@ -2292,6 +2309,11 @@ describe('thread → FAQ (ADR-0003 §5)', () => {
       expect.objectContaining({ id: card.view.requestId, approver: 'U0STEW' }),
     ]);
     expect(surface.faqCards.at(-1)?.view.status).toBe('published');
+    expect(await orch.deps.stores.getEntry('T1', card.view.requestId)).toMatchObject({
+      kind: 'faq',
+      approvedBy: 'U0STEW',
+      invokerId: 'U0ALEX',
+    });
     expect(surface.dms.at(-1)).toMatchObject({ userId: 'U0ALEX' });
     // Once only.
     await decideFaq(orch, 'T1', card.view.requestId, 'U0STEW', 'publish', new RecordingSink());
@@ -2299,6 +2321,7 @@ describe('thread → FAQ (ADR-0003 §5)', () => {
     await removeFaq(orch, 'T1', card.view.requestId, 'U0STEW', new RecordingSink());
     expect(writer.removed).toEqual([card.view.requestId]);
     expect(surface.faqCards.at(-1)?.view.status).toBe('removed');
+    expect((await orch.deps.stores.getEntry('T1', card.view.requestId))?.undoneBy).toBe('U0STEW');
   });
 
   it('answers that may use someone’s own sources, other channels, or private channels can’t become FAQs', async () => {
@@ -2325,5 +2348,116 @@ describe('thread → FAQ (ADR-0003 §5)', () => {
     await draftFaq(orch, 'T1', priv.last<AnswerView>('answer')!.turnId, 'U0ALEX', p);
     expect(p.last<{ kind: string }>('notice')?.kind).toBe('denied');
     expect(surface.faqCards).toHaveLength(0);
+  });
+});
+
+describe('ADR-0003: security review fixes', () => {
+  it('H1: FAQs only from service answers that read FAQ channels only', async () => {
+    const s = adr3(['ok', 'ok', 'ok'], ['faq']);
+    s.orch.deps.faq = new FaqService(s.kv, {
+      writer: {
+        create: async () => ({ ok: true as const }),
+        remove: async () => ({ ok: true as const }),
+      },
+      tokens: { getAccessToken: async () => 'c' },
+      dataStoreTitle: 'FAQ',
+      stewardsChannel: 'C0STW',
+      stewards: ['U0STEW'],
+      channels: ['C0ENG'],
+    });
+    // Uncited answer as the user (personal sources possible): not eligible.
+    const user = await run(s.orch, 'ask how does it work?', origin({ entry: 'slash' }));
+    expect(user.last<AnswerView>('answer')!.faqable).toBeFalsy();
+    await s.config.setChannelPolicy('T1', 'C0ENG', {
+      identity: 'user-preferred',
+      serviceMayRead: true,
+    });
+    await s.config.setChannelPolicy('T1', 'C0DIG', {
+      identity: 'user-preferred',
+      serviceMayRead: true,
+    });
+    s.surface.members.get('C0DIG')!.add('U0ALEX');
+    // A service answer that read a channel outside the FAQ channels: not eligible.
+    const other = await run(
+      s.orch,
+      'summarize <#C0DIG|digest> --as service',
+      origin({ entry: 'slash' }),
+    );
+    expect(other.last<AnswerView>('answer')?.faqable).toBeFalsy();
+    const ok = await run(s.orch, 'ask how does it work? --as service', origin({ entry: 'slash' }));
+    expect(ok.last<AnswerView>('answer')!.faqable).toBe(true);
+  });
+
+  it('H2: only the brief’s own 1:1 DM auto-applies; a group DM or another automation asks', async () => {
+    const { orch, automations, surface } = adr3(['digest'], ['brief']);
+    surface.members.set('D0GRP', new Set(['U0ALEX', 'U0MAYA']));
+    surface.info.set('D0GRP', {
+      id: 'D0GRP',
+      isPrivate: true,
+      isIm: true,
+      isMpim: true,
+      isExtShared: false,
+    });
+    const a = await meAutomation(automations, GRANTED({ destinations: ['D0GRP'] }));
+    await automations.update({ ...a, destination: 'D0GRP' });
+    const sink = new RecordingSink();
+    await orch.handle(
+      parseCommand('summarize scope:channel --as me --to <#D0GRP>'),
+      delegatedOrigin(a.id),
+      sink,
+    );
+    expect(surface.actuated).toHaveLength(0);
+    expect(sink.last('plan')).toBeDefined();
+  });
+
+  it('M1: service-only channels never go into a brief', async () => {
+    const { orch, config } = adr3([], ['brief']);
+    await config.setChannelPolicy('T1', 'C0ENG', {
+      identity: 'service-only',
+      serviceMayRead: true,
+    });
+    const s = new RecordingSink();
+    await createBrief(
+      orch,
+      { teamId: 'T1', userId: 'U0ALEX' },
+      { dm: 'D0ALEX', channels: ['C0ENG'], hour: 8, minute: 0 },
+      s,
+    );
+    expect(s.last<{ kind: string }>('notice')?.kind).toBe('denied');
+  });
+
+  it('M3: a delegated run can’t ground on sources outside its grant', async () => {
+    const { orch, automations, gemini } = adr3(['x']);
+    const a = await meAutomation(automations, GRANTED({ dataStores: [] }));
+    const sink = new RecordingSink();
+    await orch.handle(
+      parseCommand('summarize scope:channel @runbooks --as me --to <#C0DIG|digest>'),
+      delegatedOrigin(a.id),
+      sink,
+    );
+    expect(sink.last<{ text: string }>('notice')!.text).toMatch(/sources it wasn’t granted/);
+    expect(gemini.turns).toHaveLength(0);
+  });
+
+  it('L4: guests don’t get suggested answers', async () => {
+    const s = adr3(['An answer that is long enough.'], ['suggestions']);
+    await s.config.setChannelPolicy('T1', 'C0ENG', {
+      identity: 'user-preferred',
+      serviceMayRead: true,
+      suggest: true,
+    });
+    s.surface.guests.add('U0MAYA');
+    await queueQuestion(s.orch, {
+      teamId: 'T1',
+      channel: 'C0ENG',
+      ts: '1700000000.000700',
+      userId: 'U0MAYA',
+      text: 'How do I do this thing?',
+      fromBot: false,
+    });
+    for (const r of await s.kv.list<{ dueAt: number }>('suggestq/T1/'))
+      await s.kv.set(r.key, { ...r.value, dueAt: 0 });
+    expect(await processSuggestions(s.orch, 'T1')).toBe(0);
+    expect(s.surface.suggestions).toHaveLength(0);
   });
 });

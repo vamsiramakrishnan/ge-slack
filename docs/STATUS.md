@@ -175,6 +175,34 @@ with regression tests:
 | L9 unthrottled fresh lookups | at most one lookup per person per 30 s; open/cooldown checks before any lookup |
 | L10 proxy path dropped the store | store kept in the proxied path; the proxy must pin project and region (documented) |
 
+## Security review — ADR-0003 §2–§5 (2026-10-07)
+
+Fixed with regression tests:
+
+| Finding | Fix |
+|---|---|
+| H1 FAQ could publish private-channel or personal-source content | only answers from the Gemini service that read FAQ channels only, with no agent and no search; drafting re-checks every conversation read is public and internal; the card shows them |
+| H2 group DMs counted as the owner's own DM (unattended auto-post) | the self-DM rule applies only to a brief's own `D…` destination, never to a group DM (MPIM) |
+| H3 migration granted run-as-me without consent | only owners who had ticked the old switch get the one-off 7-day migration, once per automation; others are paused until they click *Renew* |
+| M1 brief read service-only channels as the person | refused at setup, skipped at run |
+| M2 stewards saw less text than gets published | answers capped at 3,000 characters and shown in full across sections |
+| M3 grants didn't cover sources | the grant records the data stores consented to; a delegated run grounding on anything else is refused |
+| M4 FAQ publishes not in the ledger; Remove expired after 30 days | ledger row on publish (marked undone on Remove); published records and their Remove lock kept for good |
+| L1/L2 mention and token forms | any `<@…`/`<!…` blocks trust auto-apply; `faqClean` strips every Slack token and email address |
+| L3 grant binding | the grant must belong to this automation, owner and team |
+| L4 guests got suggestions | skipped |
+| L9 stewards channel | must still be private and internal when deciding |
+
+Accepted for now:
+- **L5:** the suggestion rate-limit counters aren't atomic, so a burst can go a little over the daily
+  cap.
+- **L6:** the ledger records `trust`, and `auto` + `automationId` + `grantExpiresAt`, rather than
+  the ADR's combined labels.
+- **L7:** when the identity broker unlinks someone by itself (a refresh failure or a different
+  subject), their trust settings aren't cleared. Grants still fail closed on the subject check.
+- **L8:** turning `delegation` off makes the old account-wide switch authoritative again. That widens
+  run-as-me authority, so keep `delegation` on.
+
 ## Next live checks
 
 Start with `bun run probe` (SETUP §6): it covers the Gemini Enterprise half of the list below in

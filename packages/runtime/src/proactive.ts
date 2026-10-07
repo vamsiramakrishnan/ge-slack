@@ -84,6 +84,14 @@ export async function createBrief(
       );
       return;
     }
+    // A channel an admin set to service-only is never read as a person (security review M1).
+    if ((await orch.deps.config.channelPolicy(who.teamId, c)).identity === 'service-only') {
+      await sink.notice(
+        'denied',
+        `<#${c}> only allows the Gemini service, so it can't be in your brief.`,
+      );
+      return;
+    }
     if (!(await orch.deps.surface.isMember(c, who.userId, { fresh: true }))) {
       await sink.notice('denied', `You're not a member of <#${c}>.`);
       return;
@@ -180,6 +188,7 @@ export async function runBrief(orch: Orchestrator, a: Automation, sink: TurnSink
   for (const c of channels) {
     const info = await orch.deps.surface.conversationInfo(c).catch(() => undefined);
     if (!info || info.isExtShared) continue;
+    if ((await orch.deps.config.channelPolicy(a.teamId, c)).identity === 'service-only') continue;
     const ctx = await orch.deps.surface
       .capture({ kind: 'channel', channel: c, sinceMs: DAY_MS }, { from: [], maxMessages: 60 })
       .catch(() => undefined);
@@ -322,6 +331,8 @@ async function suggestFor(orch: Orchestrator, teamId: string, q: QueuedQuestion)
   const info = await surface.conversationInfo(q.channel);
   if (info.isExtShared || info.isIm) return skip('slack-connect');
   if (!(await surface.isMember(q.channel, q.userId))) return skip('not-member');
+  // Guests and external members don't get answers from the workspace's sources (L4).
+  if (await surface.isGuest(q.userId)) return skip('guest');
   if ((await orch.deps.licences?.cached(teamId, q.userId)) === 'blocked') return skip('blocked');
   const ctx = await surface.capture(
     { kind: 'thread', channel: q.channel, ts: q.ts },

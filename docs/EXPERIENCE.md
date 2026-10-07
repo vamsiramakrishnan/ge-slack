@@ -536,8 +536,11 @@ only, until 2026-11-06. Renew or revoke it in App Home.
   anything has changed, the run stops and tells you why.
 - **Expiry:** three days before a grant expires you get one DM. When it expires, the automation
   pauses. **Renew (30 days)** is in the automation's ⋯ menu in App Home.
-- **Existing automations:** ones that ran as you under the old "run as me while I'm away"
-  checkbox get 7 days to be renewed. That checkbox is gone.
+- **Existing automations:**
+  - If you had ticked the old "run as me while I'm away" checkbox, your run-as-me automations get a
+    one-off 7 days to be renewed.
+  - If you hadn't, they're paused until you click *Renew*, which grants the permission.
+  - Either way, the checkbox is gone.
 
 ### Apply without asking (`trust-levels`)
 
@@ -554,8 +557,8 @@ App Home → **☀️ Set up daily brief**: pick up to 5 channels and a weekday 
 
 - It's an automation that runs as you, covered by a grant like the ones above, and lands in your
   DM with Gemini.
-- It reads the last 24 hours of the chosen channels, but only while you're still a member. It
-  never reads Slack Connect channels or DMs.
+- It reads the last 24 hours of the chosen channels, but only while you're still a member.
+- It never reads Slack Connect channels, DMs, or channels an admin set to service-only.
 - One brief per person.
 
 ### Suggested answers (`suggestions` + the channel's *Suggest answers* policy)
@@ -573,17 +576,21 @@ Run `cache rotate` (see the runbook) …
   the service may read.
 - The person who asked is the only one who can post it, and only once. The receipt shows it was
   approved by them.
-- No suggestion if a teammate has already answered, if the sources don't cover the question, or
-  in Slack Connect channels.
+- No suggestion if a teammate has already answered, if the sources don't cover the question, in
+  Slack Connect channels, or for guests.
 - Limits: 20 suggestions per channel and 5 per person each day.
 
 ### Thread → FAQ (`faq`)
 
-**Save as FAQ** appears on an answer in a FAQ channel if both of these hold:
-- it answered a question;
-- it ran as the Gemini service, or every source it cited is a Slack message.
+**Save as FAQ** appears only on an answer that meets all of these:
+- it answered a question asked in a FAQ channel;
+- it came from the Gemini service, so only shared, allow-listed sources were used;
+- it read nothing outside the FAQ channels;
+- it came from no agent and no workspace search.
 
-So nothing from anyone's personal sources can reach the shared data store.
+Nothing from anyone's personal sources or a private channel can reach the shared data store. In a
+help channel that lets people answer as themselves, ask with `--as service` to get an answer you
+can save.
 
 The draft goes to the stewards' channel showing the exact Q/A, with mentions removed:
 

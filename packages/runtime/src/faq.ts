@@ -40,6 +40,8 @@ export interface FaqOptions {
   stewards: readonly string[];
   /** Public channels whose answers may become FAQs. */
   channels: readonly string[];
+  /** The curator account's name, recorded as the principal of each publish in the ledger. */
+  curator?: string;
 }
 
 export class FaqService {
@@ -55,11 +57,20 @@ export class FaqService {
   get(teamId: string, id: string) {
     return this.kv.get<FaqRequest>(`faq/${teamId}/${id}`);
   }
+  /** Published FAQs are kept for good, so they can always be removed (security review M4). */
   save(r: FaqRequest) {
-    return this.kv.set(`faq/${r.teamId}/${r.id}`, r, { ttlMs: FAQ_LIMITS.requestRetainMs });
+    return this.kv.set(
+      `faq/${r.teamId}/${r.id}`,
+      r,
+      r.status === 'published' ? {} : { ttlMs: FAQ_LIMITS.requestRetainMs },
+    );
   }
-  lock(teamId: string, id: string) {
-    return this.kv.set(`faqlock/${teamId}/${id}`, true, { ttlMs: FAQ_LIMITS.requestRetainMs });
+  lock(teamId: string, id: string, keep = false) {
+    return this.kv.set(
+      `faqlock/${teamId}/${id}`,
+      true,
+      keep ? {} : { ttlMs: FAQ_LIMITS.requestRetainMs },
+    );
   }
   take(teamId: string, id: string) {
     return this.kv.take<boolean>(`faqlock/${teamId}/${id}`);
@@ -70,18 +81,21 @@ function enabled(orch: Orchestrator): FaqService | undefined {
   return orch.deps.features?.has('faq') ? orch.deps.faq : undefined;
 }
 
-const SLACK_LINK = /^https:\/\/[a-z0-9-]+\.slack\.com\/archives\/[CG][A-Z0-9]+\/p\d+/;
-
-/** May this stored answer offer *Save as FAQ*? (also re-checked when drafting) */
+/**
+ * May this stored answer offer *Save as FAQ*? Only answers the Gemini service gave (shared,
+ * allow-listed sources only), asked in a FAQ channel, that read nothing outside the FAQ channels,
+ * and came from no agent and no workspace search (security review H1). `draftFaq` re-checks
+ * every conversation it read is still public and internal.
+ */
 export function faqEligible(
   orch: Orchestrator,
-  a: Pick<StoredAnswer, 'origin' | 'principal' | 'question' | 'sourceUris'>,
+  a: Pick<StoredAnswer, 'origin' | 'principal' | 'question' | 'readChannels' | 'agent' | 'search'>,
 ): boolean {
   const svc = enabled(orch);
   if (!svc || !a.origin.channelId || !svc.channels.has(a.origin.channelId)) return false;
-  if (!a.question?.trim()) return false;
-  const uris = a.sourceUris ?? [];
-  return a.principal.startsWith('service:') || uris.every((u) => SLACK_LINK.test(u));
+  if (!a.question?.trim() || a.agent || a.search) return false;
+  if (!a.principal.startsWith('service:')) return false;
+  return (a.readChannels ?? []).every((c) => svc.channels.has(c));
 }
 
 function view(svc: FaqService, r: FaqRequest, error?: string): FaqCardView {
@@ -92,6 +106,7 @@ function view(svc: FaqService, r: FaqRequest, error?: string): FaqCardView {
     answer: r.answer,
     sources: r.sources,
     channel: r.channel,
+    readChannels: r.readChannels ?? [],
     dataStoreTitle: svc.opts.dataStoreTitle,
     status: r.status,
     ...(r.decidedBy ? { decidedBy: r.decidedBy } : {}),
@@ -125,13 +140,15 @@ export async function draftFaq(
     return;
   }
   const channel = a.origin.channelId!;
-  const [info, stewards] = await Promise.all([
-    orch.deps.surface.conversationInfo(channel),
-    orch.deps.surface.conversationInfo(svc.opts.stewardsChannel).catch(() => undefined),
-  ]);
-  if (info.isPrivate || info.isExtShared || info.isIm) {
-    await sink.notice('denied', 'FAQs come from public, internal channels only.');
-    return;
+  const stewards = await orch.deps.surface
+    .conversationInfo(svc.opts.stewardsChannel)
+    .catch(() => undefined);
+  for (const c of new Set([channel, ...(a.readChannels ?? [])])) {
+    const info = await orch.deps.surface.conversationInfo(c).catch(() => undefined);
+    if (!info || info.isPrivate || info.isExtShared || info.isIm) {
+      await sink.notice('denied', 'FAQs come from public, internal channels only.');
+      return;
+    }
   }
   if (!stewards || !stewards.isPrivate || stewards.isExtShared) {
     await sink.notice('error', 'FAQ stewards aren’t set up correctly here. Ask your admin.');
@@ -149,6 +166,7 @@ export async function draftFaq(
     answer: faqClean(a.text, FAQ_LIMITS.answerChars),
     sources: (a.sourceUris ?? []).filter((u) => /^https:\/\//.test(u)).slice(0, FAQ_LIMITS.sources),
     channel,
+    readChannels: [...new Set(a.readChannels ?? [])],
     status: 'open',
     at: orch.now().toISOString(),
   };
@@ -195,6 +213,13 @@ export async function decideFaq(
   }
   if (!(await steward(orch, svc, userId))) {
     await sink.notice('denied', 'Only FAQ stewards can publish or reject.');
+    return;
+  }
+  const where = await orch.deps.surface
+    .conversationInfo(svc.opts.stewardsChannel)
+    .catch(() => undefined);
+  if (!where || !where.isPrivate || where.isExtShared) {
+    await sink.notice('error', 'The stewards’ channel must be private and internal.');
     return;
   }
   const r = await svc.get(teamId, id);
@@ -251,8 +276,23 @@ export async function decideFaq(
       documentId: r.id,
     };
     await svc.save(done);
-    await svc.lock(teamId, `${id}-remove`);
+    await svc.lock(teamId, `${id}-remove`, true);
     reopen = false;
+    // A write others will read, outside Slack: it goes in the ledger like any other (M4).
+    await orch.deps.stores.record({
+      changeId: r.id,
+      teamId,
+      invokerId: r.drafterId,
+      approvedBy: userId,
+      approval: 'human',
+      kind: 'faq',
+      label: `Publish FAQ to ${svc.opts.dataStoreTitle}`,
+      outcome: 'applied',
+      ...(r.card ? { location: { channel: r.card.channel, ts: r.card.ts } } : {}),
+      inverse: { op: 'not-reversible', reason: 'Remove it from the stewards’ card.' },
+      principal: `service:${svc.opts.curator ?? 'faq-curator'}`,
+      at,
+    });
     orch.observe(teamId, { kind: 'faq', outcome: 'published' });
     if (done.card)
       await orch.deps.surface
@@ -288,7 +328,7 @@ export async function removeFaq(
   }
   const w = await svc.opts.writer.remove(svc.opts.tokens, r.documentId ?? r.id);
   if (!w.ok) {
-    await svc.lock(teamId, `${id}-remove`);
+    await svc.lock(teamId, `${id}-remove`, true);
     await sink.notice('error', `Gemini Enterprise didn’t remove it (${w.code}). Try again.`);
     return;
   }
@@ -299,6 +339,10 @@ export async function removeFaq(
     decidedAt: orch.now().toISOString(),
   };
   await svc.save(done);
+  const entry = await orch.deps.stores.getEntry(teamId, r.id);
+  if (entry) {
+    await orch.deps.stores.record({ ...entry, undoneAt: done.decidedAt!, undoneBy: userId });
+  }
   orch.observe(teamId, { kind: 'faq', outcome: 'removed' });
   if (done.card)
     await orch.deps.surface

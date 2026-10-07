@@ -514,17 +514,27 @@ export function suggestionBlocks(s: SuggestionView): Block[] {
   return blocks.slice(0, MAX_BLOCKS);
 }
 
+function chunk(text: string, size: number): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < text.length; i += size) out.push(text.slice(i, i + size));
+  return out;
+}
+
 /** A FAQ draft in the stewards' channel: the exact text, then Publish / Reject, then Remove. */
 export function faqCardBlocks(f: FaqCardView): Block[] {
   const blocks: Block[] = [
     {
       type: 'section',
       text: mrkdwn(
-        `*📚 FAQ for ${esc(f.dataStoreTitle)}* · drafted by <@${f.drafterId}> from <#${f.channel}>`,
+        `*📚 FAQ for ${esc(f.dataStoreTitle)}* · drafted by <@${f.drafterId}> in <#${f.channel}> · answered by the Gemini service from shared sources${f.readChannels.length ? `, reading ${f.readChannels.map((c) => `<#${c}>`).join(', ')}` : ''}`,
       ),
     },
     { type: 'section', text: mrkdwn(`*Q:* ${esc(f.question)}`.slice(0, SECTION_MAX)) },
-    { type: 'section', text: mrkdwn(`*A:* ${esc(f.answer)}`.slice(0, SECTION_MAX)) },
+    // Every character that would be published is shown (split across sections, never cut).
+    ...chunk(`*A:* ${esc(f.answer)}`, SECTION_MAX).map((t) => ({
+      type: 'section',
+      text: mrkdwn(t),
+    })),
   ];
   const links = f.sources.filter((u) => /^https:\/\/[^\s|<>]+$/.test(u)).slice(0, 5);
   if (links.length) {
@@ -851,7 +861,7 @@ export function automationPlanBlocks(a: AutomationPlanView): Block[] {
           {
             type: 'section',
             text: mrkdwn(
-              `*Creating this lets it run as you while you're away* — reading ${a.grant.channels.map((c) => `<#${c}>`).join(', ')} and posting to ${a.grant.destinations.map((c) => `<#${c}>`).join(', ')} only, until ${esc(a.grant.expiresAt.slice(0, 10))}. Renew or revoke it in App Home.`,
+              `*Creating this lets it run as you while you're away* — reading ${a.grant.channels.map((c) => `<#${c}>`).join(', ')} and posting to ${a.grant.destinations.map((c) => `<#${c}>`).join(', ')} only, grounded on ${a.grant.sources.length ? a.grant.sources.map(esc).join(', ') : 'the conversation only'}, until ${esc(a.grant.expiresAt.slice(0, 10))}. Renew or revoke it in App Home.`,
             ),
           },
         ]

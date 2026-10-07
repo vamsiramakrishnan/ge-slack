@@ -16,6 +16,8 @@ export const ActuationKindSchema = z.enum([
   'react',
   'action-items',
   'connector-action',
+  /** A FAQ document published to a Gemini Enterprise data store (ledger only; ADR-0003 §5). */
+  'faq',
 ]);
 export type ActuationKind = z.infer<typeof ActuationKindSchema>;
 
@@ -201,6 +203,7 @@ export const KIND_LABELS: Record<ActuationKind, { emoji: string; label: string; 
   react: { emoji: '😀', label: 'Add reaction', undo: 'Undo' },
   'action-items': { emoji: '✅', label: 'Add action items', undo: 'Undo' },
   'connector-action': { emoji: '🔌', label: 'Connector action', undo: 'Not reversible' },
+  faq: { emoji: '📚', label: 'Publish FAQ', undo: 'Remove on the stewards’ card' },
 };
 
 export interface AutoApplyContext {
@@ -229,7 +232,7 @@ export function isSelfScoped(
       /^D[A-Z0-9]+$/.test(ctx.dm.channel) &&
       p.channel === ctx.dm.channel &&
       (p.kind === 'post' || !ctx.dm.threadTs || p.threadTs === ctx.dm.threadTs) &&
-      !/<@[UW][A-Z0-9]+>|<!(channel|here|everyone)>/.test(p.text)
+      !/<[@!]/.test(p.text)
     );
   }
   return false;

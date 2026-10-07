@@ -7,8 +7,10 @@ import {
   type Automation,
   type DelegationGrant,
   type GrantCheck,
+  type Principal,
   type TrustKind,
 } from '@ge-slack/contracts';
+import { resolveGrounds } from './resolve.js';
 import type { Orchestrator } from './orchestrator.js';
 import type { TurnSink } from './ports.js';
 
@@ -26,7 +28,7 @@ export function delegationOn(orch: Orchestrator): boolean {
 export async function delegationVerdict(
   orch: Orchestrator,
   a: Automation,
-  touch: { reads: string[]; writes: string[] },
+  touch: { reads: string[]; writes: string[]; dataStores?: string[] },
 ): Promise<GrantCheck> {
   const linked = await orch.deps.identity.getLinked(a.teamId, a.ownerId);
   const pure = checkGrant(a.grant, {
@@ -34,6 +36,8 @@ export async function delegationVerdict(
     ...(linked ? { subject: linked.subject } : {}),
     reads: touch.reads,
     writes: touch.writes,
+    automation: { id: a.id, ownerId: a.ownerId, teamId: a.teamId },
+    ...(touch.dataStores ? { dataStores: touch.dataStores } : {}),
   });
   if (!pure.ok) return pure;
   for (const c of new Set([...touch.reads, ...touch.writes])) {
@@ -59,14 +63,45 @@ export async function delegationVerdict(
   return { ok: true };
 }
 
+/**
+ * The data stores a run-as-me automation would ground on, resolved as its owner now. Recorded
+ * in the grant, so a later change to the channel's @unit can't widen what it reads.
+ */
+export async function grantSources(
+  orch: Orchestrator,
+  a: Pick<Automation, 'teamId' | 'ownerId' | 'channelId' | 'invocation' | 'template'>,
+  linked: { email: string; subject: string; provider: string },
+): Promise<{ dataStores: string[]; titles: string[] }> {
+  if (a.template === 'brief') return { dataStores: [], titles: [] };
+  const [catalog, unit, policy] = await Promise.all([
+    orch.deps.config.catalog(a.teamId),
+    orch.deps.config.unit(a.teamId, a.channelId),
+    orch.deps.config.channelPolicy(a.teamId, a.channelId),
+  ]);
+  const principal: Principal = {
+    kind: 'user',
+    teamId: a.teamId,
+    slackUserId: a.ownerId,
+    subject: linked.subject,
+    email: linked.email,
+    provider: linked.provider as Extract<Principal, { kind: 'user' }>['provider'],
+  };
+  const g = resolveGrounds(a.invocation, catalog, unit, principal, policy);
+  return { dataStores: g.dataStores, titles: g.titles };
+}
+
 /** The grant a confirmed run-as-me automation gets (its card showed exactly these scopes). */
 export async function newGrant(
   orch: Orchestrator,
-  a: Pick<Automation, 'id' | 'teamId' | 'ownerId' | 'channelId' | 'destination'>,
+  a: Pick<
+    Automation,
+    'id' | 'teamId' | 'ownerId' | 'channelId' | 'destination' | 'invocation' | 'template'
+  >,
   channels?: string[],
 ): Promise<DelegationGrant | undefined> {
   const linked = await orch.deps.identity.getLinked(a.teamId, a.ownerId);
   if (!linked) return undefined;
+  const { dataStores } = await grantSources(orch, a, linked);
   return {
     automationId: a.id,
     teamId: a.teamId,
@@ -74,6 +109,7 @@ export async function newGrant(
     subject: linked.subject,
     channels: channels ?? [a.channelId],
     destinations: [a.destination ?? a.channelId],
+    dataStores,
     ...grantTerm(orch.now().getTime()),
   };
 }
@@ -108,15 +144,19 @@ export async function renewGrant(
       return;
     }
   }
-  const { renewNoticeSentFor: _sent, ...prior } = a.grant ?? ({} as Partial<DelegationGrant>);
+  // Renewing keeps the sources consented to before (never widens them); a first grant resolves
+  // them now, as the owner who is clicking.
+  const dataStores = a.grant
+    ? (a.grant.dataStores ?? [])
+    : (await grantSources(orch, a, linked)).dataStores;
   const grant: DelegationGrant = {
-    ...prior,
     automationId: a.id,
     teamId,
     ownerId: userId,
     subject: linked.subject,
     channels,
     destinations,
+    dataStores,
     ...grantTerm(orch.now().getTime()),
   };
   const expiredSuspension = a.suspendedReason?.startsWith('permission to run as you');
@@ -140,17 +180,42 @@ export async function sweepGrants(orch: Orchestrator, teamId: string): Promise<v
   const port = orch.deps.automations;
   if (!port || !delegationOn(orch)) return;
   const now = orch.now().getTime();
+  const kv = orch.deps.stores.kv;
   for (const a of await port.list(teamId)) {
     if (a.runAs !== 'me') continue;
     if (!a.grant) {
       if (!a.enabled) continue;
-      const g = await newGrant(orch, a);
-      if (!g) continue;
-      await port.update({ ...a, grant: { ...g, ...grantTerm(now, GRANT_LIMITS.migrationDays) } });
-      orch.observe(teamId, { kind: 'grant', outcome: 'migrated' });
+      // Once per automation, ever: never re-grant something its owner let lapse or revoked.
+      const marker = `grantmigration/${teamId}/${a.id}`;
+      if (await kv.get(marker)) continue;
+      await kv.set(marker, true);
+      const linked = await orch.deps.identity.getLinked(teamId, a.ownerId);
+      // Only owners who had consented under the old switch keep running for the migration window.
+      if (linked?.allowUnattended) {
+        const g = await newGrant(orch, a);
+        if (g) {
+          await port.update({
+            ...a,
+            grant: { ...g, ...grantTerm(now, GRANT_LIMITS.migrationDays) },
+          });
+          orch.observe(teamId, { kind: 'grant', outcome: 'migrated' });
+          await orch.deps.surface
+            .notifyUser(a.ownerId, {
+              text: `✦ Your automation ${a.id} runs as you. That now needs a permission you renew every ${GRANT_LIMITS.termDays} days — renew it in the Gemini app's Home tab within ${GRANT_LIMITS.migrationDays} days, or it pauses.`,
+            })
+            .catch(() => undefined);
+          continue;
+        }
+      }
+      await port.update({
+        ...a,
+        enabled: false,
+        suspendedReason: 'permission to run as you needed',
+      });
+      orch.observe(teamId, { kind: 'grant', outcome: 'needs-consent' });
       await orch.deps.surface
         .notifyUser(a.ownerId, {
-          text: `✦ Your automation ${a.id} runs as you. That now needs a permission you renew every ${GRANT_LIMITS.termDays} days — renew it in the Gemini app's Home tab within ${GRANT_LIMITS.migrationDays} days, or it pauses.`,
+          text: `✦ Automation ${a.id} is paused: running as you now needs your permission. Renew it in the Gemini app's Home tab to grant it.`,
         })
         .catch(() => undefined);
       continue;

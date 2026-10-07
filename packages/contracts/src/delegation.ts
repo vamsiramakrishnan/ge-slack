@@ -23,6 +23,9 @@ export const DelegationGrantSchema = z.object({
   channels: z.array(Conversation).min(1).max(10),
   /** Conversations it may post to. */
   destinations: z.array(Conversation).min(1).max(5),
+  /** Data stores it may ground on, resolved when consent was given (an admin's later change to a
+   * channel's @unit doesn't widen it). */
+  dataStores: z.array(z.string()).max(20).default([]),
   grantedAt: z.string(),
   expiresAt: z.string(),
   /** A renewal DM was sent for this expiry (one per term). */
@@ -53,8 +56,29 @@ export type GrantCheck =
 /** Pure part of the per-run grant check (membership and licence are checked by the runtime). */
 export function checkGrant(
   g: DelegationGrant | undefined,
-  ctx: { now: number; subject?: string; reads: string[]; writes: string[] },
+  ctx: {
+    now: number;
+    subject?: string;
+    reads: string[];
+    writes: string[];
+    /** The automation this run belongs to: the grant must be its own. */
+    automation?: { id: string; ownerId: string; teamId: string };
+    dataStores?: string[];
+  },
 ): GrantCheck {
+  if (
+    g &&
+    ctx.automation &&
+    (g.automationId !== ctx.automation.id ||
+      g.ownerId !== ctx.automation.ownerId ||
+      g.teamId !== ctx.automation.teamId)
+  ) {
+    return {
+      ok: false,
+      reason: 'no-grant',
+      message: 'This automation’s permission doesn’t match it.',
+    };
+  }
   if (!g) {
     return {
       ok: false,
@@ -82,6 +106,14 @@ export function checkGrant(
       ok: false,
       reason: 'channel-not-granted',
       message: `This automation may not read <#${bad}> as its owner.`,
+    };
+  }
+  const badStore = (ctx.dataStores ?? []).find((d) => !(g.dataStores ?? []).includes(d));
+  if (badStore) {
+    return {
+      ok: false,
+      reason: 'channel-not-granted',
+      message: 'This automation would use sources it wasn’t granted. Renew it to review them.',
     };
   }
   const badDest = ctx.writes.find((c) => !g.destinations.includes(c));
@@ -148,7 +180,8 @@ export function looksLikeQuestion(text: string): boolean {
 
 export const FAQ_LIMITS = {
   questionChars: 300,
-  answerChars: 6000,
+  /** Small enough that the stewards' card always shows every character that gets published. */
+  answerChars: 3000,
   sources: 10,
   requestRetainMs: 30 * 86_400_000,
 } as const;
@@ -164,6 +197,8 @@ export interface FaqRequest {
   /** Slack permalinks the answer came from (public channels only). */
   sources: string[];
   channel: string;
+  /** Every conversation the answer read (all public FAQ channels), shown to stewards. */
+  readChannels?: string[];
   status: FaqStatus;
   at: string;
   decidedBy?: string;
@@ -175,13 +210,21 @@ export interface FaqRequest {
 
 /** Remove everything that would name or ping a Slack identity in a document others will read. */
 export function faqClean(text: string, max: number): string {
-  return text
-    .replace(/<!(?:channel|here|everyone)[^>]*>/g, '')
-    .replace(/<@[UW][A-Z0-9]+(?:\|[^>]*)?>/g, 'a teammate')
-    .replace(/<#[CG][A-Z0-9]+(?:\|([^>]*))?>/g, (_m, name: string | undefined) =>
-      name ? `#${name}` : 'a channel',
-    )
-    .replace(/[\p{Cc}\p{Cf}]/gu, (c) => (c === '\n' ? c : ''))
-    .trim()
-    .slice(0, max);
+  return (
+    text
+      .replace(/<@[UW][A-Z0-9]+(?:\|[^>]*)?>/g, 'a teammate')
+      .replace(/<#[CG][A-Z0-9]+(?:\|([^>]*))?>/g, (_m, name: string | undefined) =>
+        name ? `#${name}` : 'a channel',
+      )
+      // Links keep their label (or bare URL); every other Slack token (broadcasts, user groups,
+      // mailto) goes.
+      .replace(/<(https?:\/\/[^|>\s]+)(?:\|([^>]*))?>/g, (_m, url: string, label?: string) =>
+        label ? `${label} (${url})` : url,
+      )
+      .replace(/<[^>]*>/g, '')
+      .replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '[email removed]')
+      .replace(/[\p{Cc}\p{Cf}]/gu, (c) => (c === '\n' ? c : ''))
+      .trim()
+      .slice(0, max)
+  );
 }

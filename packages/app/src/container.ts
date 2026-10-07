@@ -202,6 +202,7 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
           stewardsChannel: cfg.GE_FAQ_STEWARDS_CHANNEL!,
           stewards: list(cfg.GE_FAQ_STEWARDS),
           channels: list(cfg.GE_FAQ_CHANNELS),
+          curator: cfg.GE_FAQ_CURATOR_SERVICE_ACCOUNT,
         })
       : undefined;
   // Licence lookups and assignment run as an admin-plane identity, never as a person (ADR-0003 §1).

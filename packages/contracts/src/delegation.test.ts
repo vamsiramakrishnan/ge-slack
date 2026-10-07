@@ -15,6 +15,7 @@ const g: DelegationGrant = {
   subject: 'sub-1',
   channels: ['C1'],
   destinations: ['C2'],
+  dataStores: [],
   grantedAt: '2026-10-01T00:00:00Z',
   expiresAt: '2026-10-31T00:00:00Z',
 };
@@ -102,5 +103,11 @@ describe('looksLikeQuestion / faqClean', () => {
   });
   it('removes pings and Slack ids from text others will read', () => {
     expect(faqClean('Ask <@U123|dana> in <#C9|ops> <!here>', 200)).toBe('Ask a teammate in #ops');
+    expect(faqClean('Ping <!subteam^S1|@ops> or <mailto:a@b.co|a@b.co>, dana@acme.com', 200)).toBe(
+      'Ping  or , [email removed]',
+    );
+    expect(faqClean('See <https://x.example/doc|the doc>', 200)).toBe(
+      'See the doc (https://x.example/doc)',
+    );
   });
 });
