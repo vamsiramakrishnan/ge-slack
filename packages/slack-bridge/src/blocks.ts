@@ -16,8 +16,10 @@ import type {
   IdentityBadge,
   LandedView,
   LedgerEntry,
+  FaqCardView,
   LicenceRequestView,
   LicenceView,
+  SuggestionView,
   NoticeKind,
   PlanView,
 } from '@ge-slack/runtime';
@@ -120,6 +122,7 @@ export function answerBlocks(a: AnswerView, opts: { includeText: boolean }): Blo
     );
   }
   if (a.followUps) actions.push(button('Draft follow-up', ACTIONS.followUp, a.turnId));
+  if (a.faqable) actions.push(button('Save as FAQ', ACTIONS.faqDraft, a.turnId));
   for (const [i, q] of a.related.slice(0, 2).entries()) {
     actions.push(
       button(q.length > 70 ? `${q.slice(0, 69)}…` : q, `${ACTIONS.related}_${i}`, q.slice(0, 1900)),
@@ -430,12 +433,17 @@ export function provenanceFooter(p: {
   invoker: string;
   principal: string;
   sources: number;
-  approval: 'human' | 'auto';
+  approval: 'human' | 'auto' | 'trust';
   automationId?: string;
   changeId: string;
 }): Block {
   const who = p.principal.startsWith('service:') ? '🏢 as Gemini service' : '🔐 as the requester';
-  const how = p.approval === 'auto' ? `automation ${p.automationId ?? ''}`.trim() : 'approved';
+  const how =
+    p.approval === 'auto'
+      ? `automation ${p.automationId ?? ''}`.trim()
+      : p.approval === 'trust'
+        ? 'auto-applied (your trust setting)'
+        : 'approved';
   return {
     type: 'context',
     elements: [
@@ -478,6 +486,95 @@ export function connectBlocks(c: ConnectView): Block[] {
     type: 'context',
     elements: [mrkdwn('Your request will continue automatically after you connect.')],
   });
+  return blocks;
+}
+
+/** A suggested answer, only for the asker, with Post as answer / Dismiss (ADR-0003 §3). */
+export function suggestionBlocks(s: SuggestionView): Block[] {
+  const blocks: Block[] = [
+    {
+      type: 'context',
+      elements: [
+        mrkdwn(
+          `✦ *Gemini suggests an answer* — only you can see this · 🏢 ${esc(s.serviceLabel)}, shared sources only`,
+        ),
+      ],
+    },
+    ...markdownBlocks(s.text),
+  ];
+  const cites = citationElements(s.sources);
+  if (cites.length) blocks.push({ type: 'context', elements: cites });
+  blocks.push({
+    type: 'actions',
+    elements: [
+      button('Post as answer', ACTIONS.suggestPost, s.suggestionId, 'primary'),
+      button('Dismiss', ACTIONS.suggestDismiss, s.suggestionId),
+    ],
+  });
+  return blocks.slice(0, MAX_BLOCKS);
+}
+
+/** A FAQ draft in the stewards' channel: the exact text, then Publish / Reject, then Remove. */
+export function faqCardBlocks(f: FaqCardView): Block[] {
+  const blocks: Block[] = [
+    {
+      type: 'section',
+      text: mrkdwn(
+        `*📚 FAQ for ${esc(f.dataStoreTitle)}* · drafted by <@${f.drafterId}> from <#${f.channel}>`,
+      ),
+    },
+    { type: 'section', text: mrkdwn(`*Q:* ${esc(f.question)}`.slice(0, SECTION_MAX)) },
+    { type: 'section', text: mrkdwn(`*A:* ${esc(f.answer)}`.slice(0, SECTION_MAX)) },
+  ];
+  const links = f.sources.filter((u) => /^https:\/\/[^\s|<>]+$/.test(u)).slice(0, 5);
+  if (links.length) {
+    blocks.push({
+      type: 'context',
+      elements: [mrkdwn(links.map((u, i) => `<${u}|source ${i + 1}>`).join(' · '))],
+    });
+  }
+  const value = f.requestId;
+  if (f.status === 'open') {
+    blocks.push(
+      {
+        type: 'actions',
+        elements: [
+          button('Publish', ACTIONS.faqPublish, value, 'primary'),
+          button('Reject', ACTIONS.faqReject, value, 'danger'),
+        ],
+      },
+      {
+        type: 'context',
+        elements: [
+          mrkdwn(
+            'Publishing makes this text searchable by everyone who can use this data store. Stewards only.',
+          ),
+        ],
+      },
+    );
+  } else if (f.status === 'published') {
+    blocks.push(
+      {
+        type: 'context',
+        elements: [mrkdwn(`✅ Published${f.decidedBy ? ` by <@${f.decidedBy}>` : ''}.`)],
+      },
+      {
+        type: 'actions',
+        elements: [button('Remove from Gemini Enterprise', ACTIONS.faqRemove, value, 'danger')],
+      },
+    );
+  } else {
+    const what =
+      f.status === 'rejected'
+        ? '✖️ Rejected'
+        : f.status === 'removed'
+          ? '🗑️ Removed from Gemini Enterprise'
+          : `❗ Publishing failed${f.error ? ` (${esc(f.error)})` : ''}`;
+    blocks.push({
+      type: 'context',
+      elements: [mrkdwn(`${what}${f.decidedBy ? ` by <@${f.decidedBy}>` : ''}.`)],
+    });
+  }
   return blocks;
 }
 
@@ -645,6 +742,44 @@ export function awaitingBlocks(a: AwaitingView): Block[] {
   ];
 }
 
+/** *Set up daily brief* (ADR-0003 §3): up to 5 channels and a weekday time. */
+export function briefModal(p: { maxChannels: number; timeZone: string }): Record<string, unknown> {
+  return {
+    type: 'modal',
+    callback_id: CALLBACKS.brief,
+    title: plain('Daily brief'),
+    submit: plain('Set up brief'),
+    close: plain('Cancel'),
+    blocks: [
+      {
+        type: 'input',
+        block_id: 'channels',
+        label: plain(`Channels to cover (up to ${p.maxChannels})`),
+        element: {
+          type: 'multi_conversations_select',
+          action_id: 'v',
+          max_selected_items: p.maxChannels,
+          filter: { include: ['public', 'private'], exclude_external_shared_channels: true },
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'time',
+        label: plain(`Weekday time (${p.timeZone})`),
+        element: { type: 'timepicker', action_id: 'v', initial_time: '08:30' },
+      },
+      {
+        type: 'context',
+        elements: [
+          mrkdwn(
+            'The brief runs *as you* and lands in your DM with Gemini. It reads only these channels, only while you’re a member, for 30 days at a time — renew it in App Home.',
+          ),
+        ],
+      },
+    ],
+  };
+}
+
 export function agentReplyModal(p: {
   continuationId: string;
   agentTitle: string;
@@ -696,7 +831,9 @@ export function automationPlanBlocks(a: AutomationPlanView): Block[] {
       fields: [
         mrkdwn(`*Trigger*\n${esc(describeTrigger(a.trigger))}`),
         mrkdwn(`*Action*\n\`${esc(a.grammar).slice(0, 300)}\``),
-        mrkdwn(`*Runs as*\n${a.runAs === 'me' ? '🔐 you (offline access)' : '🏢 Gemini service'}`),
+        mrkdwn(
+          `*Runs as*\n${a.runAs === 'me' ? (a.grant ? `🔐 you, until ${esc(a.grant.expiresAt.slice(0, 10))}` : '🔐 you (offline access)') : '🏢 Gemini service'}`,
+        ),
         mrkdwn(
           `*Posts to*\n${a.destination ? `<#${a.destination}>` : `<#${a.channelId}> (triggering thread)`}`,
         ),
@@ -709,6 +846,16 @@ export function automationPlanBlocks(a: AutomationPlanView): Block[] {
           : []),
       ],
     },
+    ...(a.grant
+      ? [
+          {
+            type: 'section',
+            text: mrkdwn(
+              `*Creating this lets it run as you while you're away* — reading ${a.grant.channels.map((c) => `<#${c}>`).join(', ')} and posting to ${a.grant.destinations.map((c) => `<#${c}>`).join(', ')} only, until ${esc(a.grant.expiresAt.slice(0, 10))}. Renew or revoke it in App Home.`,
+            ),
+          },
+        ]
+      : []),
     {
       type: 'context',
       elements: [
@@ -763,6 +910,12 @@ export interface HomeData {
   jobs?: Array<{ id: string; title: string; startedAt: string }>;
   /** Your Gemini Enterprise licence (EXPERIENCE §11): one mrkdwn line, and whether to offer Request. */
   licence?: { line: string; requestable: boolean };
+  /** Per-automation grants replace the account-wide switch (ADR-0003 §4). */
+  delegation?: boolean;
+  /** Trust levels (ADR-0003 §2): which self-scoped kinds this person auto-applies. */
+  trust?: { options: Array<{ value: string; label: string }>; selected: string[] };
+  /** Offer *Set up daily brief* (ADR-0003 §3). */
+  brief?: boolean;
 }
 
 export function homeView(d: HomeData): Record<string, unknown> {
@@ -773,28 +926,55 @@ export function homeView(d: HomeData): Record<string, unknown> {
       text: mrkdwn(`🔐 Connected as *${esc(d.linked.email)}* via ${esc(d.providerName)}`),
       accessory: button('Disconnect', ACTIONS.disconnect, 'disconnect', 'danger'),
     });
-    blocks.push({
-      type: 'actions',
-      elements: [
+    if (!d.delegation) {
+      blocks.push({
+        type: 'actions',
+        elements: [
+          {
+            type: 'checkboxes',
+            action_id: ACTIONS.allowUnattended,
+            options: [
+              { text: plain('Allow my automations to run as me while I’m away'), value: 'allow' },
+            ],
+            ...(d.linked.allowUnattended
+              ? {
+                  initial_options: [
+                    {
+                      text: plain('Allow my automations to run as me while I’m away'),
+                      value: 'allow',
+                    },
+                  ],
+                }
+              : {}),
+          },
+        ],
+      });
+    }
+    if (d.trust) {
+      const opts = d.trust.options.map((o) => ({ text: plain(o.label), value: o.value }));
+      const initial = opts.filter((o) => d.trust!.selected.includes(o.value));
+      blocks.push(
         {
-          type: 'checkboxes',
-          action_id: ACTIONS.allowUnattended,
-          options: [
-            { text: plain('Allow my automations to run as me while I’m away'), value: 'allow' },
+          type: 'context',
+          elements: [
+            mrkdwn(
+              '*Apply without asking* — changes only you can see (everything else still asks):',
+            ),
           ],
-          ...(d.linked.allowUnattended
-            ? {
-                initial_options: [
-                  {
-                    text: plain('Allow my automations to run as me while I’m away'),
-                    value: 'allow',
-                  },
-                ],
-              }
-            : {}),
         },
-      ],
-    });
+        {
+          type: 'actions',
+          elements: [
+            {
+              type: 'checkboxes',
+              action_id: ACTIONS.trustLevels,
+              options: opts,
+              ...(initial.length ? { initial_options: initial } : {}),
+            },
+          ],
+        },
+      );
+    }
     if (d.licence) {
       blocks.push({
         type: 'section',
@@ -844,6 +1024,9 @@ export function homeView(d: HomeData): Record<string, unknown> {
         button('Summarize a channel', ACTIONS.quickStart, 'summarize'),
         button('Catch me up', ACTIONS.quickStart, 'ask'),
         button('Draft an update', ACTIONS.quickStart, 'draft'),
+        ...(d.brief && d.linked
+          ? [button('☀️ Set up daily brief', ACTIONS.briefSetup, 'brief')]
+          : []),
       ],
     },
   );
@@ -877,13 +1060,16 @@ export function homeView(d: HomeData): Record<string, unknown> {
     blocks.push({
       type: 'section',
       text: mrkdwn(
-        `${esc(describeTrigger(a.trigger))} · \`${a.invocation.verb}\` in <#${a.channelId}>${a.destination ? ` → <#${a.destination}>` : ''} · ${a.runAs === 'me' ? '🔐 you' : '🏢 service'}${a.enabled ? '' : ' · *paused*'}${a.suspendedReason ? ` — ${esc(a.suspendedReason)}` : ''}`,
+        `${a.template === 'brief' ? '☀️ *Daily brief* · ' : ''}${esc(describeTrigger(a.trigger))} · \`${a.invocation.verb}\` in <#${a.channelId}>${a.destination ? ` → <#${a.destination}>` : ''} · ${a.runAs === 'me' ? `🔐 you${a.grant ? ` until ${esc(a.grant.expiresAt.slice(0, 10))}` : ''}` : '🏢 service'}${a.enabled ? '' : ' · *paused*'}${a.suspendedReason ? ` — ${esc(a.suspendedReason)}` : ''}`,
       ),
       accessory: {
         type: 'overflow',
         action_id: ACTIONS.autoToggle,
         options: [
           { text: plain(a.enabled ? 'Pause' : 'Resume'), value: `toggle:${a.id}` },
+          ...(a.runAs === 'me' && a.grant
+            ? [{ text: plain('Renew (30 days)'), value: `renew:${a.id}` }]
+            : []),
           ...(a.trigger.kind === 'schedule'
             ? [{ text: plain('Run now'), value: `run:${a.id}` }]
             : []),
@@ -1112,7 +1298,13 @@ export function planEditModal(p: {
 export function policyModal(
   channel: string | undefined,
   current:
-    | { identity: string; serviceGrounds: string[]; serviceMayRead: boolean; autoApply: boolean }
+    | {
+        identity: string;
+        serviceGrounds: string[];
+        serviceMayRead: boolean;
+        autoApply: boolean;
+        suggest?: boolean;
+      }
     | undefined,
   catalog: GroundSource[],
 ): Record<string, unknown> {
@@ -1127,6 +1319,7 @@ export function policyModal(
   const flags = [
     { text: plain('Service may read this channel'), value: 'read' },
     { text: plain('Automations may auto-apply replies/posts'), value: 'auto' },
+    { text: plain('Suggest answers privately to unanswered questions'), value: 'suggest' },
   ];
   return {
     type: 'modal',
@@ -1192,7 +1385,11 @@ export function policyModal(
           ...(current?.serviceMayRead || current?.autoApply
             ? {
                 initial_options: flags.filter((f) =>
-                  f.value === 'read' ? current?.serviceMayRead : current?.autoApply,
+                  f.value === 'read'
+                    ? current?.serviceMayRead
+                    : f.value === 'suggest'
+                      ? current?.suggest
+                      : current?.autoApply,
                 ),
               }
             : {}),

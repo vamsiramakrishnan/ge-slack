@@ -211,6 +211,31 @@ export interface AutoApplyContext {
 }
 
 /**
+ * Self-scoped changes (ADR-0003 §2): only the person sees them, so with their opt-in they apply
+ * without a click. `dm` is their own Gemini DM thread; anything else keeps approval.
+ */
+export function isSelfScoped(
+  p: ActuationParams,
+  ctx: {
+    userId: string;
+    trusted: ReadonlySet<'dm-reply' | 'remind-self'>;
+    dm?: { channel: string; threadTs?: string };
+  },
+): boolean {
+  if (p.kind === 'remind') return ctx.trusted.has('remind-self') && p.user === ctx.userId;
+  if ((p.kind === 'reply' || p.kind === 'post') && ctx.dm) {
+    return (
+      ctx.trusted.has('dm-reply') &&
+      /^D[A-Z0-9]+$/.test(ctx.dm.channel) &&
+      p.channel === ctx.dm.channel &&
+      (p.kind === 'post' || !ctx.dm.threadTs || p.threadTs === ctx.dm.threadTs) &&
+      !/<@[UW][A-Z0-9]+>|<!(channel|here|everyone)>/.test(p.text)
+    );
+  }
+  return false;
+}
+
+/**
  * The unattended actuation gate (EXPERIENCE §8). Fails closed: only a reply in the triggering
  * thread, or a post to the automation's own configured destination, may auto-apply — and only when
  * the channel policy allows auto-apply at all. Everything else becomes a plan card for the owner.

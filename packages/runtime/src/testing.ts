@@ -16,8 +16,10 @@ import type {
   ConversationInfo,
   GeminiPort,
   LandedView,
+  FaqCardView,
   LicenceRequestView,
   LicenceView,
+  SuggestionView,
   NoticeKind,
   PlanView,
   ResolvedScope,
@@ -175,6 +177,16 @@ export class FakeSurface implements SurfacePort {
   async sendFile(userId: string, file: { name: string; title: string; content: string }) {
     this.files.push({ userId, name: file.name, content: file.content });
     return { ok: true, message: 'Sent to your DM.' };
+  }
+  suggestions: Array<{ channel: string; userId: string; threadTs: string; view: SuggestionView }> =
+    [];
+  async suggestPrivately(channel: string, userId: string, threadTs: string, view: SuggestionView) {
+    this.suggestions.push({ channel, userId, threadTs, view });
+  }
+  faqCards: Array<{ channel: string; view: FaqCardView; ts?: string }> = [];
+  async faqCard(channel: string, view: FaqCardView, ts?: string) {
+    this.faqCards.push({ channel, view, ...(ts ? { ts } : {}) });
+    return { channel, ts: ts ?? `faq.${this.faqCards.length}` };
   }
   licenceCards: Array<{ channel: string; view: LicenceRequestView; ts?: string }> = [];
   async licenceRequestCard(channel: string, view: LicenceRequestView, ts?: string) {

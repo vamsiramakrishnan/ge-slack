@@ -12,6 +12,8 @@ import {
   citationElements,
   licenceBlocks,
   licenceRequestBlocks,
+  suggestionBlocks,
+  faqCardBlocks,
 } from './blocks.js';
 import type { SlackApi, SlackApiResponse } from './slack-api.js';
 
@@ -1050,5 +1052,42 @@ describe('licence onboarding blocks (EXPERIENCE §11)', () => {
     });
     expect(ids(done)).toEqual([]);
     expect(JSON.stringify(done)).toContain('Licence assigned');
+  });
+});
+
+describe('ADR-0003 blocks', () => {
+  const ids = (blocks: Array<Record<string, unknown>>) =>
+    blocks
+      .filter((b) => b.type === 'actions')
+      .flatMap((b) => (b.elements as Array<{ action_id: string }>).map((e) => e.action_id));
+  it('suggestion: private, escaped, Post as answer / Dismiss', () => {
+    const b = suggestionBlocks({
+      suggestionId: 's1',
+      text: 'Use <x>',
+      sources: [],
+      serviceLabel: 'svc',
+    });
+    expect(ids(b)).toEqual(['ge_suggest_post', 'ge_suggest_dismiss']);
+    expect(JSON.stringify(b)).toContain('only you can see this');
+  });
+  it('FAQ card: Publish/Reject while open, Remove once published', () => {
+    const base = {
+      requestId: 'faq-1',
+      drafterId: 'U1',
+      question: 'Q <b>',
+      answer: 'A',
+      sources: ['https://acme.slack.com/archives/C1/p1'],
+      channel: 'C1',
+      dataStoreTitle: 'FAQ',
+    };
+    expect(ids(faqCardBlocks({ ...base, status: 'open' }))).toEqual([
+      'ge_faq_publish',
+      'ge_faq_reject',
+    ]);
+    expect(JSON.stringify(faqCardBlocks({ ...base, status: 'open' }))).toContain('Q &lt;b&gt;');
+    expect(ids(faqCardBlocks({ ...base, status: 'published', decidedBy: 'U2' }))).toEqual([
+      'ge_faq_remove',
+    ]);
+    expect(ids(faqCardBlocks({ ...base, status: 'removed' }))).toEqual([]);
   });
 });

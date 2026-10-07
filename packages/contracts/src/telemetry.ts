@@ -15,6 +15,10 @@ export const TelemetryKindSchema = z.enum([
   'job',
   'connector-action',
   'licence',
+  'grant',
+  'suggest',
+  'faq',
+  'brief',
 ]);
 
 export const TelemetryEventSchema = z.object({

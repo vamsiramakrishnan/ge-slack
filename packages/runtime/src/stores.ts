@@ -40,6 +40,8 @@ export interface PendingPlan {
   skipped?: string[];
   /** Unattended run awaiting the owner (automation gate). */
   automationId?: string;
+  /** Drafted as the owner under a delegation grant ending then (ADR-0003 §4). */
+  grantExpiresAt?: string;
   dryRun: boolean;
   createdAt: number;
   expiresAt: number;
@@ -68,6 +70,10 @@ export interface StoredAnswer {
   principal: string;
   /** False for answers that must stay private (e.g. workspace search). */
   shareable?: boolean;
+  /** What was asked (the request text), for *Save as FAQ* (ADR-0003 §5). */
+  question?: string;
+  /** Citation URIs of the answer. */
+  sourceUris?: string[];
 }
 
 /**
@@ -94,7 +100,9 @@ export interface LedgerEntry {
   teamId: string;
   invokerId: string;
   approvedBy?: string;
-  approval: 'human' | 'auto';
+  approval: 'human' | 'auto' | 'trust';
+  /** Run as the automation owner under a delegation grant ending then (ADR-0003 §4). */
+  grantExpiresAt?: string;
   kind: ActuationKind;
   label: string;
   outcome: ActuationOutcome;
@@ -119,7 +127,8 @@ export interface LedgerEntry {
 }
 
 export class RuntimeStores {
-  constructor(private readonly kv: KeyValueStore) {}
+  /** The shared store (feature modules keep their own keys under their own prefixes). */
+  constructor(readonly kv: KeyValueStore) {}
 
   savePlan(p: PendingPlan, now = p.createdAt) {
     // TTL counts from now so a re-save (e.g. a finding toggle) never extends the plan's life.

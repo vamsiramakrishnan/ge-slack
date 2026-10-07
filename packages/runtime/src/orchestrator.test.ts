@@ -3,6 +3,9 @@ import {
   parseCommand,
   type AgentEntry,
   type AssistEvent,
+  type Automation,
+  type DelegationGrant,
+  type Feature,
   type LicenceStatus,
   type Origin,
   type Principal,
@@ -18,10 +21,20 @@ import type {
   AwaitingView,
   IdentityPort,
   LandedView,
+  AutomationPlanView,
   LicenceView,
   MemoryView,
   PlanView,
 } from './ports.js';
+import { renewGrant, setTrust, sweepGrants } from './delegation.js';
+import {
+  createBrief,
+  postSuggestion,
+  processSuggestions,
+  queueQuestion,
+  runBrief,
+} from './proactive.js';
+import { FaqService, decideFaq, draftFaq, removeFaq } from './faq.js';
 import { LicenceService, decideLicence, requestLicence } from './licence.js';
 import { runDiagnostics } from './diag.js';
 import { forgetNote } from './memory.js';
@@ -1730,7 +1743,9 @@ describe('licence onboarding: security review fixes', () => {
     const id2 = surface.licenceCards.at(-1)!.view.requestId;
     await decideLicence(orch, 'T1', 'U0ALEX', id2, 'U0ADMIN', 'approve', new RecordingSink());
     expect(dir.assigned).toEqual(['ALEX@ACME.COM']);
-    expect((await licences.auditSince('T1', 0)).at(-1)).toMatchObject({
+    expect(
+      (await licences.auditSince('T1', 0)).find((a) => a.outcome === 'assigned'),
+    ).toMatchObject({
       outcome: 'assigned',
       deciderId: 'U0ADMIN',
       requesterId: 'U0ALEX',
@@ -1829,5 +1844,486 @@ describe('licence onboarding: security review fixes', () => {
     dir.states.set('alex@acme.com', 'unlicensed');
     for (let i = 0; i < 5; i++) await runDiagnostics(orch, origin({ entry: 'slash' }), undefined);
     expect(dir.lookups).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------- ADR-0003 §2–§5
+
+class FakeAutomations {
+  items = new Map<string, Automation>();
+  n = 0;
+  async create(a: Omit<Automation, 'id' | 'createdAt'>) {
+    const full = { ...a, id: `auto_${++this.n}`, createdAt: NOW.toISOString() } as Automation;
+    this.items.set(full.id, full);
+    return full;
+  }
+  async list(teamId: string, ownerId?: string) {
+    return [...this.items.values()].filter(
+      (a) => a.teamId === teamId && (!ownerId || a.ownerId === ownerId),
+    );
+  }
+  nextRun() {
+    return undefined;
+  }
+  async get(_t: string, id: string) {
+    return this.items.get(id);
+  }
+  async update(a: Automation) {
+    this.items.set(a.id, a);
+  }
+}
+
+function adr3(script: Array<string | AssistEvent[]>, extra: Feature[] = []) {
+  const s = setup(script);
+  const automations = new FakeAutomations();
+  s.orch.deps.automations = automations;
+  s.orch.deps.features = new Set([...(s.orch.deps.features ?? []), 'delegation', ...extra]);
+  s.surface.members.set('D0ALEX', new Set(['U0ALEX']));
+  s.surface.info.set('D0ALEX', { id: 'D0ALEX', isPrivate: true, isIm: true, isExtShared: false });
+  return { ...s, automations };
+}
+
+const GRANTED = (over: Partial<DelegationGrant> = {}): DelegationGrant => ({
+  automationId: 'auto_1',
+  teamId: 'T1',
+  ownerId: 'U0ALEX',
+  subject: 'sub-U0ALEX',
+  channels: ['C0ENG'],
+  destinations: ['C0DIG'],
+  grantedAt: NOW.toISOString(),
+  expiresAt: new Date(NOW.getTime() + 10 * 86_400_000).toISOString(),
+  ...over,
+});
+
+async function meAutomation(
+  automations: FakeAutomations,
+  grant: DelegationGrant | undefined,
+): Promise<Automation> {
+  const a = await automations.create({
+    teamId: 'T1',
+    ownerId: 'U0ALEX',
+    channelId: 'C0ENG',
+    trigger: { kind: 'schedule', text: 'daily 9:00', cron: '0 9 * * *', timeZone: 'UTC' },
+    invocation: {
+      verb: 'summarize',
+      inferredVerb: false,
+      grounds: [],
+      people: [],
+      from: [],
+      instruction: '',
+      flags: {},
+    },
+    runAs: 'me',
+    destination: 'C0DIG',
+    enabled: true,
+  });
+  const full = { ...a, ...(grant ? { grant: { ...grant, automationId: a.id } } : {}) };
+  await automations.update(full);
+  return full;
+}
+
+const delegatedOrigin = (id: string): Origin => ({
+  entry: 'schedule',
+  teamId: 'T1',
+  userId: 'U0ALEX',
+  channelId: 'C0ENG',
+  automationId: id,
+});
+
+describe('delegation grants (ADR-0003 §4)', () => {
+  const runAs = async (
+    orch: Orchestrator,
+    id: string,
+    text = 'summarize scope:channel --as me --to <#C0DIG|digest>',
+  ) => {
+    const sink = new RecordingSink();
+    await orch.handle(parseCommand(text), delegatedOrigin(id), sink);
+    return sink;
+  };
+
+  it('runs as the owner only under a valid grant; the switch alone no longer counts', async () => {
+    const { orch, automations, identity, gemini } = adr3(['digest', 'digest']);
+    const none = await meAutomation(automations, undefined);
+    const denied = await runAs(orch, none.id);
+    expect(denied.last<{ kind: string }>('notice')?.kind).toBe('denied');
+    expect(identity.lastInput?.delegated).toBeUndefined(); // refused before resolving
+    expect(gemini.turns).toHaveLength(0);
+
+    const ok = await meAutomation(automations, GRANTED());
+    await runAs(orch, ok.id);
+    expect(identity.lastInput?.delegated).toBe(true);
+    expect(gemini.turns[0]!.identity).toBe('user:alex@acme.com');
+  });
+
+  it('refuses expired grants, another subject, ungranted channels, and channels the owner left', async () => {
+    const { orch, automations, surface } = adr3(['x', 'x', 'x', 'x']);
+    const expired = await meAutomation(
+      automations,
+      GRANTED({ expiresAt: new Date(NOW.getTime() - 1000).toISOString() }),
+    );
+    expect((await runAs(orch, expired.id)).last<{ text: string }>('notice')!.text).toMatch(
+      /expired/,
+    );
+    const other = await meAutomation(automations, GRANTED({ subject: 'someone-else' }));
+    expect((await runAs(orch, other.id)).last<{ text: string }>('notice')!.text).toMatch(
+      /different account/,
+    );
+    const narrow = await meAutomation(automations, GRANTED({ destinations: ['C0ENG'] }));
+    expect((await runAs(orch, narrow.id)).last<{ text: string }>('notice')!.text).toMatch(
+      /may not post/,
+    );
+    const left = await meAutomation(automations, GRANTED());
+    surface.members.get('C0ENG')!.delete('U0ALEX');
+    expect((await runAs(orch, left.id)).last<{ text: string }>('notice')!.text).toMatch(
+      /no longer a member/,
+    );
+  });
+
+  it('confirming a run-as-me automation creates its grant, shown on the card', async () => {
+    const { orch, automations, surface } = adr3([]);
+    surface.members.set('C0DIG', new Set(['U0ALEX']));
+    const sink = new RecordingSink();
+    await orch.handle(
+      parseCommand('automate "daily 9:00" summarize --as me --to <#C0DIG|digest>'),
+      origin({ entry: 'slash' }),
+      sink,
+    );
+    const card = sink.last<AutomationPlanView>('automationPlan')!;
+    expect(card.grant).toMatchObject({ channels: ['C0ENG'], destinations: ['C0DIG'] });
+    await orch.confirmAutomation(card.pendingId, 'U0ALEX', sink);
+    const [a] = await automations.list('T1');
+    expect(a!.grant).toMatchObject({
+      automationId: a!.id,
+      subject: 'sub-U0ALEX',
+      channels: ['C0ENG'],
+      destinations: ['C0DIG'],
+    });
+    expect(Date.parse(a!.grant!.expiresAt) - NOW.getTime()).toBe(30 * 86_400_000);
+  });
+
+  it('sweep: migrates old run-as-me automations, warns once before expiry, pauses when expired', async () => {
+    const { orch, automations, surface } = adr3([]);
+    const old = await meAutomation(automations, undefined);
+    await sweepGrants(orch, 'T1');
+    expect((await automations.get('T1', old.id))!.grant?.expiresAt).toBe(
+      new Date(NOW.getTime() + 7 * 86_400_000).toISOString(),
+    );
+    expect(surface.dms.at(-1)!.text).toMatch(/renew it/i);
+    const soon = await meAutomation(
+      automations,
+      GRANTED({ expiresAt: new Date(NOW.getTime() + 86_400_000).toISOString() }),
+    );
+    await sweepGrants(orch, 'T1');
+    await sweepGrants(orch, 'T1');
+    expect(surface.dms.filter((d) => d.text.includes(soon.id))).toHaveLength(1);
+    const gone = await meAutomation(
+      automations,
+      GRANTED({ expiresAt: new Date(NOW.getTime() - 1).toISOString() }),
+    );
+    await sweepGrants(orch, 'T1');
+    expect(await automations.get('T1', gone.id)).toMatchObject({
+      enabled: false,
+      suspendedReason: 'permission to run as you expired',
+    });
+  });
+
+  it('renew: owner only, same identity, still a member; resumes an expired automation', async () => {
+    const { orch, automations, surface } = adr3([]);
+    surface.members.set('C0DIG', new Set(['U0ALEX']));
+    const a = await meAutomation(
+      automations,
+      GRANTED({ expiresAt: new Date(NOW.getTime() - 1).toISOString() }),
+    );
+    await sweepGrants(orch, 'T1');
+    const notMine = new RecordingSink();
+    await renewGrant(orch, 'T1', a.id, 'U0MAYA', notMine);
+    expect(notMine.last<{ text: string }>('notice')!.text).toMatch(/isn’t yours/);
+    const s = new RecordingSink();
+    await renewGrant(orch, 'T1', a.id, 'U0ALEX', s);
+    const after = (await automations.get('T1', a.id))!;
+    expect(after.enabled).toBe(true);
+    expect(after.suspendedReason).toBeUndefined();
+    expect(after.grant!.expiresAt).toBe(new Date(NOW.getTime() + 30 * 86_400_000).toISOString());
+  });
+});
+
+describe('trust levels (ADR-0003 §2)', () => {
+  const dmOrigin = origin({
+    entry: 'agent-dm',
+    channelId: 'D0ALEX',
+    threadTs: '1700000000.000900',
+  });
+
+  it('a reply in your own Gemini DM applies without a click once you opt in', async () => {
+    const { orch, surface } = adr3(
+      ['```cmd\nreply "noted"\ndone\n```', '```cmd\nreply "noted"\ndone\n```'],
+      ['trust-levels'],
+    );
+    const before = new RecordingSink();
+    await orch.handle(parseCommand('draft "note to self"'), dmOrigin, before);
+    expect(before.last('plan')).toBeDefined();
+    expect(surface.actuated).toHaveLength(0);
+
+    await setTrust(orch, 'T1', 'U0ALEX', ['dm-reply']);
+    const after = new RecordingSink();
+    await orch.handle(parseCommand('draft "note to self"'), dmOrigin, after);
+    expect(after.last('plan')).toBeUndefined();
+    expect(surface.actuated).toHaveLength(1);
+    expect(surface.actuated[0]!.provenance?.approval).toBe('trust');
+  });
+
+  it('anything reaching other people still asks, even with trust on', async () => {
+    const { orch, surface } = adr3(
+      ['```cmd\nreply "hi <@U0MAYA>"\ndone\n```', '```cmd\nreply "hello"\ndone\n```'],
+      ['trust-levels'],
+    );
+    await setTrust(orch, 'T1', 'U0ALEX', ['dm-reply', 'remind-self']);
+    const ping = new RecordingSink();
+    await orch.handle(parseCommand('draft "x" <@U0MAYA>'), dmOrigin, ping);
+    expect(ping.last('plan')).toBeDefined();
+    const inChannel = new RecordingSink();
+    await orch.handle(parseCommand('draft "x"'), origin(), inChannel);
+    expect(inChannel.last('plan')).toBeDefined();
+    expect(surface.actuated).toHaveLength(0);
+  });
+});
+
+describe('daily brief (ADR-0003 §3)', () => {
+  it('creates a delegated brief to your DM and runs it from granted channels only', async () => {
+    const { orch, automations, surface, gemini } = adr3(['Today: deploy at 3pm.'], ['brief']);
+    const s = new RecordingSink();
+    await createBrief(
+      orch,
+      { teamId: 'T1', userId: 'U0ALEX' },
+      { dm: 'D0ALEX', channels: ['C0ENG'], hour: 8, minute: 30 },
+      s,
+    );
+    const [a] = await automations.list('T1');
+    expect(a).toMatchObject({ template: 'brief', destination: 'D0ALEX', runAs: 'me' });
+    expect(a!.grant).toMatchObject({ channels: ['C0ENG'], destinations: ['D0ALEX'] });
+    expect(a!.trigger).toMatchObject({ cron: '30 8 * * 1-5' });
+
+    const run = new RecordingSink();
+    await runBrief(orch, a!, run);
+    expect(gemini.turns[0]!.identity).toBe('user:alex@acme.com');
+    expect(gemini.turns[0]!.text).toContain('deploy at 3pm');
+    // Delivered to the owner's own DM without an approval card (self-scoped).
+    expect(surface.actuated.at(-1)?.params).toMatchObject({ kind: 'post', channel: 'D0ALEX' });
+    expect(run.last('plan')).toBeUndefined();
+  });
+
+  it('refuses Slack Connect channels and channels you are not in; stops if you left', async () => {
+    const { orch, automations, surface, gemini } = adr3([], ['brief']);
+    surface.info.set('C0EXT', { id: 'C0EXT', isPrivate: false, isIm: false, isExtShared: true });
+    const ext = new RecordingSink();
+    await createBrief(
+      orch,
+      { teamId: 'T1', userId: 'U0ALEX' },
+      { dm: 'D0ALEX', channels: ['C0EXT'], hour: 8, minute: 0 },
+      ext,
+    );
+    expect(ext.last<{ kind: string }>('notice')?.kind).toBe('denied');
+    const s = new RecordingSink();
+    await createBrief(
+      orch,
+      { teamId: 'T1', userId: 'U0ALEX' },
+      { dm: 'D0ALEX', channels: ['C0ENG'], hour: 8, minute: 0 },
+      s,
+    );
+    const [a] = await automations.list('T1');
+    surface.members.get('C0ENG')!.delete('U0ALEX');
+    const run = new RecordingSink();
+    await runBrief(orch, a!, run);
+    expect(run.last<{ kind: string }>('notice')?.kind).toBe('denied');
+    expect(gemini.turns).toHaveLength(0);
+  });
+});
+
+describe('suggested answers (ADR-0003 §3)', () => {
+  async function helpChannel(script: Array<string | AssistEvent[]>) {
+    const s = adr3(script, ['suggestions']);
+    await s.config.setChannelPolicy('T1', 'C0ENG', {
+      identity: 'user-preferred',
+      serviceGrounds: ['runbooks'],
+      serviceMayRead: true,
+      autoApply: false,
+      suggest: true,
+    });
+    s.surface.contexts.set('C0ENG:1700000000.000500', {
+      label: 'thread',
+      channel: 'C0ENG',
+      threadTs: '1700000000.000500',
+      messages: [
+        { ts: '1700000000.000500', user: 'U0MAYA', text: 'How do I rotate the cache key?' },
+      ],
+      truncated: false,
+    });
+    return s;
+  }
+  const q = {
+    teamId: 'T1',
+    channel: 'C0ENG',
+    ts: '1700000000.000500',
+    userId: 'U0MAYA',
+    text: 'How do I rotate the cache key?',
+    fromBot: false,
+  };
+
+  it('suggests privately to the asker after the delay, as the service; posting needs their click', async () => {
+    const { orch, surface, gemini, kv } = await helpChannel(['Run `cache rotate` (see runbook).']);
+    expect(await queueQuestion(orch, q)).toBe(true);
+    expect(await processSuggestions(orch, 'T1')).toBe(0); // not due yet
+    // Make it due.
+    for (const r of await kv.list<{ dueAt: number }>('suggestq/T1/'))
+      await kv.set(r.key, { ...r.value, dueAt: 0 });
+    expect(await processSuggestions(orch, 'T1')).toBe(1);
+    expect(gemini.turns[0]!.identity).toMatch(/^service:/);
+    const sug = surface.suggestions[0]!;
+    expect(sug).toMatchObject({
+      channel: 'C0ENG',
+      userId: 'U0MAYA',
+      threadTs: '1700000000.000500',
+    });
+    expect(surface.actuated).toHaveLength(0);
+
+    const notAsker = new RecordingSink();
+    await postSuggestion(orch, 'T1', sug.view.suggestionId, 'U0ALEX', notAsker);
+    expect(surface.actuated).toHaveLength(0);
+    await postSuggestion(orch, 'T1', sug.view.suggestionId, 'U0MAYA', new RecordingSink());
+    expect(surface.actuated[0]).toMatchObject({
+      params: { kind: 'reply', channel: 'C0ENG', threadTs: '1700000000.000500' },
+      provenance: { approvedBy: 'U0MAYA', approval: 'human' },
+    });
+    expect(surface.actuated[0]!.provenance!.principal).toMatch(/^service:/);
+    // Single use.
+    await postSuggestion(orch, 'T1', sug.view.suggestionId, 'U0MAYA', new RecordingSink());
+    expect(surface.actuated).toHaveLength(1);
+  });
+
+  it('stays quiet when a human answered, the model has no answer, or suggestions are off', async () => {
+    const { orch, surface, kv, config } = await helpChannel(['NO_ANSWER']);
+    surface.contexts.get('C0ENG:1700000000.000500')!.messages.push({
+      ts: '1700000000.000600',
+      user: 'U0ALEX',
+      text: 'cache rotate',
+    });
+    await queueQuestion(orch, q);
+    for (const r of await kv.list<{ dueAt: number }>('suggestq/T1/'))
+      await kv.set(r.key, { ...r.value, dueAt: 0 });
+    expect(await processSuggestions(orch, 'T1')).toBe(0);
+    surface.contexts.get('C0ENG:1700000000.000500')!.messages.pop();
+    await queueQuestion(orch, { ...q, ts: '1700000000.000500' });
+    for (const r of await kv.list<{ dueAt: number }>('suggestq/T1/'))
+      await kv.set(r.key, { ...r.value, dueAt: 0 });
+    expect(await processSuggestions(orch, 'T1')).toBe(0); // NO_ANSWER
+    expect(surface.suggestions).toHaveLength(0);
+    await config.setChannelPolicy('T1', 'C0ENG', {
+      identity: 'user-preferred',
+      serviceMayRead: true,
+      suggest: false,
+    });
+    expect(await queueQuestion(orch, q)).toBe(false);
+    expect(await queueQuestion(orch, { ...q, text: 'deploy done' })).toBe(false);
+  });
+});
+
+describe('thread → FAQ (ADR-0003 §5)', () => {
+  class Writer {
+    created: Array<{ id: string; question: string; answer: string; approver: string }> = [];
+    removed: string[] = [];
+    async create(
+      _t: unknown,
+      id: string,
+      d: { question: string; answer: string; approver: string },
+    ) {
+      this.created.push({ id, question: d.question, answer: d.answer, approver: d.approver });
+      return { ok: true as const };
+    }
+    async remove(_t: unknown, id: string) {
+      this.removed.push(id);
+      return { ok: true as const };
+    }
+  }
+  function faqEnv(script: Array<string | AssistEvent[]>) {
+    const s = adr3(script, ['faq']);
+    const writer = new Writer();
+    s.orch.deps.faq = new FaqService(s.kv, {
+      writer,
+      tokens: { getAccessToken: async () => 'curator' },
+      dataStoreTitle: 'Eng FAQ',
+      stewardsChannel: 'C0STW',
+      stewards: ['U0STEW'],
+      channels: ['C0ENG'],
+    });
+    s.surface.members.set('C0STW', new Set(['U0STEW', 'U0ALEX']));
+    s.surface.info.set('C0STW', { id: 'C0STW', isPrivate: true, isIm: false, isExtShared: false });
+    return { ...s, writer };
+  }
+
+  it('drafts from a shared-source answer, a steward publishes, the drafter can’t; remove undoes', async () => {
+    const { orch, surface, writer, config } = faqEnv([
+      'Rotate with `cache rotate`. Ask <@U0MAYA>.',
+    ]);
+    // A help channel where the Gemini service answers from shared sources.
+    await config.setChannelPolicy('T1', 'C0ENG', {
+      identity: 'user-preferred',
+      serviceGrounds: ['runbooks'],
+      serviceMayRead: true,
+    });
+    const sink = await run(
+      orch,
+      'ask how do I rotate the cache key? --as service',
+      origin({ entry: 'slash' }),
+    );
+    const answer = sink.last<AnswerView>('answer')!;
+    expect(answer.faqable).toBe(true);
+    await draftFaq(orch, 'T1', answer.turnId, 'U0ALEX', new RecordingSink());
+    const card = surface.faqCards[0]!;
+    expect(card.view).toMatchObject({ status: 'open', drafterId: 'U0ALEX', channel: 'C0ENG' });
+    expect(card.view.answer).not.toContain('<@');
+
+    const self = new RecordingSink();
+    await decideFaq(orch, 'T1', card.view.requestId, 'U0ALEX', 'publish', self);
+    expect(self.last<{ kind: string }>('notice')?.kind).toBe('denied');
+    expect(writer.created).toHaveLength(0);
+
+    await decideFaq(orch, 'T1', card.view.requestId, 'U0STEW', 'publish', new RecordingSink());
+    expect(writer.created).toEqual([
+      expect.objectContaining({ id: card.view.requestId, approver: 'U0STEW' }),
+    ]);
+    expect(surface.faqCards.at(-1)?.view.status).toBe('published');
+    expect(surface.dms.at(-1)).toMatchObject({ userId: 'U0ALEX' });
+    // Once only.
+    await decideFaq(orch, 'T1', card.view.requestId, 'U0STEW', 'publish', new RecordingSink());
+    expect(writer.created).toHaveLength(1);
+    await removeFaq(orch, 'T1', card.view.requestId, 'U0STEW', new RecordingSink());
+    expect(writer.removed).toEqual([card.view.requestId]);
+    expect(surface.faqCards.at(-1)?.view.status).toBe('removed');
+  });
+
+  it('answers that may use someone’s own sources, other channels, or private channels can’t become FAQs', async () => {
+    const { orch, surface, config } = faqEnv([
+      [
+        { type: 'token', text: 'From your drive: secret plan.' },
+        { type: 'citation', source: { title: 'Plan', uri: 'https://drive.google.com/x' } },
+        { type: 'done' },
+      ],
+      'fine',
+    ]);
+    const mine = await run(orch, 'ask what is the plan?', origin({ entry: 'slash' }));
+    expect(mine.last<AnswerView>('answer')!.faqable).toBeFalsy();
+    const s = new RecordingSink();
+    await draftFaq(orch, 'T1', mine.last<AnswerView>('answer')!.turnId, 'U0ALEX', s);
+    expect(s.last<{ kind: string }>('notice')?.kind).toBe('denied');
+    await config.setChannelPolicy('T1', 'C0ENG', {
+      identity: 'user-preferred',
+      serviceMayRead: true,
+    });
+    surface.info.set('C0ENG', { id: 'C0ENG', isPrivate: true, isIm: false, isExtShared: false });
+    const priv = await run(orch, 'ask anything? --as service', origin({ entry: 'slash' }));
+    const p = new RecordingSink();
+    await draftFaq(orch, 'T1', priv.last<AnswerView>('answer')!.turnId, 'U0ALEX', p);
+    expect(p.last<{ kind: string }>('notice')?.kind).toBe('denied');
+    expect(surface.faqCards).toHaveLength(0);
   });
 });

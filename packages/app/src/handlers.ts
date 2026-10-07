@@ -14,7 +14,8 @@ import {
   policyModal,
   type ComposerPrefill,
 } from '@ge-slack/slack-bridge';
-import { insightsLines, licenceSummary, rememberNote } from '@ge-slack/runtime';
+import { insightsLines, licenceSummary, rememberNote, trustFor } from '@ge-slack/runtime';
+import { TRUST_LABELS, TrustKindSchema } from '@ge-slack/contracts';
 import type { Container } from './container.js';
 
 /**
@@ -322,6 +323,16 @@ export async function publishHome(c: Container, userId: string): Promise<void> {
       ...(insights ? { insights } : {}),
       jobs: jobs.map((j) => ({ id: j.id, title: j.title, startedAt: j.startedAt })),
       ...(licence ? { licence: { line: licence.line, requestable: licence.requestable } } : {}),
+      delegation: c.cfg.features.has('delegation'),
+      ...(c.cfg.features.has('trust-levels') && linked
+        ? {
+            trust: {
+              options: TrustKindSchema.options.map((k) => ({ value: k, label: TRUST_LABELS[k] })),
+              selected: [...(await trustFor(c.orch, team, userId))],
+            },
+          }
+        : {}),
+      brief: c.cfg.features.has('brief') && c.cfg.features.has('delegation'),
     }),
   });
 }
@@ -372,6 +383,7 @@ export async function onPolicySubmit(
     serviceGrounds,
     serviceMayRead: flags.has('read'),
     autoApply: flags.has('auto'),
+    suggest: flags.has('suggest'),
   });
   return undefined;
 }

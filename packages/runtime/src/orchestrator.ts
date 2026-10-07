@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import {
+  GRANT_LIMITS,
   KIND_LABELS,
   admitAgent,
   canAutoApply,
   isActuating,
+  isSelfScoped,
   isUnattended,
   parsePlanBlock,
   parseProgram,
@@ -77,6 +79,8 @@ import { notesFor } from './memory.js';
 import { observingSink } from './insights.js';
 import { runAsJob, type JobStore } from './jobs.js';
 import { handleControl } from './controls.js';
+import { delegationOn, delegationVerdict, newGrant, trustFor } from './delegation.js';
+import { faqEligible, type FaqService } from './faq.js';
 import {
   licenceGate,
   licenceOnForbidden,
@@ -110,6 +114,8 @@ export interface OrchestratorDeps {
   connectors?: ConnectorPort;
   /** Licence-aware onboarding (EXPERIENCE §11); used with the `licences` feature. */
   licences?: LicenceService;
+  /** Thread → FAQ (ADR-0003 §5); used with the `faq` feature. */
+  faq?: FaqService;
 }
 
 type Turn = {
@@ -133,6 +139,8 @@ type Turn = {
   signal?: AbortSignal;
   /** "Answer with the Gemini service" may be offered if this person turns out to be unlicensed. */
   serviceFallback: boolean;
+  /** Set when this unattended turn runs as its owner under a grant (ADR-0003 §4). */
+  grantExpiresAt?: string;
 };
 
 /** How long a paused agent (research plan, A2A question) waits for its invoker. */
@@ -152,7 +160,7 @@ export type HandleResult = { kind: 'compose' } | { kind: 'done' };
  * ledger. Surface-agnostic: Slack specifics live behind `SurfacePort` and `TurnSink`.
  */
 export class Orchestrator {
-  private readonly now: () => Date;
+  readonly now: () => Date;
   private readonly newId: () => string;
   /** tools/list results per principal + connector, briefly (discovery runs on every draft). */
   private readonly toolCache = new Map<
@@ -337,6 +345,30 @@ export class Orchestrator {
         : [],
     );
     const agentBarsService = named.some((a) => !a.serviceAllowed);
+    // Unattended runs as a person need this automation's grant (ADR-0003 §4); with delegation on,
+    // the account-wide switch no longer authorizes anything.
+    let delegated: boolean | undefined;
+    let grantExpiresAt: string | undefined;
+    if (isUnattended(origin) && delegationOn(this)) {
+      delegated = false;
+      if (origin.automationId && inv.flags.as === 'me' && this.deps.automations) {
+        const a = await this.deps.automations.get(origin.teamId, origin.automationId);
+        const reads = [scopeChannel(scope), ...canvasChannels].filter((c): c is string =>
+          Boolean(c),
+        );
+        const writes = [inv.flags.to ?? origin.channelId].filter((c): c is string => Boolean(c));
+        const v =
+          a && a.ownerId === origin.userId
+            ? await delegationVerdict(this, a, { reads, writes })
+            : ({ ok: false, message: 'This automation is gone.' } as const);
+        if (!v.ok) {
+          await sink.notice('denied', v.message);
+          return undefined;
+        }
+        delegated = true;
+        grantExpiresAt = a?.grant?.expiresAt;
+      }
+    }
     const resolved = await identity.resolve({
       teamId: origin.teamId,
       userId: origin.userId,
@@ -344,6 +376,7 @@ export class Orchestrator {
       ...(inv.flags.as ? { requested: inv.flags.as } : {}),
       unattended: isUnattended(origin),
       externallyShared,
+      ...(delegated !== undefined ? { delegated } : {}),
     });
     if (!resolved.ok) {
       const d = resolved.decision;
@@ -479,6 +512,7 @@ export class Orchestrator {
         forwardContext,
         memory: [],
         serviceFallback,
+        ...(grantExpiresAt ? { grantExpiresAt } : {}),
         ...(agent ? { agent } : {}),
       };
     }
@@ -568,6 +602,7 @@ export class Orchestrator {
       forwardContext,
       memory,
       serviceFallback,
+      ...(grantExpiresAt ? { grantExpiresAt } : {}),
       ...(agent ? { agent } : {}),
     };
   }
@@ -751,6 +786,8 @@ export class Orchestrator {
       ...(provenance ? { provenance } : {}),
       principal: turn.identity,
       shareable: turn.scope.kind !== 'search',
+      ...(inv.instruction.trim() ? { question: inv.instruction.trim().slice(0, 500) } : {}),
+      sourceUris: sources.flatMap((s) => (s.uri ? [s.uri] : [])).slice(0, 20),
     };
     await this.deps.stores.saveAnswer(stored);
     await sink.answer({
@@ -769,6 +806,9 @@ export class Orchestrator {
           origin.entry === 'modal' ||
           origin.entry === 'global-shortcut'),
       followUps: Boolean(origin.channelId),
+      ...(turn.scope.kind !== 'search' && !agent && faqEligible(this, stored)
+        ? { faqable: true }
+        : {}),
       provenance: {
         changeId: `ans_${turnId}`,
         agentId: provenance?.agentId ?? 'gemini-enterprise',
@@ -933,11 +973,8 @@ export class Orchestrator {
     }
   }
 
-  private knownUsers(
-    ctx: CapturedContext | undefined,
-    inv: Invocation,
-    origin: Origin,
-  ): Set<string> {
+  /** @internal */
+  knownUsers(ctx: CapturedContext | undefined, inv: Invocation, origin: Origin): Set<string> {
     // Authors of workspace-search hits are not people of this conversation (no pings/DMs).
     const fromCtx = inv.scope?.kind === 'search' ? [] : (ctx?.messages ?? []);
     return new Set<string>([
@@ -966,6 +1003,16 @@ export class Orchestrator {
       this.deps.surface.conversationInfo(target),
     ]);
     if (info.isExtShared) return false;
+    // The owner's own DM with the app (e.g. the daily brief): self-scoped, nobody else reads it.
+    if (
+      p.kind === 'post' &&
+      info.isIm &&
+      origin.automationId &&
+      p.channel === inv.flags.to &&
+      (await this.deps.surface.isMember(target, origin.userId))
+    ) {
+      return true;
+    }
     return canAutoApply(p, {
       ...(origin.channelId ? { originChannel: origin.channelId } : {}),
       ...(origin.threadTs ? { originThreadTs: origin.threadTs } : {}),
@@ -974,7 +1021,8 @@ export class Orchestrator {
     });
   }
 
-  private async landUnattendedAnswer(
+  /** @internal shared with feature modules (daily brief). */
+  async landUnattendedAnswer(
     text: string,
     sources: SourceRef[],
     agentId: string | undefined,
@@ -1018,6 +1066,7 @@ export class Orchestrator {
       contentHash: await contentHash(body),
       identity: turn.identity,
       ...(origin.automationId ? { automationId: origin.automationId } : {}),
+      ...(turn.grantExpiresAt ? { grantExpiresAt: turn.grantExpiresAt } : {}),
       dryRun: false,
       createdAt,
       expiresAt: createdAt + PLAN_TTL_MS,
@@ -1327,11 +1376,37 @@ export class Orchestrator {
       contentHash: await contentHash(compiled.map((e) => JSON.stringify(e.params)).join('\n')),
       identity: turn.identity,
       ...(origin.automationId ? { automationId: origin.automationId } : {}),
+      ...(turn.grantExpiresAt ? { grantExpiresAt: turn.grantExpiresAt } : {}),
       dryRun: inv.flags.dryRun === true,
       createdAt,
       expiresAt: createdAt + PLAN_TTL_MS,
     };
 
+    // Self-scoped changes the person opted in to apply without a click (ADR-0003 §2).
+    if (!isUnattended(origin) && !pending.dryRun) {
+      const trusted = await trustFor(this, origin.teamId, origin.userId);
+      const dm =
+        origin.entry === 'agent-dm' && origin.channelId
+          ? {
+              channel: origin.channelId,
+              ...((origin.threadTs ?? origin.messageTs)
+                ? { threadTs: (origin.threadTs ?? origin.messageTs)! }
+                : {}),
+            }
+          : undefined;
+      if (
+        trusted.size &&
+        compiled.every((e) =>
+          isSelfScoped(e.params, { userId: origin.userId, trusted, ...(dm ? { dm } : {}) }),
+        )
+      ) {
+        await this.apply(pending, turn.identity, turn.badge, sink, {
+          approval: 'trust',
+          approvedBy: origin.userId,
+        });
+        return;
+      }
+    }
     // Unattended gate (fail closed): auto-apply only when *every* effect is allowed.
     if (isUnattended(origin) && !pending.dryRun) {
       let auto = true;
@@ -1385,7 +1460,8 @@ export class Orchestrator {
     return `${line.line}: read ${fresh.length} new message(s); they are now in <slack_context>`;
   }
 
-  private planView(p: PendingPlan, badge: IdentityBadge, plan?: CommandPlan): PlanView {
+  /** @internal */
+  planView(p: PendingPlan, badge: IdentityBadge, plan?: CommandPlan): PlanView {
     return {
       planId: p.id,
       title: p.dryRun
@@ -1618,12 +1694,13 @@ export class Orchestrator {
     else await sink.notice('info', 'This plan was already handled.');
   }
 
-  private async apply(
+  /** @internal shared with feature modules (suggestions). */
+  async apply(
     p: PendingPlan,
     identity: string,
     badge: IdentityBadge,
     sink: TurnSink,
-    approval: { approval: 'human' | 'auto'; approvedBy?: string },
+    approval: { approval: 'human' | 'auto' | 'trust'; approvedBy?: string },
     tokens?: TokenSource,
   ): Promise<void> {
     const results: LandedView['results'] = [];
@@ -1704,6 +1781,7 @@ export class Orchestrator {
         ...(res.inverse ? { inverse: res.inverse } : {}),
         principal: identity,
         ...(p.automationId ? { automationId: p.automationId } : {}),
+        ...(p.grantExpiresAt ? { grantExpiresAt: p.grantExpiresAt } : {}),
         ...(p.memoryNotes ? { memoryNotes: p.memoryNotes } : {}),
         ...(external
           ? {
@@ -1743,7 +1821,7 @@ export class Orchestrator {
     changeId: string,
     p: Extract<ActuationParams, { kind: 'connector-action' }>,
     tokens: TokenSource | undefined,
-    approval: 'human' | 'auto',
+    approval: 'human' | 'auto' | 'trust',
   ): Promise<ActuationResult> {
     const base = { changeId, kind: p.kind, provenancePersisted: false } as const;
     const inverse = {
@@ -1939,6 +2017,8 @@ export class Orchestrator {
       requested: runAs,
       unattended: true,
       externallyShared: Boolean(origin.externallyShared || info.isExtShared),
+      // Confirming this card is what grants run-as-me (ADR-0003 §4).
+      ...(delegationOn(this) && runAs === 'me' ? { delegated: true } : {}),
     });
     if (!pre.ok) {
       await sink.notice('denied', `This automation couldn't run: ${pre.decision.message}`);
@@ -1979,6 +2059,17 @@ export class Orchestrator {
       ...(next ? { nextRun: next.toISOString() } : {}),
       invokerId: origin.userId,
       channelId: channel,
+      ...(runAs === 'me' && delegationOn(this)
+        ? {
+            grant: {
+              channels: [channel],
+              destinations: [inv.flags.to ?? channel],
+              expiresAt: new Date(
+                this.now().getTime() + GRANT_LIMITS.termDays * 86_400_000,
+              ).toISOString(),
+            },
+          }
+        : {}),
     });
   }
 
@@ -2003,6 +2094,26 @@ export class Orchestrator {
       ...(d.destination ? { destination: d.destination } : {}),
       enabled: true,
     });
+    if (a.runAs === 'me' && delegationOn(this)) {
+      // Confirming the card (which showed these scopes) is the consent (ADR-0003 §4).
+      const grant = await newGrant(this, a);
+      if (!grant) {
+        await this.deps.automations!.update({
+          ...a,
+          enabled: false,
+          suspendedReason: 'owner not connected',
+        });
+        await sink.notice('error', 'Connect your account first, then create this automation.');
+        return;
+      }
+      await this.deps.automations!.update({ ...a, grant });
+      this.observe(a.teamId, { kind: 'grant', outcome: 'granted' });
+      await sink.notice(
+        'info',
+        `Automation created (${a.id}). It runs as you until ${grant.expiresAt.slice(0, 10)}; renew it from the Gemini App Home.`,
+      );
+      return;
+    }
     await sink.notice('info', `Automation created (${a.id}). Manage it from the Gemini App Home.`);
   }
 

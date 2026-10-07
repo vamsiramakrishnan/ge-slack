@@ -8,3 +8,4 @@ export { contentHash } from './hash.js';
 export * from './a2a.js';
 export * from './connector-mcp.js';
 export * from './licences.js';
+export * from './faq-writer.js';

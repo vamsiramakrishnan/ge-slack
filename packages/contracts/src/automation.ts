@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { InvocationSchema, RunAsSchema } from './invocation.js';
+import { DelegationGrantSchema } from './delegation.js';
 
 /**
  * Automation triggers. Schedules are kept as the user's text plus a normalized cron so the card can
@@ -45,6 +46,10 @@ export const AutomationSchema = z.object({
   lastOutcome: z.enum(['ok', 'gated', 'denied', 'failed']).optional(),
   /** Why it was paused automatically (owner disconnected, left channel, repeated failure). */
   suspendedReason: z.string().optional(),
+  /** Permission to run as the owner (ADR-0003 §4); required for run-as-me with `delegation`. */
+  grant: DelegationGrantSchema.optional(),
+  /** A built-in kind of run instead of the stored invocation (ADR-0003 §3). */
+  template: z.enum(['brief']).optional(),
 });
 export type Automation = z.infer<typeof AutomationSchema>;
 

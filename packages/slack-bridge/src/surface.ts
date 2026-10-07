@@ -8,12 +8,20 @@ import type {
   CapturedContext,
   CapturedMessage,
   ConversationInfo,
+  FaqCardView,
   LicenceRequestView,
+  SuggestionView,
   ResolvedScope,
   SurfacePort,
 } from '@ge-slack/runtime';
 import { SlackApiError, must, slackErrorCode, type SlackApi } from './slack-api.js';
-import { provenanceFooter, markdownBlocks, licenceRequestBlocks } from './blocks.js';
+import {
+  provenanceFooter,
+  markdownBlocks,
+  licenceRequestBlocks,
+  suggestionBlocks,
+  faqCardBlocks,
+} from './blocks.js';
 
 interface SearchHit {
   channel_id?: string;
@@ -162,6 +170,40 @@ export class SlackSurface implements SurfacePort {
       text: href ? `${msg.text} <${href}|Open the thread>` : msg.text,
       unfurl_links: false,
     });
+  }
+
+  /** A suggested answer, ephemeral to the asker in their thread (ADR-0003 §3). */
+  async suggestPrivately(
+    channel: string,
+    userId: string,
+    threadTs: string,
+    view: SuggestionView,
+  ): Promise<void> {
+    await must(this.writeApi, 'chat.postEphemeral', {
+      channel,
+      user: userId,
+      thread_ts: threadTs,
+      text: 'Gemini suggests an answer (only you can see this)',
+      blocks: suggestionBlocks(view),
+    });
+  }
+
+  /** Post or update a FAQ card in the stewards' channel (ADR-0003 §5). */
+  async faqCard(
+    channel: string,
+    view: FaqCardView,
+    ts?: string,
+  ): Promise<{ channel: string; ts: string }> {
+    const body = {
+      channel,
+      text: `FAQ draft from <@${view.drafterId}>`,
+      blocks: faqCardBlocks(view),
+      unfurl_links: false,
+    };
+    const r = ts
+      ? await must(this.writeApi, 'chat.update', { ...body, ts })
+      : await must(this.writeApi, 'chat.postMessage', body);
+    return { channel: String(r.channel ?? channel), ts: String(r.ts ?? ts ?? '') };
   }
 
   /** Post or update a licence request card in the admins' channel (EXPERIENCE §11). */

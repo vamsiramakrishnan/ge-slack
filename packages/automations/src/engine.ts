@@ -7,7 +7,7 @@ import {
   type Trigger,
 } from '@ge-slack/contracts';
 import type { KeyValueStore } from '@ge-slack/identity';
-import type { AutomationPort, Orchestrator, TurnSink } from '@ge-slack/runtime';
+import { runBrief, type AutomationPort, type Orchestrator, type TurnSink } from '@ge-slack/runtime';
 import { nextCronRun } from './cron.js';
 
 export const MAX_AUTOMATIONS_PER_OWNER = 25;
@@ -145,7 +145,8 @@ export class AutomationEngine implements AutomationPort {
     const sink = sinkFor(a, origin.threadTs ? { threadTs: origin.threadTs } : {});
     const outcome = new OutcomeSink(sink);
     try {
-      await orch.run(this.invocationFor(a), origin, outcome);
+      if (a.template === 'brief') await runBrief(orch, a, outcome);
+      else await orch.run(this.invocationFor(a), origin, outcome);
     } catch {
       outcome.outcome = 'failed';
     }
