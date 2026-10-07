@@ -17,3 +17,4 @@ export * from './memory.js';
 export * from './telemetry.js';
 export * from './connectors.js';
 export * from './licence.js';
+export * from './delegation.js';

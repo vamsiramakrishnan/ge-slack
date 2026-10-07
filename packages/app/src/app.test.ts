@@ -110,6 +110,30 @@ function fakeRes() {
 }
 
 describe('config', () => {
+  it('FAQ needs its own curator account, a residency-pinned data store and stewards', () => {
+    const env = (o: Record<string, string>) => ({ ...ENV, ...o }) as unknown as NodeJS.ProcessEnv;
+    const faq = {
+      GE_FEATURES: '+faq',
+      GE_FAQ_DATASTORE: 'projects/p1/locations/eu/collections/default_collection/dataStores/faq',
+      GE_FAQ_CURATOR_SERVICE_ACCOUNT: 'faq-curator@p1.iam.gserviceaccount.com',
+      GE_FAQ_STEWARDS_CHANNEL: 'C0STW',
+      GE_FAQ_STEWARDS: 'U0STEW',
+      GE_FAQ_CHANNELS: 'C0ENG',
+    };
+    expect(loadConfig(env(faq)).features.has('faq')).toBe(true);
+    expect(() => loadConfig(env({ ...faq, GE_FAQ_STEWARDS: '' }))).toThrow(/GE_FAQ/);
+    expect(() =>
+      loadConfig(
+        env({
+          ...faq,
+          GE_FAQ_DATASTORE:
+            'projects/p1/locations/us/collections/default_collection/dataStores/faq',
+        }),
+      ),
+    ).toThrow(/residency/);
+    expect(() => loadConfig(env({ GE_FEATURES: '+brief,-delegation' }))).toThrow(/delegation/);
+  });
+
   it('licence assignment is pinned to GE_LOCATION and needs an approvals channel', () => {
     const env = (o: Record<string, string>) => ({ ...ENV, ...o }) as unknown as NodeJS.ProcessEnv;
     expect(() =>
@@ -293,6 +317,7 @@ describe('admin policy', () => {
       serviceGrounds: ['runbooks'],
       serviceMayRead: true,
       autoApply: false,
+      suggest: false,
     });
   });
 });

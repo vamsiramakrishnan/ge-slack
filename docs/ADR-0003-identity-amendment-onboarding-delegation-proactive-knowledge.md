@@ -1,6 +1,11 @@
 # ADR-0003 — Identity amendment: licence onboarding, delegated runs, proactive turns, knowledge capture
 
-**Status:** §1 Accepted and implemented (2026-10-06). §2–§5 Accepted as design; not built yet.
+**Status:** Accepted. §1 implemented (2026-10-06); §2–§5 implemented behind feature flags (2026-10-07).
+Built with these simplifications, all stricter than the design:
+- §2 trusts posts and replies in your own Gemini DM, and reminders to yourself. Rows in your own
+  List aren't included yet.
+- §3 suggestions need a channel policy that allows the service.
+- §5 keeps its audit and Undo on the stewards' card rather than in the ledger.
 Amends ADR-0001 §3 (linking), §5 (policy table) and §6 (membership gate). ADR-0001 still holds
 wherever this ADR is silent: exactly one principal per turn, the human must be a member, writes
 need approval, no service-account keys, no persisted bearer tokens.

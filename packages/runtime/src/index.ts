@@ -11,3 +11,6 @@ export * from './diag.js';
 export * from './insights.js';
 export * from './jobs.js';
 export * from './licence.js';
+export * from './delegation.js';
+export * from './proactive.js';
+export * from './faq.js';

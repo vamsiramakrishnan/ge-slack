@@ -135,6 +135,33 @@ const EnvSchema = z.object({
     .string()
     .regex(/^\s*(U[A-Z0-9]+\s*(,\s*U[A-Z0-9]+\s*)*)?$/)
     .optional(),
+  /**
+   * Thread → FAQ (ADR-0003 §5), with GE_FEATURES +faq. The curator service account holds
+   * `roles/discoveryengine.editor` on this one data store only, and is never GE_SERVICE_ACCOUNT.
+   */
+  GE_FAQ_DATASTORE: z
+    .string()
+    .regex(/^projects\/[^/\s]+\/locations\/[a-z0-9-]+\/collections\/[\w-]+\/dataStores\/[\w-]+$/)
+    .optional(),
+  GE_FAQ_DATASTORE_TITLE: z.string().max(80).default('Team FAQ'),
+  GE_FAQ_CURATOR_SERVICE_ACCOUNT: z
+    .string()
+    .regex(/^[^@\s]+@[^@\s]+\.iam\.gserviceaccount\.com$/)
+    .optional(),
+  /** Private, internal channel where stewards publish or reject drafts. */
+  GE_FAQ_STEWARDS_CHANNEL: z
+    .string()
+    .regex(/^[CG][A-Z0-9]+$/)
+    .optional(),
+  GE_FAQ_STEWARDS: z
+    .string()
+    .regex(/^\s*(U[A-Z0-9]+\s*(,\s*U[A-Z0-9]+\s*)*)?$/)
+    .optional(),
+  /** Public channels whose answers may become FAQs. */
+  GE_FAQ_CHANNELS: z
+    .string()
+    .regex(/^\s*(C[A-Z0-9]+\s*(,\s*C[A-Z0-9]+\s*)*)?$/)
+    .optional(),
   /** Stage-3 features: `default` (memory,analytics,jobs,diag), `+name`, `-name`. */
   GE_FEATURES: z.string().optional(),
   /** Build shown by /gemini diag; Cloud Run sets K_REVISION. */
@@ -174,6 +201,32 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new Error(
       'Set GE_SLACK_KMS_KEY + GE_SLACK_WRAPPED_KEYS (production) or GE_SLACK_VAULT_KEY (dev).',
     );
+  }
+  const features = parseFeatures(c.GE_FEATURES);
+  if (features.has('faq')) {
+    if (
+      !c.GE_FAQ_DATASTORE ||
+      !c.GE_FAQ_CURATOR_SERVICE_ACCOUNT ||
+      !c.GE_FAQ_STEWARDS_CHANNEL ||
+      !c.GE_FAQ_STEWARDS ||
+      !c.GE_FAQ_CHANNELS
+    ) {
+      throw new Error(
+        'GE_FEATURES +faq needs GE_FAQ_DATASTORE, GE_FAQ_CURATOR_SERVICE_ACCOUNT, GE_FAQ_STEWARDS_CHANNEL, GE_FAQ_STEWARDS and GE_FAQ_CHANNELS.',
+      );
+    }
+    if (c.GE_FAQ_DATASTORE.split('/')[3] !== c.GE_LOCATION) {
+      throw new Error('GE_FAQ_DATASTORE must be in GE_LOCATION (residency pin).');
+    }
+    if (
+      c.GE_FAQ_CURATOR_SERVICE_ACCOUNT === c.GE_SERVICE_ACCOUNT ||
+      c.GE_FAQ_CURATOR_SERVICE_ACCOUNT === c.GE_LICENCE_ADMIN_SERVICE_ACCOUNT
+    ) {
+      throw new Error('GE_FAQ_CURATOR_SERVICE_ACCOUNT must be its own service account.');
+    }
+  }
+  if ((features.has('brief') || features.has('trust-levels')) && !features.has('delegation')) {
+    throw new Error('GE_FEATURES brief needs delegation (the brief is a delegated automation).');
   }
   if (c.GE_LICENCE_CONFIG) {
     const loc = c.GE_LICENCE_CONFIG.split('/')[3];
@@ -226,7 +279,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       );
     }
   }
-  return { ...c, ...loadCatalogs(c), features: parseFeatures(c.GE_FEATURES) };
+  return { ...c, ...loadCatalogs(c), features };
 }
 
 /** The `@` catalogs (sources + agents) with their cross-checks; shared by the bot and the probe. */

@@ -4,6 +4,7 @@ import {
   type AgentEntry,
   type ConnectorEntry,
   type ChannelPolicy,
+  type ChannelPolicyInput,
   type GroundSource,
   type ResearchUnit,
 } from '@ge-slack/contracts';
@@ -30,7 +31,11 @@ export class KvWorkspaceConfig implements WorkspaceConfigPort {
     return parsed.success ? parsed.data : DEFAULT_CHANNEL_POLICY;
   }
 
-  async setChannelPolicy(teamId: string, channel: string, policy: ChannelPolicy): Promise<void> {
+  async setChannelPolicy(
+    teamId: string,
+    channel: string,
+    policy: ChannelPolicyInput,
+  ): Promise<void> {
     await this.kv.set(`policy/${teamId}/${channel}`, ChannelPolicySchema.parse(policy));
   }
 

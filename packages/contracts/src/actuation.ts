@@ -16,6 +16,8 @@ export const ActuationKindSchema = z.enum([
   'react',
   'action-items',
   'connector-action',
+  /** A FAQ document published to a Gemini Enterprise data store (ledger only; ADR-0003 §5). */
+  'faq',
 ]);
 export type ActuationKind = z.infer<typeof ActuationKindSchema>;
 
@@ -201,6 +203,7 @@ export const KIND_LABELS: Record<ActuationKind, { emoji: string; label: string; 
   react: { emoji: '😀', label: 'Add reaction', undo: 'Undo' },
   'action-items': { emoji: '✅', label: 'Add action items', undo: 'Undo' },
   'connector-action': { emoji: '🔌', label: 'Connector action', undo: 'Not reversible' },
+  faq: { emoji: '📚', label: 'Publish FAQ', undo: 'Remove on the stewards’ card' },
 };
 
 export interface AutoApplyContext {
@@ -208,6 +211,31 @@ export interface AutoApplyContext {
   originThreadTs?: string;
   destination?: string;
   channelAutoApply: boolean;
+}
+
+/**
+ * Self-scoped changes (ADR-0003 §2): only the person sees them, so with their opt-in they apply
+ * without a click. `dm` is their own Gemini DM thread; anything else keeps approval.
+ */
+export function isSelfScoped(
+  p: ActuationParams,
+  ctx: {
+    userId: string;
+    trusted: ReadonlySet<'dm-reply' | 'remind-self'>;
+    dm?: { channel: string; threadTs?: string };
+  },
+): boolean {
+  if (p.kind === 'remind') return ctx.trusted.has('remind-self') && p.user === ctx.userId;
+  if ((p.kind === 'reply' || p.kind === 'post') && ctx.dm) {
+    return (
+      ctx.trusted.has('dm-reply') &&
+      /^D[A-Z0-9]+$/.test(ctx.dm.channel) &&
+      p.channel === ctx.dm.channel &&
+      (p.kind === 'post' || !ctx.dm.threadTs || p.threadTs === ctx.dm.threadTs) &&
+      !/<[@!]/.test(p.text)
+    );
+  }
+  return false;
 }
 
 /**

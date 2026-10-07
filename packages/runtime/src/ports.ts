@@ -8,6 +8,7 @@ import type {
   AssistEvent,
   Automation,
   ChannelPolicy,
+  ChannelPolicyInput,
   GroundSource,
   Intent,
   Inverse,
@@ -68,6 +69,8 @@ export interface ConversationInfo {
   name?: string;
   isPrivate: boolean;
   isIm: boolean;
+  /** A group DM (multi-person IM): never treated as anyone's own DM. */
+  isMpim?: boolean;
   isExtShared: boolean;
 }
 
@@ -105,6 +108,19 @@ export interface SurfacePort {
     userId: string,
     file: { name: string; title: string; content: string; comment?: string },
   ): Promise<{ ok: boolean; message: string }>;
+  /** A suggested answer, privately to the asker in their thread (ADR-0003 §3). */
+  suggestPrivately(
+    channel: string,
+    userId: string,
+    threadTs: string,
+    view: SuggestionView,
+  ): Promise<void>;
+  /** Post (or, with `ts`, update) a FAQ card in the stewards' channel (ADR-0003 §5). */
+  faqCard(
+    channel: string,
+    view: FaqCardView,
+    ts?: string,
+  ): Promise<{ channel: string; ts: string }>;
   /** Post (or, with `ts`, update) a licence request card in the admins' channel (EXPERIENCE §11). */
   licenceRequestCard(
     channel: string,
@@ -141,7 +157,7 @@ export interface IdentityPort {
 /** Workspace configuration: channel policy, research units, the `@` catalog. */
 export interface WorkspaceConfigPort {
   channelPolicy(teamId: string, channel: string): Promise<ChannelPolicy>;
-  setChannelPolicy(teamId: string, channel: string, policy: ChannelPolicy): Promise<void>;
+  setChannelPolicy(teamId: string, channel: string, policy: ChannelPolicyInput): Promise<void>;
   unit(teamId: string, channel: string): Promise<ResearchUnit | undefined>;
   setUnit(teamId: string, channel: string, unit: ResearchUnit): Promise<void>;
   catalog(teamId: string): Promise<GroundSource[]>;
@@ -180,6 +196,8 @@ export interface AutomationPort {
   create(a: Omit<Automation, 'id' | 'createdAt'>): Promise<Automation>;
   list(teamId: string, ownerId?: string): Promise<Automation[]>;
   nextRun(trigger: Trigger, from: Date): Date | undefined;
+  get(teamId: string, id: string): Promise<Automation | undefined>;
+  update(a: Automation): Promise<void>;
 }
 
 // ---------------------------------------------------------------- presentation
@@ -211,6 +229,8 @@ export interface AnswerView {
   authorizeUrl?: string;
   /** Channel notes that grounded this answer (EXPERIENCE §10). */
   memoryNotes?: number;
+  /** Offer *Save as FAQ* (ADR-0003 §5). */
+  faqable?: boolean;
 }
 
 /** `/gemini memory`: the channel's notes, each with Forget (EXPERIENCE §10). */
@@ -280,6 +300,8 @@ export interface AutomationPlanView {
   nextRun?: string;
   invokerId: string;
   channelId: string;
+  /** What confirming grants when it runs as you (ADR-0003 §4). */
+  grant?: { channels: string[]; destinations: string[]; sources: string[]; expiresAt: string };
 }
 
 export interface ConnectView {
@@ -303,6 +325,30 @@ export interface LicenceView {
   serviceSources: string[];
   /** Re-run the request as the Gemini service ("Answer with the Gemini service"). */
   resumeId?: string;
+}
+
+/** A suggested answer, shown only to the person who asked (ADR-0003 §3). */
+export interface SuggestionView {
+  suggestionId: string;
+  text: string;
+  sources: SourceRef[];
+  /** The service principal it ran as. */
+  serviceLabel: string;
+}
+
+/** A FAQ draft as stewards see it: the exact text that would be published. */
+export interface FaqCardView {
+  requestId: string;
+  drafterId: string;
+  question: string;
+  answer: string;
+  sources: string[];
+  channel: string;
+  readChannels: string[];
+  dataStoreTitle: string;
+  status: 'open' | 'published' | 'rejected' | 'removed' | 'failed';
+  decidedBy?: string;
+  error?: string;
 }
 
 /** A licence request as admins see it; no message content, just who and what. */

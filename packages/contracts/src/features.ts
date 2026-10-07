@@ -11,6 +11,16 @@ export const FeatureSchema = z.enum([
   'diag',
   'licences',
   'connector-actions',
+  /** ADR-0003 §4: per-automation grants replace the account-wide run-as-me switch. */
+  'delegation',
+  /** ADR-0003 §2: self-scoped writes auto-apply once the person opts in. */
+  'trust-levels',
+  /** ADR-0003 §3: the daily brief (a delegated automation). */
+  'brief',
+  /** ADR-0003 §3: private suggested answers in help channels (service principal). */
+  'suggestions',
+  /** ADR-0003 §5: thread → FAQ in a Gemini Enterprise data store. */
+  'faq',
 ]);
 export type Feature = z.infer<typeof FeatureSchema>;
 
@@ -20,6 +30,7 @@ export const DEFAULT_FEATURES: readonly Feature[] = [
   'jobs',
   'diag',
   'licences',
+  'delegation',
 ];
 
 /**

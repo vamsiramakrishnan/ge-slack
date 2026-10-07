@@ -9,6 +9,7 @@ import {
 import { A2aClient, GeminiEnterpriseClient } from './a2a.js';
 import { ConnectorMcpClient } from './connector-mcp.js';
 import { LicenceDirectory } from './licences.js';
+import { FaqWriter } from './faq-writer.js';
 import {
   a2aStreamUrl,
   discoveryEngineHost,
@@ -827,5 +828,46 @@ describe('LicenceDirectory subject principals', () => {
       reason: 'not-found',
     });
     expect(await d.lookup(tokens, 'AbC', 'subject')).toMatchObject({ status: 'assigned' });
+  });
+});
+
+describe('FaqWriter (ADR-0003 §5)', () => {
+  const DS = 'projects/p1/locations/eu/collections/default_collection/dataStores/faq';
+  const tokens: TokenSource = { getAccessToken: async () => 'curator' };
+  it('creates one document with the request id, and deletes it to undo', async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const f = (async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return new Response('{}');
+    }) as unknown as typeof fetch;
+    const w = new FaqWriter(cfg, DS, f);
+    const doc = {
+      question: 'Q?',
+      answer: 'A.',
+      sources: [],
+      drafter: 'U1',
+      approver: 'U2',
+      changeId: 'faq-1',
+      createdAt: 't',
+    };
+    expect(await w.create(tokens, 'faq-1', doc)).toEqual({ ok: true });
+    expect(calls[0]!.url).toBe(
+      `https://discoveryengine.eu.rep.googleapis.com/v1alpha/${DS}/branches/default_branch/documents?documentId=faq-1`,
+    );
+    const body = JSON.parse(String(calls[0]!.init.body));
+    expect(body.structData).toMatchObject({ question: 'Q?', approver: 'U2', kind: 'slack-faq' });
+    expect(Buffer.from(body.content.rawBytes, 'base64').toString()).toBe('Q: Q?\n\nA: A.');
+    expect(await w.remove(tokens, 'faq-1')).toEqual({ ok: true });
+    expect(calls[1]!.init.method).toBe('DELETE');
+    expect(await w.create(tokens, '../x', doc)).toEqual({ ok: false, code: 'bad_id' });
+  });
+  it('refuses a data store outside GE_LOCATION', () => {
+    expect(
+      () =>
+        new FaqWriter(
+          cfg,
+          'projects/p1/locations/us/collections/default_collection/dataStores/faq',
+        ),
+    ).toThrow(/residency/);
   });
 });

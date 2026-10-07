@@ -43,6 +43,11 @@ export interface ResolveInput {
   requested?: RunAs;
   unattended: boolean;
   externallyShared: boolean;
+  /**
+   * Unattended run-as-me authority (ADR-0003 §4). When set, it replaces the account-wide
+   * `allowUnattended` switch: true only after the runtime verified this automation's grant.
+   */
+  delegated?: boolean;
 }
 
 export type Resolved =
@@ -121,7 +126,8 @@ export class IdentityBroker {
     const decision = decidePrincipal({
       policy: input.policy,
       linked: linked !== undefined,
-      offlineGranted: linked?.allowUnattended ?? false,
+      offlineGranted:
+        input.delegated !== undefined ? input.delegated : (linked?.allowUnattended ?? false),
       ...(input.requested ? { requested: input.requested } : {}),
       unattended: input.unattended,
       externallyShared: input.externallyShared,

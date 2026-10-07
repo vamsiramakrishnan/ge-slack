@@ -33,7 +33,8 @@ export const WriteProvenanceSchema = z.object({
   invoker: z.string(),
   approvedBy: z.string().optional(),
   /** `auto` when an unattended gate applied it under channel policy. */
-  approval: z.enum(['human', 'auto']),
+  /** `trust`: a self-scoped change the person opted in to apply without a click (ADR-0003 §2). */
+  approval: z.enum(['human', 'auto', 'trust']),
   edited: z.boolean().default(false),
   timestamp: z.string(),
   contentHash: z.string(),

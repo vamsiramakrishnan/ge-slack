@@ -2,15 +2,27 @@ import { timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { App, BlockAction } from '@slack/bolt';
 import type { Origin } from '@ge-slack/contracts';
-import { ACTIONS, CALLBACKS, WORKFLOW_STEPS } from '@ge-slack/slack-bridge';
+import { ACTIONS, CALLBACKS, WORKFLOW_STEPS, briefModal } from '@ge-slack/slack-bridge';
 import {
+  MAX_BRIEF_CHANNELS,
   cancelJob,
+  createBrief,
+  decideFaq,
   decideLicence,
+  dismissSuggestion,
+  draftFaq,
   forgetNote,
   licenceSummary,
+  postSuggestion,
+  processSuggestions,
+  queueQuestion,
+  removeFaq,
+  renewGrant,
   requestLicence,
   safeMessage,
+  setTrust,
   showStats,
+  sweepGrants,
 } from '@ge-slack/runtime';
 import { runWorkflowStep } from '@ge-slack/automations';
 import type { Container } from './container.js';
@@ -167,6 +179,18 @@ export function register(app: App, c: Container, botUserId: () => string | undef
     // Mentions are handled by app_mention; keyword triggers see every other human message.
     const bot = botUserId();
     if (bot && m.text?.includes(`<@${bot}`)) return;
+    // Help channels with suggestions on: a question nobody answers gets a private suggestion.
+    await guard('suggest', async () => {
+      await queueQuestion(c.orch, {
+        teamId: team,
+        channel: m.channel,
+        ts: m.ts,
+        ...(m.thread_ts ? { threadTs: m.thread_ts } : {}),
+        text: m.text ?? '',
+        ...(m.user ? { userId: m.user } : {}),
+        fromBot,
+      });
+    })();
     await guard('keyword', async () => {
       await c.engine.onMessage(
         c.orch,
@@ -343,6 +367,38 @@ export function register(app: App, c: Container, botUserId: () => string | undef
     )();
   });
 
+  app.view(CALLBACKS.brief, async ({ ack, body, view }) => {
+    const v = view.state.values as unknown as {
+      channels?: { v?: { selected_conversations?: string[] } };
+      time?: { v?: { selected_time?: string } };
+    };
+    const channels = v.channels?.v?.selected_conversations ?? [];
+    const [h, mi] = (v.time?.v?.selected_time ?? '').split(':').map(Number);
+    if (!channels.length || h === undefined || mi === undefined || Number.isNaN(h)) {
+      await ack({ response_action: 'errors', errors: { channels: 'Pick channels and a time.' } });
+      return;
+    }
+    await ack();
+    await guard('brief', async () => {
+      const dm = await c.api.call('conversations.open', { users: body.user.id });
+      const dmId = (dm.channel as { id?: string } | undefined)?.id;
+      if (!dmId) return;
+      const origin: Origin = {
+        entry: 'slash',
+        teamId: team,
+        userId: body.user.id,
+        channelId: dmId,
+      };
+      await createBrief(
+        c.orch,
+        { teamId: team, userId: body.user.id },
+        { dm: dmId, channels, hour: h, minute: mi },
+        c.sinkFor(origin),
+      );
+      await publishHome(c, body.user.id);
+    })();
+  });
+
   app.view(CALLBACKS.policy, async ({ ack, body, view }) => {
     const error = await onPolicySubmit(
       c,
@@ -483,6 +539,84 @@ export function register(app: App, c: Container, botUserId: () => string | undef
       await publishHome(c, requesterId).catch(() => undefined);
     });
   }
+  // ---- ADR-0003: trust levels, daily brief, suggestions, FAQ
+  onAction(ACTIONS.trustLevels, async (b) => {
+    const a = b.actions[0] as { selected_options?: Array<{ value: string }> };
+    await setTrust(
+      c.orch,
+      team,
+      b.user.id,
+      (a.selected_options ?? []).map((o) => o.value),
+    );
+    await publishHome(c, b.user.id);
+  });
+  onAction(ACTIONS.briefSetup, async (b) => {
+    await c.api.call('views.open', {
+      trigger_id: b.trigger_id,
+      view: briefModal({ maxChannels: MAX_BRIEF_CHANNELS, timeZone: c.cfg.GE_TIME_ZONE }),
+    });
+  });
+  onAction(ACTIONS.suggestPost, async (b) => {
+    // Never via response_url: that would replace the asker's ephemeral, not post a receipt.
+    const { responseUrl: _r, ...origin } = clickOrigin(c, b);
+    await postSuggestion(
+      c.orch,
+      team,
+      actionValue(b),
+      b.user.id,
+      c.sinkFor({ ...origin, entry: 'slash' }),
+    );
+  });
+  onAction(ACTIONS.suggestDismiss, async (b) => {
+    await dismissSuggestion(c.orch, team, actionValue(b), b.user.id);
+    if (b.response_url) {
+      await c.postResponse(b.response_url, { delete_original: true }).catch(() => undefined);
+    }
+  });
+  onAction(ACTIONS.faqDraft, async (b) => {
+    const { responseUrl: _r, ...origin } = clickOrigin(c, b);
+    await draftFaq(
+      c.orch,
+      team,
+      actionValue(b),
+      b.user.id,
+      c.sinkFor({ ...origin, entry: 'slash' }),
+    );
+  });
+  for (const [id, decision] of [
+    [ACTIONS.faqPublish, 'publish'],
+    [ACTIONS.faqReject, 'reject'],
+  ] as const) {
+    onAction(id, async (b) => {
+      // A shared card in the stewards' channel: notices go privately to the clicker.
+      const { responseUrl: _r, ...origin } = clickOrigin(c, b);
+      const msgTs =
+        (b.message as { ts?: string } | undefined)?.ts ??
+        (b.container as { message_ts?: string } | undefined)?.message_ts;
+      await decideFaq(
+        c.orch,
+        team,
+        actionValue(b),
+        b.user.id,
+        decision,
+        c.sinkFor({ ...origin, entry: 'slash' }),
+        {
+          ...(origin.channelId ? { channel: origin.channelId } : {}),
+          ...(msgTs ? { ts: msgTs } : {}),
+        },
+      );
+    });
+  }
+  onAction(ACTIONS.faqRemove, async (b) => {
+    const { responseUrl: _r, ...origin } = clickOrigin(c, b);
+    await removeFaq(
+      c.orch,
+      team,
+      actionValue(b),
+      b.user.id,
+      c.sinkFor({ ...origin, entry: 'slash' }),
+    );
+  });
   onAction(ACTIONS.exportLedger, async (b) => {
     // From App Home: the CSV lands in the admin's DM; the outcome notice follows it there.
     const origin = clickOrigin(c, b);
@@ -528,6 +662,21 @@ export function register(app: App, c: Container, botUserId: () => string | undef
   onAction(ACTIONS.autoToggle, async (b) => {
     const [op, id] = actionValue(b).split(':');
     if (!id) return;
+    if (op === 'renew') {
+      const dm = await c.api.call('conversations.open', { users: b.user.id });
+      const dmId = (dm.channel as { id?: string } | undefined)?.id;
+      if (dmId) {
+        await renewGrant(
+          c.orch,
+          team,
+          id,
+          b.user.id,
+          c.sinkFor({ entry: 'slash', teamId: team, userId: b.user.id, channelId: dmId }),
+        );
+      }
+      await publishHome(c, b.user.id);
+      return;
+    }
     const msg =
       op === 'run'
         ? await c.engine.runNow(c.orch, team, id, b.user.id, c.unattendedSink)
@@ -541,8 +690,7 @@ export function register(app: App, c: Container, botUserId: () => string | undef
     await publishHome(c, b.user.id);
   });
   onAction(ACTIONS.disconnect, async (b) => {
-    await c.broker.unlink(team, b.user.id);
-    await c.engine.suspendOwner(team, b.user.id, 'owner disconnected');
+    await c.orch.deps.identity.unlink(team, b.user.id);
     await publishHome(c, b.user.id);
   });
   onAction(ACTIONS.quickStart, (b) =>
@@ -684,7 +832,10 @@ export function routes(c: Container) {
           }
           void c.engine
             .tick(c.orch, c.cfg.SLACK_TEAM_ID, c.unattendedSink)
-            .then((ran) => {
+            .then(async (ran) => {
+              // ADR-0003: grant renewals/expiry and due suggestions ride the same tick.
+              await sweepGrants(c.orch, c.cfg.SLACK_TEAM_ID).catch(() => undefined);
+              await processSuggestions(c.orch, c.cfg.SLACK_TEAM_ID).catch(() => undefined);
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ ran: ran.length }));
             })

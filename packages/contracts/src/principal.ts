@@ -46,14 +46,19 @@ export const ChannelPolicySchema = z.object({
   serviceMayRead: z.boolean().default(false),
   /** Allow unattended automations to auto-apply low-risk effects here. Default false. */
   autoApply: z.boolean().default(false),
+  /** Suggest answers privately to unanswered questions here (ADR-0003 §3). Default false. */
+  suggest: z.boolean().default(false),
 });
 export type ChannelPolicy = z.infer<typeof ChannelPolicySchema>;
+/** What callers may pass when setting a policy (defaults filled in on save). */
+export type ChannelPolicyInput = z.input<typeof ChannelPolicySchema>;
 
 export const DEFAULT_CHANNEL_POLICY: ChannelPolicy = {
   identity: 'user-only',
   serviceGrounds: [],
   serviceMayRead: false,
   autoApply: false,
+  suggest: false,
 };
 
 export interface PrincipalDecisionInput {

@@ -5,6 +5,7 @@ import {
   A2aClient,
   ConnectorMcpClient,
   GeminiEnterpriseClient,
+  FaqWriter,
   LicenceDirectory,
   StreamAssistClient,
   type GeminiClientConfig,
@@ -21,6 +22,7 @@ import {
   type ServiceIdentity,
 } from '@ge-slack/identity';
 import {
+  FaqService,
   JobStore,
   KvTelemetry,
   LicenceService,
@@ -181,6 +183,28 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
   const jobs = new JobStore(kv);
   const workspace = new KvWorkspaceConfig(kv, cfg.sources, cfg.agents, cfg.connectors);
   const connectorClient = new ConnectorMcpClient(gemini, fetchImpl);
+  const list = (s: string | undefined) =>
+    (s ?? '')
+      .split(',')
+      .map((x) => x.trim())
+      .filter(Boolean);
+  // Thread → FAQ writes as its own curator account, never a person or the licensed SA (ADR-0003 §5).
+  const faq =
+    cfg.features.has('faq') && cfg.GE_FAQ_DATASTORE && cfg.GE_FAQ_CURATOR_SERVICE_ACCOUNT
+      ? new FaqService(kv, {
+          writer: new FaqWriter(gemini, cfg.GE_FAQ_DATASTORE, fetchImpl),
+          tokens: new ImpersonatedTokenSource(
+            runtimeIdentity,
+            { targetServiceAccount: cfg.GE_FAQ_CURATOR_SERVICE_ACCOUNT },
+            fetchImpl,
+          ),
+          dataStoreTitle: cfg.GE_FAQ_DATASTORE_TITLE,
+          stewardsChannel: cfg.GE_FAQ_STEWARDS_CHANNEL!,
+          stewards: list(cfg.GE_FAQ_STEWARDS),
+          channels: list(cfg.GE_FAQ_CHANNELS),
+          curator: cfg.GE_FAQ_CURATOR_SERVICE_ACCOUNT,
+        })
+      : undefined;
   // Licence lookups and assignment run as an admin-plane identity, never as a person (ADR-0003 §1).
   const licences = new LicenceService(kv, {
     directory: new LicenceDirectory(gemini, cfg.GE_LICENCE_USER_STORE, fetchImpl),
@@ -217,10 +241,12 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
       },
       getLinked: (t, u) => broker.getLinked(t, u),
       setAllowUnattended: (t, u, a) => broker.setAllowUnattended(t, u, a),
-      // Disconnecting also pauses every automation that runs as this person.
+      // Disconnecting also pauses every automation that runs as this person, and clears their
+      // trust settings (ADR-0003 §2).
       unlink: async (t, u) => {
         await broker.unlink(t, u);
         await engine.suspendOwner(t, u, 'owner disconnected');
+        await kv.delete(`trust/${t}/${u}`);
       },
     },
     config: workspace,
@@ -237,6 +263,7 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
     insights: telemetry,
     jobs,
     licences,
+    ...(faq ? { faq } : {}),
     connectors: {
       listTools: (t, c) => connectorClient.listTools(t, c),
       callTool: (t, c, n, a) => connectorClient.callTool(t, c, n, a),

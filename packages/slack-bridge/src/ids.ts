@@ -36,6 +36,18 @@ export const ACTIONS = {
   licenceRequest: 'ge_licence_request',
   licenceApprove: 'ge_licence_approve',
   licenceDecline: 'ge_licence_decline',
+  /** ADR-0003 §2: trust-level checkboxes in App Home. */
+  trustLevels: 'ge_trust_levels',
+  /** Daily brief setup (App Home button → modal). */
+  briefSetup: 'ge_brief_setup',
+  /** Suggested answers: post / dismiss (value = suggestion id). */
+  suggestPost: 'ge_suggest_post',
+  suggestDismiss: 'ge_suggest_dismiss',
+  /** Thread → FAQ: draft from an answer (value = turn id); stewards publish / reject / remove. */
+  faqDraft: 'ge_faq_draft',
+  faqPublish: 'ge_faq_publish',
+  faqReject: 'ge_faq_reject',
+  faqRemove: 'ge_faq_remove',
 } as const;
 
 export const CALLBACKS = {
@@ -50,6 +62,7 @@ export const CALLBACKS = {
   messageRemember: 'ge_msg_remember',
   globalNew: 'ge_global_new',
   agentReply: 'ge_agent_reply_modal',
+  brief: 'ge_brief_modal',
 } as const;
 
 export const WORKFLOW_STEPS = {
