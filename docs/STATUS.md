@@ -22,6 +22,8 @@ against live Slack or a live Gemini Enterprise engine.**
 | Live receipts, findings `data_table`, Lists, canvas sections, Real-time Search | Implemented | unit-tested against a recording Slack API; `plan`/`data_table` acceptance via `chat.postMessage`/`response_url` is unverified live, so every rich card retries with classic blocks on `invalid_blocks` |
 | Canvas *reading* | Implemented | `canvases.getContent` (markdown); falls back to file preview |
 | `canvas-edit` undo | Not reversible | Slack doesn't expose prior section content; shown as such |
+| Licence-aware onboarding (EXPERIENCE §11, ADR-0003 §1): user-store lookup, pre-turn card, 403 re-check, request → admin approve/assign, App Home + diag line, post-link DM | Implemented | unit-tested against a fake user store and recording Slack API; **`userLicenses.list` filter and `batchUpdateUserLicenses` not yet run live** |
+| ADR-0003 §2–§5 (assistant pane trust levels, proactive turns, delegation grants, thread → FAQ) | Designed | ADR only |
 | Agents (ADR-0002): `@agent` catalog, chat agents and Deep Research via `agentsSpec`, A2A proxy client, paused-agent continuations, connector-auth prompts, `actionDisabled`, `isSessionLess` removed | Implemented | unit-tested against scripted streams; **no live probe yet** (ADR-0002 § Live probes) |
 
 ## Security review (2026-10-05)
@@ -149,6 +151,29 @@ regression tests:
 | F9/F10 lost cancels; team-wide scans; unbounded cache | cancel in its own key; jobs keyed per person; tool cache capped |
 | F11/F13 | job titles escaped; DM link only for current members; connector reply cut to a 120-char reference |
 | F12 parser edge cases | depth limit in TS and Python (`RecursionError` handled); 3 new parity rows |
+
+## Security review — licence onboarding (2026-10-06)
+
+No High findings: nothing let anyone get a licence assigned without an authorised approver. Fixed
+with regression tests:
+
+| Finding | Fix |
+|---|---|
+| M1 blocked people offered (and allowed) the service path | no service offer when blocked; service turns denied while the cached state is blocked |
+| M2 approval could override a later block | fresh lookup at approval; blocked → request closed, nothing assigned; already assigned → no API call |
+| M3 assignment rights could sit on the licensed service account | `GE_LICENCE_CONFIG` requires its own `GE_LICENCE_ADMIN_SERVICE_ACCOUNT` ≠ `GE_SERVICE_ACCOUNT`, and a matching project |
+| M4 requests channel could be public or Slack Connect (emails shown) | requests are posted only to a private, internal channel; otherwise refused |
+| M5 no audit of an admin-plane write | every decision audited (decider, requester, principal, licence config, admin identity); the 30-day export DMs a licence CSV too |
+| L1 case / subject handling | subjects compare exactly; assignment goes to the user store's own spelling of the row |
+| L2 request bound to email only | the request stores the principal; approval must match it |
+| L3 double click → two cards | request saved before the card is posted |
+| L4 lock lost on a store error | lock restored unless a final state was saved |
+| L5 identity change counted as a decline | new `void` status: no cooldown, not attributed to the approver |
+| L6 decision not tied to the card | the click must come from the request's own card (channel + ts) |
+| L7 cached membership for approvers | fresh membership check for decisions |
+| L8 guests could request | guests and external members are refused |
+| L9 unthrottled fresh lookups | at most one lookup per person per 30 s; open/cooldown checks before any lookup |
+| L10 proxy path dropped the store | store kept in the proxied path; the proxy must pin project and region (documented) |
 
 ## Next live checks
 

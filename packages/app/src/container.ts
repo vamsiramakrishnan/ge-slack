@@ -5,6 +5,7 @@ import {
   A2aClient,
   ConnectorMcpClient,
   GeminiEnterpriseClient,
+  LicenceDirectory,
   StreamAssistClient,
   type GeminiClientConfig,
 } from '@ge-slack/gemini-client';
@@ -22,6 +23,7 @@ import {
 import {
   JobStore,
   KvTelemetry,
+  LicenceService,
   KvWorkspaceConfig,
   Orchestrator,
   RuntimeStores,
@@ -53,6 +55,7 @@ export interface Container {
   postResponse: ResponsePoster;
   telemetry: KvTelemetry;
   jobs: JobStore;
+  licences: LicenceService;
   /** Verifies Cloud Scheduler's OIDC token on /cron/tick. */
   cronVerifier: GoogleIdTokenVerifier;
   /** Pick the right rendering for an origin (EXPERIENCE §3 visibility rules). */
@@ -178,6 +181,27 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
   const jobs = new JobStore(kv);
   const workspace = new KvWorkspaceConfig(kv, cfg.sources, cfg.agents, cfg.connectors);
   const connectorClient = new ConnectorMcpClient(gemini, fetchImpl);
+  // Licence lookups and assignment run as an admin-plane identity, never as a person (ADR-0003 §1).
+  const licences = new LicenceService(kv, {
+    directory: new LicenceDirectory(gemini, cfg.GE_LICENCE_USER_STORE, fetchImpl),
+    tokens: cfg.GE_LICENCE_ADMIN_SERVICE_ACCOUNT
+      ? new ImpersonatedTokenSource(
+          runtimeIdentity,
+          { targetServiceAccount: cfg.GE_LICENCE_ADMIN_SERVICE_ACCOUNT },
+          fetchImpl,
+        )
+      : runtimeIdentity,
+    principalField: cfg.GE_LICENCE_PRINCIPAL,
+    adminIdentity: cfg.GE_LICENCE_ADMIN_SERVICE_ACCOUNT ?? 'runtime service account',
+    ...(cfg.GE_LICENCE_CONFIG ? { licenseConfig: cfg.GE_LICENCE_CONFIG } : {}),
+    ...(cfg.GE_LICENCE_REQUESTS_CHANNEL
+      ? { requestsChannel: cfg.GE_LICENCE_REQUESTS_CHANNEL }
+      : {}),
+    approvers: (cfg.GE_LICENCE_APPROVERS ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  });
   const stores = new RuntimeStores(kv);
   const engine = new AutomationEngine(kv);
   const orch = new Orchestrator({
@@ -212,6 +236,7 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
     telemetry,
     insights: telemetry,
     jobs,
+    licences,
     connectors: {
       listTools: (t, c) => connectorClient.listTools(t, c),
       callTool: (t, c, n, a) => connectorClient.callTool(t, c, n, a),
@@ -306,6 +331,7 @@ export async function buildContainer(cfg: AppConfig, deps: ContainerDeps): Promi
     cronVerifier: new GoogleIdTokenVerifier(fetchImpl),
     telemetry,
     jobs,
+    licences,
     sinkFor,
     unattendedSink,
   };

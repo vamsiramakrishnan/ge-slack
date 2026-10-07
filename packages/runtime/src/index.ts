@@ -10,3 +10,4 @@ export * from './memory.js';
 export * from './diag.js';
 export * from './insights.js';
 export * from './jobs.js';
+export * from './licence.js';

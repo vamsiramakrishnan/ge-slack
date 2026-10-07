@@ -77,6 +77,12 @@ import { notesFor } from './memory.js';
 import { observingSink } from './insights.js';
 import { runAsJob, type JobStore } from './jobs.js';
 import { handleControl } from './controls.js';
+import {
+  licenceGate,
+  licenceOnForbidden,
+  licenceServiceGuard,
+  type LicenceService,
+} from './licence.js';
 
 export interface OrchestratorDeps {
   surface: SurfacePort;
@@ -102,6 +108,8 @@ export interface OrchestratorDeps {
   insights?: InsightsPort;
   jobs?: JobStore;
   connectors?: ConnectorPort;
+  /** Licence-aware onboarding (EXPERIENCE §11); used with the `licences` feature. */
+  licences?: LicenceService;
 }
 
 type Turn = {
@@ -123,6 +131,8 @@ type Turn = {
   memory: ChannelNote[];
   /** Aborted by Slack's stop button (`agent_session_stopped`). */
   signal?: AbortSignal;
+  /** "Answer with the Gemini service" may be offered if this person turns out to be unlicensed. */
+  serviceFallback: boolean;
 };
 
 /** How long a paused agent (research plan, A2A question) waits for its invoker. */
@@ -227,7 +237,7 @@ export class Orchestrator {
       let plan: CommandPlan | undefined;
       let verb = inv.verb;
       if (actionable) {
-        const planned = await this.plan(inv, sink, turn);
+        const planned = await this.plan(inv, origin, sink, turn);
         if (!planned) return;
         if (!isActuating(planned.intent)) {
           await this.chat({ ...inv, verb: planned.intent }, origin, sink, turn, warnings);
@@ -392,6 +402,26 @@ export class Orchestrator {
       return undefined;
     }
 
+    // A person with no licence is told so (and offered the service where policy allows) before
+    // anything is read on their behalf (EXPERIENCE §11).
+    const serviceFallback =
+      principal.kind === 'user' &&
+      policy.identity !== 'user-only' &&
+      identity.serviceConfigured &&
+      !agentBarsService &&
+      inv.flags.as !== 'me' &&
+      !externallyShared;
+    if (
+      principal.kind === 'user' &&
+      !opts.resume &&
+      !(await licenceGate(this, inv, origin, sink, serviceFallback))
+    ) {
+      return undefined;
+    }
+    if (principal.kind === 'service' && !(await licenceServiceGuard(this, origin, sink))) {
+      return undefined;
+    }
+
     const [catalog, unit] = await Promise.all([
       config.catalog(origin.teamId),
       channel ? config.unit(origin.teamId, channel) : Promise.resolve(undefined),
@@ -448,6 +478,7 @@ export class Orchestrator {
         allowedChannels: new Set(),
         forwardContext,
         memory: [],
+        serviceFallback,
         ...(agent ? { agent } : {}),
       };
     }
@@ -536,6 +567,7 @@ export class Orchestrator {
       allowedChannels,
       forwardContext,
       memory,
+      serviceFallback,
       ...(agent ? { agent } : {}),
     };
   }
@@ -660,7 +692,7 @@ export class Orchestrator {
           title: 'Gemini Enterprise returned an error',
           status: 'error',
         });
-        await sink.notice('error', friendlyProviderError(e.code, e.message));
+        await this.providerError(inv, origin, sink, turn, e.code);
         return false;
       } else if (e.type === 'done') complete = true;
     }
@@ -758,6 +790,27 @@ export class Orchestrator {
     });
     if (awaiting && agent) await this.pauseAgent(awaiting, agent, inv, origin, sink, turn);
     return true;
+  }
+
+  /**
+   * A provider error, shown without its body (L2). A 403 on a user turn is usually a missing
+   * licence: check, and show the licence card instead of a bare code when it is (EXPERIENCE §11).
+   */
+  private async providerError(
+    inv: Invocation,
+    origin: Origin,
+    sink: TurnSink,
+    turn: Turn,
+    code: string,
+  ): Promise<void> {
+    if (
+      code === 'http_403' &&
+      turn.principal.kind === 'user' &&
+      (await licenceOnForbidden(this, inv, origin, sink, turn.serviceFallback))
+    ) {
+      return;
+    }
+    await sink.notice('error', friendlyProviderError(code));
   }
 
   private connectorAuthWarning(names: string[], principal: Principal): string {
@@ -981,6 +1034,7 @@ export class Orchestrator {
 
   private async plan(
     inv: Invocation,
+    origin: Origin,
     sink: TurnSink,
     turn: Turn,
   ): Promise<CommandPlan | undefined> {
@@ -999,10 +1053,7 @@ export class Orchestrator {
       return undefined;
     }
     if (r.error || !r.complete) {
-      await sink.notice(
-        'error',
-        friendlyProviderError(r.error?.code ?? 'incomplete', r.error?.message ?? ''),
-      );
+      await this.providerError(inv, origin, sink, turn, r.error?.code ?? 'incomplete');
       return undefined;
     }
     const p = parsePlanBlock(r.text);
@@ -1161,10 +1212,7 @@ export class Orchestrator {
       }
       if (r.error || !r.complete) {
         // Provider EOF is not completion: never execute a fence from an incomplete stream.
-        await sink.notice(
-          'error',
-          friendlyProviderError(r.error?.code ?? 'incomplete', r.error?.message ?? ''),
-        );
+        await this.providerError(inv, origin, sink, turn, r.error?.code ?? 'incomplete');
         return;
       }
       sources = mergeSources(sources, r.sources);
@@ -2017,7 +2065,7 @@ function withText(p: ActuationParams, text: string): ActuationParams {
   return p;
 }
 
-function friendlyProviderError(code: string, message: string): string {
+function friendlyProviderError(code: string): string {
   if (code === 'http_403')
     return 'Gemini Enterprise refused the request (403). Check that this identity has a Gemini Enterprise licence and access to the selected sources.';
   if (code === 'http_429')
@@ -2025,7 +2073,7 @@ function friendlyProviderError(code: string, message: string): string {
   if (code === 'incomplete') return 'The response was cut off before it finished. Try again.';
   if (code.startsWith('http_5'))
     return 'Gemini Enterprise is temporarily unavailable. Try again shortly.';
-  void message; // provider bodies can echo request details; show only the code (L2)
+  // Provider bodies can echo request details; only the code is shown (L2).
   return `Gemini Enterprise returned an error (${code.replace(/[^\w-]/g, '').slice(0, 40)}).`;
 }
 

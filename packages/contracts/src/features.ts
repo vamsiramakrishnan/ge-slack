@@ -4,10 +4,23 @@ import { z } from 'zod';
  * Stage-3 features, each switchable per deployment (`GE_FEATURES`) so it can be tried in a sandbox
  * before it is on for everyone. `connector-actions` is opt-in: it writes outside Slack.
  */
-export const FeatureSchema = z.enum(['memory', 'analytics', 'jobs', 'diag', 'connector-actions']);
+export const FeatureSchema = z.enum([
+  'memory',
+  'analytics',
+  'jobs',
+  'diag',
+  'licences',
+  'connector-actions',
+]);
 export type Feature = z.infer<typeof FeatureSchema>;
 
-export const DEFAULT_FEATURES: readonly Feature[] = ['memory', 'analytics', 'jobs', 'diag'];
+export const DEFAULT_FEATURES: readonly Feature[] = [
+  'memory',
+  'analytics',
+  'jobs',
+  'diag',
+  'licences',
+];
 
 /**
  * `GE_FEATURES`: comma list. `default` expands to `DEFAULT_FEATURES`; `-name` removes one.

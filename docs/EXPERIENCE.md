@@ -452,3 +452,77 @@ With `connector-actions` on, admins allow-list connector tools (e.g. `@jira` →
 - Plans with connector actions can't be approved from the edit dialog: approve the card as shown.
 - If the connector times out or errors after the call left, the receipt says **may have run —
   check before trying again**, never "failed". The ledger records the action before it is sent.
+
+---
+
+## 11. Licence-aware onboarding (ADR-0003 §1)
+
+**Promise:** you find out you have no licence **before** a request fails, and getting one takes a
+single click.
+
+A Gemini Enterprise licence belongs to your company identity (the one you connect with), not to
+your Slack account. Gemini checks it for you as soon as you connect, and again before answering as
+you. It uses the `licences` feature, which is on by default and does nothing unless the lookup is
+set up.
+
+**After connecting.** If the identity you linked has no licence, Gemini DMs you right away:
+*"Connected — but you don't have a Gemini Enterprise licence yet. Open Home → Request a licence."*
+
+**When you ask** (private to you; nothing is read first):
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│ ✦ Gemini Enterprise licence needed        (only visible to you) │
+│ You're connected, but you don't have a Gemini Enterprise        │
+│ licence yet, so Gemini can't answer as you.                     │
+│ [ Request a licence ]  [ Answer with the Gemini service ]       │
+│ 🏢 The Gemini service uses shared sources only: Runbooks        │
+└───────────────────────────────────────────────────────────────┘
+```
+
+- *Answer with the Gemini service* appears only where the channel policy allows the service (same
+  rule as the connect prompt), never in Slack Connect conversations, and never for agents that bar
+  the service.
+- *Request a licence* appears only if your workspace takes requests in Slack and an admin hasn't
+  blocked you. Once you've asked, the card says *"You asked on 2026-10-06"* instead.
+- If Gemini can't tell (the lookup isn't set up, or you're not in the user store yet), it doesn't
+  guess: your request goes to Gemini Enterprise, which decides. A `403` from Gemini Enterprise
+  makes Gemini look again and show this card if you really have no licence. Otherwise you see the
+  usual error.
+
+**Admins' channel** (`GE_LICENCE_REQUESTS_CHANNEL`):
+
+```
+🎟️ Gemini Enterprise licence request
+@alex (alex@acme.com) asked on 2026-10-06.
+[ Approve and assign ]  [ Decline ]
+Approving assigns a licence to their verified, linked identity. Workspace admins and named approvers only.
+```
+
+- Only workspace admins/owners and the named approvers can decide, never the requester, and each
+  request is decided once. The card turns into *"✅ Licence assigned by @dana"*, and the requester
+  gets a DM.
+- With `GE_LICENCE_CONFIG` set, *Approve and assign* assigns the licence in Gemini Enterprise.
+  Without it, the button is *Approve*: the requester is told it's coming, and the admin assigns it
+  in the console.
+- One open request per person. After a decline (or an approval still waiting on the console), you
+  can't ask again for 7 days.
+
+**Everywhere else:**
+- **App Home** shows a licence line under *Connected as*, with *Request a licence* when that
+  applies.
+- **`/gemini diag`** adds `✅ Licence assigned` / `⚠️ no licence · requested …` / `🚫 blocked`.
+- **Admin insights** count `no-licence` denials and licence requests, without saying who.
+- An **automation that runs as you** while you're unlicensed is stopped and reported to you. It
+  never prompts the channel.
+
+## 12. Next (designed, not built): ADR-0003 §2–§5
+
+These are the identity decisions behind the next four items. Each will get its own section here
+before it is built.
+- **The agent pane as the main way in**, with trust levels for changes that only affect you.
+- **Proactive turns:** a daily brief that runs as you, and suggested answers in help channels that
+  run as the service and are shown privately to the person who asked.
+- **Delegated automations:** a grant per automation, at most 30 days, that you renew.
+- **Thread → FAQ:** stewards approve, a curator service account writes the document, and only public
+  channels can contribute.

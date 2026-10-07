@@ -9,6 +9,9 @@ commander skills. Read before changing anything:
   licensed service account, keyless), membership gate, channel policy.
 - `docs/ADR-0002-agents-connectors-and-skills.md` — how agents (`@alias`: chat agents, Deep
   Research, A2A), connectors and skills are invoked; agents answer, never write.
+- `docs/ADR-0003-identity-amendment-onboarding-delegation-proactive-knowledge.md` — licence
+  onboarding (built), and the identity rules for trust levels, proactive turns, delegation grants
+  and thread → FAQ (designed). Amends ADR-0001.
 - `docs/STATUS.md` — what is verified (fakes) vs. not yet run live.
 
 ## Boundaries

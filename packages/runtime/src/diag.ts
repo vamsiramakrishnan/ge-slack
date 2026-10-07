@@ -2,6 +2,7 @@ import { admitAgent, isUnattended, principalLabel, type Origin } from '@ge-slack
 import type { Orchestrator } from './orchestrator.js';
 import { mrkdwnEscape } from './compile.js';
 import { resolveGrounds } from './resolve.js';
+import { licenceSummary } from './licence.js';
 
 /**
  * `/gemini diag` (EXPERIENCE §10): run the real path as the invoker, in this channel, and report
@@ -44,6 +45,11 @@ export async function runDiagnostics(
   lines.push(
     `✅ *Identity*  ${principal.kind === 'user' ? 'as you' : 'as the Gemini service'} · ${principalLabel(principal)} (channel policy: ${policy.identity}${info?.isExtShared ? ', Slack Connect → service' : ''})`,
   );
+
+  if (principal.kind === 'user') {
+    const licence = await licenceSummary(orch, origin.teamId, origin.userId, { fresh: true });
+    if (licence) lines.push(licence.line);
+  }
 
   if (channel) {
     const member = await surface.isMember(channel, origin.userId);

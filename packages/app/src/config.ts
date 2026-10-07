@@ -104,6 +104,37 @@ const EnvSchema = z.object({
   /** Audience the scheduler mints tokens for; defaults to `${PUBLIC_BASE_URL}/cron/tick`. */
   GE_CRON_AUDIENCE: z.string().url().optional(),
   GE_TIME_ZONE: z.string().default('UTC'),
+  /**
+   * Licence-aware onboarding (EXPERIENCE §11, ADR-0003 §1). Lookups use an admin-plane identity:
+   * the runtime service account, or this one by impersonation. It needs
+   * `discoveryengine.userStores.listUserLicenses` (and `discoveryengine.userStores.batchUpdateUserLicenses`
+   * when GE_LICENCE_CONFIG is set) — never the GE-licensed service account's own grants.
+   */
+  GE_LICENCE_ADMIN_SERVICE_ACCOUNT: z
+    .string()
+    .regex(/^[^@\s]+@[^@\s]+\.iam\.gserviceaccount\.com$/)
+    .optional(),
+  GE_LICENCE_USER_STORE: z
+    .string()
+    .regex(/^[\w-]{1,128}$/)
+    .default('default_user_store'),
+  /** Which linked-identity field the user store keys people by. */
+  GE_LICENCE_PRINCIPAL: z.enum(['email', 'subject']).default('email'),
+  /** `projects/…/locations/<GE_LOCATION>/licenseConfigs/<id>`: approving a request assigns it. */
+  GE_LICENCE_CONFIG: z
+    .string()
+    .regex(/^projects\/[^/\s]+\/locations\/[a-z0-9-]+\/licenseConfigs\/[\w-]{1,128}$/)
+    .optional(),
+  /** Channel where licence requests are posted for approval (the bot must be a member). */
+  GE_LICENCE_REQUESTS_CHANNEL: z
+    .string()
+    .regex(/^[CG][A-Z0-9]+$/)
+    .optional(),
+  /** Slack user ids who may decide requests besides workspace admins/owners (comma separated). */
+  GE_LICENCE_APPROVERS: z
+    .string()
+    .regex(/^\s*(U[A-Z0-9]+\s*(,\s*U[A-Z0-9]+\s*)*)?$/)
+    .optional(),
   /** Stage-3 features: `default` (memory,analytics,jobs,diag), `+name`, `-name`. */
   GE_FEATURES: z.string().optional(),
   /** Build shown by /gemini diag; Cloud Run sets K_REVISION. */
@@ -143,6 +174,34 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new Error(
       'Set GE_SLACK_KMS_KEY + GE_SLACK_WRAPPED_KEYS (production) or GE_SLACK_VAULT_KEY (dev).',
     );
+  }
+  if (c.GE_LICENCE_CONFIG) {
+    const loc = c.GE_LICENCE_CONFIG.split('/')[3];
+    if (loc !== c.GE_LOCATION) {
+      throw new Error(
+        `GE_LICENCE_CONFIG is in ${loc}, not GE_LOCATION=${c.GE_LOCATION} (residency pin).`,
+      );
+    }
+    if (!c.GE_LICENCE_REQUESTS_CHANNEL) {
+      throw new Error(
+        'GE_LICENCE_CONFIG needs GE_LICENCE_REQUESTS_CHANNEL (approvals happen there).',
+      );
+    }
+    const project = c.GE_LICENCE_CONFIG.split('/')[1];
+    if (project !== c.GE_PROJECT && !/^\d+$/.test(project ?? '')) {
+      throw new Error(
+        `GE_LICENCE_CONFIG is in project ${project}, not GE_PROJECT=${c.GE_PROJECT}.`,
+      );
+    }
+    // Licence assignment never rides on the identity that answers service turns (ADR-0003 §1).
+    if (
+      !c.GE_LICENCE_ADMIN_SERVICE_ACCOUNT ||
+      c.GE_LICENCE_ADMIN_SERVICE_ACCOUNT === c.GE_SERVICE_ACCOUNT
+    ) {
+      throw new Error(
+        'GE_LICENCE_CONFIG needs its own GE_LICENCE_ADMIN_SERVICE_ACCOUNT (not GE_SERVICE_ACCOUNT).',
+      );
+    }
   }
   if (c.NODE_ENV === 'production') {
     if (c.GE_SLACK_VAULT_KEY) {

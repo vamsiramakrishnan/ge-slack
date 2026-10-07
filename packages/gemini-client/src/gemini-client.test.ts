@@ -8,6 +8,7 @@ import {
 } from './stream-assist.js';
 import { A2aClient, GeminiEnterpriseClient } from './a2a.js';
 import { ConnectorMcpClient } from './connector-mcp.js';
+import { LicenceDirectory } from './licences.js';
 import {
   a2aStreamUrl,
   discoveryEngineHost,
@@ -641,5 +642,190 @@ describe('ConnectorMcpClient', () => {
     m = 0;
     expect(await new ConnectorMcpClient(cfg, unauth).listTools(t, 'c')).toEqual([]);
     expect(t.invalidate).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('LicenceDirectory (userStores.userLicenses)', () => {
+  const tokens: TokenSource = { getAccessToken: async () => 'admin-token' };
+  const reply = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+
+  it('looks one principal up on the regional user store with an exact, quoted filter', async () => {
+    const fetchImpl = vi.fn(async () =>
+      reply({
+        userLicenses: [
+          { userPrincipal: 'ALEX@acme.com', licenseAssignmentState: 'NO_LICENSE_ATTEMPTED_LOGIN' },
+        ],
+      }),
+    );
+    const d = new LicenceDirectory(cfg, 'default_user_store', fetchImpl as unknown as typeof fetch);
+    expect(await d.lookup(tokens, 'alex@acme.com')).toEqual({
+      status: 'unlicensed',
+      principal: 'ALEX@acme.com',
+    });
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(
+      url.startsWith(
+        'https://discoveryengine.eu.rep.googleapis.com/v1alpha/projects/p1/locations/eu/userStores/default_user_store/userLicenses?',
+      ),
+    ).toBe(true);
+    expect(new URL(url).searchParams.get('filter')).toBe('user_principal = "alex@acme.com"');
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer admin-token');
+  });
+
+  it('maps states, never takes another person’s row, and fails to unknown', async () => {
+    const mk = (body: unknown, status = 200) =>
+      new LicenceDirectory(cfg, undefined, (async () => reply(body, status)) as typeof fetch);
+    expect(
+      await mk({
+        userLicenses: [{ userPrincipal: 'alex@acme.com', licenseAssignmentState: 'ASSIGNED' }],
+      }).lookup(tokens, 'alex@acme.com'),
+    ).toEqual({ status: 'assigned', principal: 'alex@acme.com' });
+    expect(
+      await mk({
+        userLicenses: [{ userPrincipal: 'alex@acme.com', licenseAssignmentState: 'BLOCKED' }],
+      }).lookup(tokens, 'alex@acme.com'),
+    ).toEqual({ status: 'blocked', principal: 'alex@acme.com' });
+    expect(
+      await mk({
+        userLicenses: [{ userPrincipal: 'maya@acme.com', licenseAssignmentState: 'ASSIGNED' }],
+      }).lookup(tokens, 'alex@acme.com'),
+    ).toEqual({ status: 'unknown', reason: 'not-found' });
+    expect(await mk({ error: 'nope' }, 403).lookup(tokens, 'alex@acme.com')).toEqual({
+      status: 'unknown',
+      reason: 'http_403',
+    });
+    const dead = new LicenceDirectory(cfg, undefined, (async () => {
+      throw new Error('down');
+    }) as typeof fetch);
+    expect(await dead.lookup(tokens, 'alex@acme.com')).toEqual({
+      status: 'unknown',
+      reason: 'network',
+    });
+    await expect(mk({}).lookup(tokens, 'a"\nb')).rejects.toThrow(/Invalid licence principal/);
+  });
+
+  it('assigns one principal to one validated licence config', async () => {
+    const fetchImpl = vi.fn(async () =>
+      reply({
+        name: 'projects/p1/locations/eu/userStores/default_user_store/operations/op-1',
+        done: true,
+        response: {
+          userLicenses: [{ userPrincipal: 'alex@acme.com', licenseAssignmentState: 'ASSIGNED' }],
+        },
+      }),
+    );
+    const d = new LicenceDirectory(cfg, undefined, fetchImpl as unknown as typeof fetch);
+    expect(await d.assign(tokens, 'alex@acme.com', 'not-a-config')).toEqual({
+      ok: false,
+      code: 'bad_config',
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(
+      await d.assign(tokens, 'alex@acme.com', 'projects/p1/locations/eu/licenseConfigs/std'),
+    ).toEqual({ ok: true });
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe(
+      'https://discoveryengine.eu.rep.googleapis.com/v1alpha/projects/p1/locations/eu/userStores/default_user_store:batchUpdateUserLicenses',
+    );
+    expect(JSON.parse(String(init.body))).toEqual({
+      inlineSource: {
+        userLicenses: [
+          {
+            userPrincipal: 'alex@acme.com',
+            licenseConfig: 'projects/p1/locations/eu/licenseConfigs/std',
+          },
+        ],
+        updateMask: 'licenseConfig',
+      },
+    });
+  });
+});
+
+describe('LicenceDirectory assignment operations', () => {
+  const tokens: TokenSource = { getAccessToken: async () => 't' };
+  const CONFIG = 'projects/p1/locations/eu/licenseConfigs/std';
+  const OP = 'projects/p1/locations/eu/userStores/default_user_store/operations/op-1';
+  const json = (b: unknown) => new Response(JSON.stringify(b));
+  const make = (replies: unknown[]) => {
+    const calls: string[] = [];
+    const f = (async (url: string) => {
+      calls.push(url);
+      return json(replies.shift());
+    }) as unknown as typeof fetch;
+    return { d: new LicenceDirectory(cfg, undefined, f, 0, 3, async () => {}), calls };
+  };
+
+  it('polls the operation until done and checks the person was updated', async () => {
+    const { d, calls } = make([
+      { name: OP, done: false },
+      { name: OP, done: false },
+      { name: OP, done: true, response: { userLicenses: [{ userPrincipal: 'alex@acme.com' }] } },
+    ]);
+    expect(await d.assign(tokens, 'alex@acme.com', CONFIG)).toEqual({ ok: true });
+    expect(calls.slice(1)).toEqual([
+      `https://discoveryengine.eu.rep.googleapis.com/v1alpha/${OP}`,
+      `https://discoveryengine.eu.rep.googleapis.com/v1alpha/${OP}`,
+    ]);
+  });
+
+  it('a per-user error, an operation error, or a missing row is a failure', async () => {
+    expect(
+      await make([{ name: OP, done: true, response: { errorSamples: [{ code: 9 }] } }]).d.assign(
+        tokens,
+        'alex@acme.com',
+        CONFIG,
+      ),
+    ).toEqual({ ok: false, code: 'user_9' });
+    expect(
+      await make([{ name: OP, done: true, error: { code: 7 } }]).d.assign(
+        tokens,
+        'alex@acme.com',
+        CONFIG,
+      ),
+    ).toEqual({ ok: false, code: 'op_7' });
+    expect(
+      await make([{ name: OP, done: true, response: { userLicenses: [] } }]).d.assign(
+        tokens,
+        'alex@acme.com',
+        CONFIG,
+      ),
+    ).toEqual({ ok: false, code: 'not_updated' });
+  });
+
+  it('still running after the wait is pending, and a foreign operation name is never fetched', async () => {
+    const running = make([{ name: OP, done: false }, { name: OP }, { name: OP }, { name: OP }]);
+    expect(await running.d.assign(tokens, 'alex@acme.com', CONFIG)).toEqual({
+      ok: false,
+      code: 'pending',
+      pending: true,
+    });
+    const evil = make([{ name: 'https://evil.example/x', done: false }]);
+    expect(await evil.d.assign(tokens, 'alex@acme.com', CONFIG)).toEqual({
+      ok: false,
+      code: 'bad_operation',
+    });
+    expect(evil.calls).toHaveLength(1);
+  });
+});
+
+describe('LicenceDirectory subject principals', () => {
+  it('compares IdP subjects exactly (case-sensitive)', async () => {
+    const d = new LicenceDirectory(
+      cfg,
+      undefined,
+      (async () =>
+        new Response(
+          JSON.stringify({
+            userLicenses: [{ userPrincipal: 'AbC', licenseAssignmentState: 'ASSIGNED' }],
+          }),
+        )) as typeof fetch,
+    );
+    const tokens: TokenSource = { getAccessToken: async () => 't' };
+    expect(await d.lookup(tokens, 'abc', 'subject')).toEqual({
+      status: 'unknown',
+      reason: 'not-found',
+    });
+    expect(await d.lookup(tokens, 'AbC', 'subject')).toMatchObject({ status: 'assigned' });
   });
 });

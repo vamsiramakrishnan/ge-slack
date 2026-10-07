@@ -8,11 +8,12 @@ import type {
   CapturedContext,
   CapturedMessage,
   ConversationInfo,
+  LicenceRequestView,
   ResolvedScope,
   SurfacePort,
 } from '@ge-slack/runtime';
 import { SlackApiError, must, slackErrorCode, type SlackApi } from './slack-api.js';
-import { provenanceFooter, markdownBlocks } from './blocks.js';
+import { provenanceFooter, markdownBlocks, licenceRequestBlocks } from './blocks.js';
 
 interface SearchHit {
   channel_id?: string;
@@ -115,10 +116,14 @@ export class SlackSurface implements SurfacePort {
     return v;
   }
 
-  async isMember(channel: string, userId: string): Promise<boolean> {
+  async isMember(
+    channel: string,
+    userId: string,
+    opts: { fresh?: boolean } = {},
+  ): Promise<boolean> {
     const key = `${channel}:${userId}`;
     const hit = this.memberCache.get(key);
-    if (hit && this.now() - hit.at < MEMBER_TTL_MS) return hit.ok;
+    if (!opts.fresh && hit && this.now() - hit.at < MEMBER_TTL_MS) return hit.ok;
     let ok = false;
     try {
       let cursor: string | undefined;
@@ -157,6 +162,24 @@ export class SlackSurface implements SurfacePort {
       text: href ? `${msg.text} <${href}|Open the thread>` : msg.text,
       unfurl_links: false,
     });
+  }
+
+  /** Post or update a licence request card in the admins' channel (EXPERIENCE §11). */
+  async licenceRequestCard(
+    channel: string,
+    view: LicenceRequestView,
+    ts?: string,
+  ): Promise<{ channel: string; ts: string }> {
+    const body = {
+      channel,
+      text: `Gemini Enterprise licence request from <@${view.requesterId}>`,
+      blocks: licenceRequestBlocks(view),
+      unfurl_links: false,
+    };
+    const r = ts
+      ? await must(this.writeApi, 'chat.update', { ...body, ts })
+      : await must(this.writeApi, 'chat.postMessage', body);
+    return { channel: String(r.channel ?? channel), ts: String(r.ts ?? ts ?? '') };
   }
 
   /** Workspace admins/owners (admin insights, ledger export). Fails closed. */

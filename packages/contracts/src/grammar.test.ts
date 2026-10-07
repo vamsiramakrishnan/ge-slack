@@ -185,15 +185,22 @@ describe('stage-3 control verbs', () => {
 
 describe('features', () => {
   it('parses GE_FEATURES with defaults, additions and removals; refuses typos', () => {
-    expect([...parseFeatures(undefined)].sort()).toEqual(['analytics', 'diag', 'jobs', 'memory']);
+    expect([...parseFeatures(undefined)].sort()).toEqual([
+      'analytics',
+      'diag',
+      'jobs',
+      'licences',
+      'memory',
+    ]);
     expect([...parseFeatures('default,connector-actions,-jobs')].sort()).toEqual([
       'analytics',
       'connector-actions',
       'diag',
+      'licences',
       'memory',
     ]);
     expect([...parseFeatures('memory')]).toEqual(['memory']);
-    expect([...parseFeatures('-memory')].sort()).toEqual(['analytics', 'diag', 'jobs']);
+    expect([...parseFeatures('-memory')].sort()).toEqual(['analytics', 'diag', 'jobs', 'licences']);
     expect(() => parseFeatures('memroy')).toThrow(/Unknown feature/);
   });
 });

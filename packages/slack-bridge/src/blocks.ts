@@ -16,6 +16,8 @@ import type {
   IdentityBadge,
   LandedView,
   LedgerEntry,
+  LicenceRequestView,
+  LicenceView,
   NoticeKind,
   PlanView,
 } from '@ge-slack/runtime';
@@ -479,6 +481,79 @@ export function connectBlocks(c: ConnectView): Block[] {
   return blocks;
 }
 
+/** No licence for the linked identity (EXPERIENCE §11). Private to the person. */
+export function licenceBlocks(l: LicenceView): Block[] {
+  const blocks: Block[] = [
+    { type: 'section', text: mrkdwn(`*✦ Gemini Enterprise licence needed*\n${esc(l.message)}`) },
+  ];
+  const actions: Block[] = [];
+  if (l.requestable && !l.requestedAt)
+    actions.push(button('Request a licence', ACTIONS.licenceRequest, 'request', 'primary'));
+  if (l.offerService && l.resumeId)
+    actions.push(button('Answer with the Gemini service', ACTIONS.useService, l.resumeId));
+  if (actions.length) blocks.push({ type: 'actions', elements: actions });
+  const notes: string[] = [];
+  if (l.requestedAt)
+    notes.push(
+      `📨 You asked on ${esc(l.requestedAt.slice(0, 10))}; you’ll get a DM when an admin decides.`,
+    );
+  else if (!l.requestable && l.status === 'unlicensed')
+    notes.push('Ask your Gemini Enterprise admin for a licence.');
+  if (l.offerService)
+    notes.push(
+      `🏢 The Gemini service uses shared sources only${l.serviceSources.length ? `: ${l.serviceSources.map(esc).join(' · ')}` : ''}.`,
+    );
+  for (const n of notes) blocks.push({ type: 'context', elements: [mrkdwn(n)] });
+  return blocks;
+}
+
+/** A licence request in the admins' channel: who asked, and Approve / Decline until decided. */
+export function licenceRequestBlocks(r: LicenceRequestView): Block[] {
+  const head =
+    `*🎟️ Gemini Enterprise licence request*\n<@${r.requesterId}> (${esc(r.email)}) asked on ` +
+    `${esc(r.at.slice(0, 10))}.`;
+  const blocks: Block[] = [{ type: 'section', text: mrkdwn(head) }];
+  if (r.status === 'open') {
+    const value = `${r.requesterId}:${r.requestId}`;
+    blocks.push({
+      type: 'actions',
+      elements: [
+        button(
+          r.assignOnApprove ? 'Approve and assign' : 'Approve',
+          ACTIONS.licenceApprove,
+          value,
+          'primary',
+        ),
+        button('Decline', ACTIONS.licenceDecline, value, 'danger'),
+      ],
+    });
+    blocks.push({
+      type: 'context',
+      elements: [
+        mrkdwn(
+          r.assignOnApprove
+            ? 'Approving assigns a licence to their verified, linked identity. Workspace admins and named approvers only.'
+            : 'Approving tells them it’s coming; assign the licence in the Gemini Enterprise console. Workspace admins and named approvers only.',
+        ),
+      ],
+    });
+  } else {
+    const what =
+      r.status === 'assigned'
+        ? '✅ Licence assigned'
+        : r.status === 'approved'
+          ? '✅ Approved — assign it in the Gemini Enterprise console'
+          : r.status === 'void'
+            ? '➖ Closed without a decision (the requester’s identity or access changed)'
+            : '✖️ Declined';
+    blocks.push({
+      type: 'context',
+      elements: [mrkdwn(`${what}${r.decidedBy ? ` by <@${r.decidedBy}>` : ''}.`)],
+    });
+  }
+  return blocks;
+}
+
 const NOTICE_ICON: Record<NoticeKind, string> = {
   info: 'ℹ️',
   warning: '⚠️',
@@ -686,6 +761,8 @@ export interface HomeData {
   insights?: string[];
   /** Your running background jobs (EXPERIENCE §10). */
   jobs?: Array<{ id: string; title: string; startedAt: string }>;
+  /** Your Gemini Enterprise licence (EXPERIENCE §11): one mrkdwn line, and whether to offer Request. */
+  licence?: { line: string; requestable: boolean };
 }
 
 export function homeView(d: HomeData): Record<string, unknown> {
@@ -718,6 +795,17 @@ export function homeView(d: HomeData): Record<string, unknown> {
         },
       ],
     });
+    if (d.licence) {
+      blocks.push({
+        type: 'section',
+        text: mrkdwn(d.licence.line),
+        ...(d.licence.requestable
+          ? {
+              accessory: button('Request a licence', ACTIONS.licenceRequest, 'home', 'primary'),
+            }
+          : {}),
+      });
+    }
   } else {
     blocks.push({
       type: 'section',

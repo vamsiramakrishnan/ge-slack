@@ -110,6 +110,49 @@ function fakeRes() {
 }
 
 describe('config', () => {
+  it('licence assignment is pinned to GE_LOCATION and needs an approvals channel', () => {
+    const env = (o: Record<string, string>) => ({ ...ENV, ...o }) as unknown as NodeJS.ProcessEnv;
+    expect(() =>
+      loadConfig(
+        env({
+          GE_LICENCE_CONFIG: 'projects/p1/locations/us/licenseConfigs/std',
+          GE_LICENCE_REQUESTS_CHANNEL: 'C0LIC',
+        }),
+      ),
+    ).toThrow(/residency/);
+    expect(() =>
+      loadConfig(env({ GE_LICENCE_CONFIG: 'projects/p1/locations/eu/licenseConfigs/std' })),
+    ).toThrow(/GE_LICENCE_REQUESTS_CHANNEL/);
+    expect(() => loadConfig(env({ GE_LICENCE_APPROVERS: 'U1,not-a-user' }))).toThrow();
+    // Assignment needs its own admin-plane SA, never the licensed service account (M3).
+    expect(() =>
+      loadConfig(
+        env({
+          GE_LICENCE_CONFIG: 'projects/p1/locations/eu/licenseConfigs/std',
+          GE_LICENCE_REQUESTS_CHANNEL: 'C0LIC',
+        }),
+      ),
+    ).toThrow(/GE_LICENCE_ADMIN_SERVICE_ACCOUNT/);
+    expect(() =>
+      loadConfig(
+        env({
+          GE_LICENCE_CONFIG: 'projects/other/locations/eu/licenseConfigs/std',
+          GE_LICENCE_ADMIN_SERVICE_ACCOUNT: 'lic-admin@p.iam.gserviceaccount.com',
+          GE_LICENCE_REQUESTS_CHANNEL: 'C0LIC',
+        }),
+      ),
+    ).toThrow(/GE_PROJECT/);
+    const ok = loadConfig(
+      env({
+        GE_LICENCE_CONFIG: 'projects/p1/locations/eu/licenseConfigs/std',
+        GE_LICENCE_ADMIN_SERVICE_ACCOUNT: 'lic-admin@p.iam.gserviceaccount.com',
+        GE_LICENCE_REQUESTS_CHANNEL: 'C0LIC',
+        GE_LICENCE_APPROVERS: 'U0A, U0B',
+      }),
+    );
+    expect(ok.features.has('licences')).toBe(true);
+  });
+
   it('fails fast without a residency pin, vault key, or WIF for OIDC', () => {
     expect(() => loadConfig({ ...ENV, GE_LOCATION: '' } as unknown as NodeJS.ProcessEnv)).toThrow(
       /GE_LOCATION/,

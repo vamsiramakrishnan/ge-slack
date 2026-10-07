@@ -10,6 +10,8 @@ import {
   markdownBlocks,
   planBlocks,
   citationElements,
+  licenceBlocks,
+  licenceRequestBlocks,
 } from './blocks.js';
 import type { SlackApi, SlackApiResponse } from './slack-api.js';
 
@@ -993,5 +995,60 @@ describe('job notifications (stage 3)', () => {
       unfurl_links: false,
       text: '✦ *Deep Research* finished. <https://acme.slack.com/archives/C1/p1700000000000100|Open the thread>',
     });
+  });
+});
+
+describe('licence onboarding blocks (EXPERIENCE §11)', () => {
+  const ids = (blocks: Array<Record<string, unknown>>) =>
+    blocks
+      .filter((b) => b.type === 'actions')
+      .flatMap((b) => (b.elements as Array<{ action_id: string }>).map((e) => e.action_id));
+
+  it('licence card: request and service buttons only when offered', () => {
+    const full = licenceBlocks({
+      status: 'unlicensed',
+      message: 'No licence <yet>',
+      requestable: true,
+      offerService: true,
+      serviceSources: ['Runbooks'],
+      resumeId: 'r1',
+    });
+    expect(ids(full)).toEqual(['ge_licence_request', 'ge_use_service']);
+    expect(JSON.stringify(full)).toContain('No licence &lt;yet&gt;');
+    const asked = licenceBlocks({
+      status: 'unlicensed',
+      message: 'x',
+      requestable: true,
+      requestedAt: '2026-10-06T10:00:00Z',
+      offerService: false,
+      serviceSources: [],
+    });
+    expect(ids(asked)).toEqual([]);
+    expect(JSON.stringify(asked)).toContain('You asked on 2026-10-06');
+  });
+
+  it('admin card: Approve/Decline while open, a final line once decided', () => {
+    const open = licenceRequestBlocks({
+      requestId: 'q1',
+      requesterId: 'U0ALEX',
+      email: 'a<b>@acme.com',
+      status: 'open',
+      at: '2026-10-06T10:00:00Z',
+      assignOnApprove: true,
+    });
+    expect(ids(open)).toEqual(['ge_licence_approve', 'ge_licence_decline']);
+    expect(JSON.stringify(open)).toContain('a&lt;b&gt;@acme.com');
+    expect(JSON.stringify(open)).toContain('U0ALEX:q1');
+    const done = licenceRequestBlocks({
+      requestId: 'q1',
+      requesterId: 'U0ALEX',
+      email: 'a@acme.com',
+      status: 'assigned',
+      at: '2026-10-06T10:00:00Z',
+      assignOnApprove: true,
+      decidedBy: 'U0ADMIN',
+    });
+    expect(ids(done)).toEqual([]);
+    expect(JSON.stringify(done)).toContain('Licence assigned');
   });
 });
