@@ -102,3 +102,15 @@ It must return that user's row. If `userPrincipal` isn't the email, set
 | With `GE_LICENCE_CONFIG`: **Approve and assign** | the user store shows the licence ASSIGNED; card "Licence assigned by @admin"; requester DM "You have a licence now"; their next request answers |
 | Remove a licence in the console, ask again within 6 h | the answer fails with 403, then the licence card (fresh lookup), not a bare error |
 | `/gemini diag` | a *Licence* line matching the user store |
+
+## 7. ADR-0003 features
+
+| Step | Expect |
+|---|---|
+| `/gemini automate "daily 9:00" summarize --as me --to #digest` | the card says what it may read and where it posts, and the date it expires; after *Create*, App Home shows "🔐 you until …" and *Renew (30 days)* in the ⋯ menu |
+| Leave #eng, then *Run now* | denied: "no longer a member of #eng"; nothing posted |
+| Reconnect as a different IdP account, then *Run now* | denied: "connected a different account" |
+| `+trust-levels`: tick *Replies in my Gemini DM*, then `draft "note to self"` in the Gemini DM | applied straight away, footer "auto-applied (your trust setting)"; a draft that mentions someone still shows a card |
+| `+brief`: App Home → *Set up daily brief* (one channel, a time 2 minutes ahead) | the brief arrives in your Gemini DM with no approval card; App Home lists "☀️ Daily brief" |
+| `+suggestions`: in a `user-preferred` channel with *Service may read* and *Suggest answers* ticked, post "How do I rotate the cache key?" and wait 10 min (one cron tick after) | only you see the suggestion in the thread; *Post as answer* replies as 🏢 with "approved"; another person never sees the buttons |
+| `+faq`: `/gemini ask how do I …? --as service` in a FAQ channel → *Save as FAQ* | the card in the stewards' channel shows the Q/A; the drafter can't publish; a steward's *Publish* creates the document (check it with `documents.get`, then ask a question that finds it); *Remove* deletes it |

@@ -23,7 +23,7 @@ against live Slack or a live Gemini Enterprise engine.**
 | Canvas *reading* | Implemented | `canvases.getContent` (markdown); falls back to file preview |
 | `canvas-edit` undo | Not reversible | Slack doesn't expose prior section content; shown as such |
 | Licence-aware onboarding (EXPERIENCE §11, ADR-0003 §1): user-store lookup, pre-turn card, 403 re-check, request → admin approve/assign, App Home + diag line, post-link DM | Implemented | unit-tested against a fake user store and recording Slack API; **`userLicenses.list` filter and `batchUpdateUserLicenses` not yet run live** |
-| ADR-0003 §2–§5 (assistant pane trust levels, proactive turns, delegation grants, thread → FAQ) | Designed | ADR only |
+| ADR-0003 §2–§5: delegation grants (default on), trust levels, daily brief, suggested answers, thread → FAQ | Implemented | unit-tested against fakes; **not run live**. The FAQ `documents.create` call and its search visibility are unverified (LIVE-TESTING §7) |
 | Agents (ADR-0002): `@agent` catalog, chat agents and Deep Research via `agentsSpec`, A2A proxy client, paused-agent continuations, connector-auth prompts, `actionDisabled`, `isSessionLess` removed | Implemented | unit-tested against scripted streams; **no live probe yet** (ADR-0002 § Live probes) |
 
 ## Security review (2026-10-05)

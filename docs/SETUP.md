@@ -80,6 +80,23 @@ account), the skills, the Slack app, and the bot deployment.
 - Turn the whole feature off with `GE_FEATURES=-licences`. If the lookup isn't set up, it does
   nothing: every request still goes to Gemini Enterprise, which enforces licences itself.
 
+### ADR-0003 features (`GE_FEATURES`)
+
+- `delegation` (default): run-as-me automations need a per-automation grant. Existing ones get 7
+  days to be renewed in App Home.
+- `+trust-levels`, `+brief`: both need `delegation`.
+- `+suggestions`: then tick *Suggest answers* in a channel's policy (App Home → Admin). The channel
+  must allow the Gemini service and let it read the channel.
+- `+faq`: needs all of these:
+  - `GE_FAQ_DATASTORE=projects/<p>/locations/<GE_LOCATION>/collections/default_collection/dataStores/<id>`
+    (a dedicated data store, and also add it to your `@` catalog so answers use it);
+  - `GE_FAQ_CURATOR_SERVICE_ACCOUNT`: its own SA with `roles/discoveryengine.editor` on that data
+    store only. The runtime SA needs `roles/iam.serviceAccountTokenCreator` on it;
+  - `GE_FAQ_STEWARDS_CHANNEL`: private and internal; invite the bot;
+  - `GE_FAQ_STEWARDS=U…,U…`;
+  - `GE_FAQ_CHANNELS=C…`: public channels;
+  - optionally `GE_FAQ_DATASTORE_TITLE`.
+
 ## 3. Skills
 
 Build and upload `skill/slack-command-planner` and `skill/slack-surface-commander`

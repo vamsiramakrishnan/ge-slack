@@ -516,13 +516,85 @@ Approving assigns a licence to their verified, linked identity. Workspace admins
 - An **automation that runs as you** while you're unlicensed is stopped and reported to you. It
   never prompts the channel.
 
-## 12. Next (designed, not built): ADR-0003 §2–§5
+## 12. Delegation, trust levels, daily brief, suggestions, FAQ (ADR-0003 §2–§5)
 
-These are the identity decisions behind the next four items. Each will get its own section here
-before it is built.
-- **The agent pane as the main way in**, with trust levels for changes that only affect you.
-- **Proactive turns:** a daily brief that runs as you, and suggested answers in help channels that
-  run as the service and are shown privately to the person who asked.
-- **Delegated automations:** a grant per automation, at most 30 days, that you renew.
-- **Thread → FAQ:** stewards approve, a curator service account writes the document, and only public
-  channels can contribute.
+Each is behind its own `GE_FEATURES` flag. Only `delegation` is on by default.
+
+### Automations that run as you (`delegation`, on by default)
+
+The confirm card says exactly what you're allowing:
+
+```
+*Creating this lets it run as you while you're away* — reading #eng and posting to #digest
+only, until 2026-11-06. Renew or revoke it in App Home.
+```
+
+- **What the grant covers:** one automation, the conversations on the card, and your current
+  linked account. It lasts 30 days at most.
+- **Every run checks** that the grant is still valid, that you're still connected as the same
+  person, that you're still in every channel it touches, and that you still have a licence. If
+  anything has changed, the run stops and tells you why.
+- **Expiry:** three days before a grant expires you get one DM. When it expires, the automation
+  pauses. **Renew (30 days)** is in the automation's ⋯ menu in App Home.
+- **Existing automations:** ones that ran as you under the old "run as me while I'm away"
+  checkbox get 7 days to be renewed. That checkbox is gone.
+
+### Apply without asking (`trust-levels`)
+
+App Home → *Apply without asking*: *Replies in my Gemini DM* and *Reminders to myself*.
+
+- With these ticked, a draft whose changes all stay with you applies straight away. The receipt
+  says *auto-applied (your trust setting)*.
+- Anything that mentions or reaches anyone else still shows the approval card.
+- Disconnecting clears these settings.
+
+### Daily brief (`brief`)
+
+App Home → **☀️ Set up daily brief**: pick up to 5 channels and a weekday time.
+
+- It's an automation that runs as you, covered by a grant like the ones above, and lands in your
+  DM with Gemini.
+- It reads the last 24 hours of the chosen channels, but only while you're still a member. It
+  never reads Slack Connect channels or DMs.
+- One brief per person.
+
+### Suggested answers (`suggestions` + the channel's *Suggest answers* policy)
+
+When nobody has replied to a question in a help channel after 10 minutes, the person who asked
+sees a private suggestion in the thread:
+
+```
+✦ Gemini suggests an answer — only you can see this · 🏢 Gemini service, shared sources only
+Run `cache rotate` (see the runbook) …
+[ Post as answer ]  [ Dismiss ]
+```
+
+- It runs as the Gemini service, using the channel's shared sources only, and only in channels
+  the service may read.
+- The person who asked is the only one who can post it, and only once. The receipt shows it was
+  approved by them.
+- No suggestion if a teammate has already answered, if the sources don't cover the question, or
+  in Slack Connect channels.
+- Limits: 20 suggestions per channel and 5 per person each day.
+
+### Thread → FAQ (`faq`)
+
+**Save as FAQ** appears on an answer in a FAQ channel if both of these hold:
+- it answered a question;
+- it ran as the Gemini service, or every source it cited is a Slack message.
+
+So nothing from anyone's personal sources can reach the shared data store.
+
+The draft goes to the stewards' channel showing the exact Q/A, with mentions removed:
+
+```
+📚 FAQ for Eng FAQ · drafted by @alex from #help-eng
+Q: How do I rotate the cache key?
+A: Run `cache rotate` …
+[ Publish ]  [ Reject ]
+```
+
+- Only stewards can publish, and each draft is published at most once.
+- Publishing writes one document to the FAQ data store, using the curator service account.
+- **Remove from Gemini Enterprise** deletes the document again.
+- The person who drafted it gets a DM with the outcome.
