@@ -3,6 +3,7 @@ import {
   SUGGEST_LIMITS,
   looksLikeQuestion,
   principalLabel,
+  principalBinding,
   type Automation,
   type Invocation,
   type Origin,
@@ -468,7 +469,10 @@ export async function postSuggestion(
     sources: s.sources,
     agentId: 'gemini-enterprise',
     contentHash: await contentHash(s.text),
+    // The asker approves the exact stored answer, not a claim that its source is current.
+    evidence: [],
     identity: resolved.identity,
+    principalBinding: await contentHash(principalBinding(resolved.principal)),
     dryRun: false,
     createdAt,
     expiresAt: createdAt + PLAN_TTL_MS,

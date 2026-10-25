@@ -3,16 +3,20 @@
  * the in-memory store. Values are JSON; secrets are sealed by the vault *before* they get here.
  */
 export interface KeyValueStore {
+  readonly durable?: boolean;
   get<T>(key: string): Promise<T | undefined>;
   set<T>(key: string, value: T, opts?: { ttlMs?: number }): Promise<void>;
   delete(key: string): Promise<void>;
   /** Keys + values under a prefix (bounded by the caller's key design). */
   list<T>(prefix: string): Promise<Array<{ key: string; value: T }>>;
+  /** Atomic create-if-absent. Required for write claims; callers must never emulate with get/set. */
+  create?<T>(key: string, value: T): Promise<boolean>;
   /** Atomically read-and-delete (one-time tokens such as OAuth `state`). */
   take<T>(key: string): Promise<T | undefined>;
 }
 
 export class MemoryStore implements KeyValueStore {
+  readonly durable = false;
   private readonly data = new Map<string, { value: unknown; expiresAt?: number }>();
 
   constructor(private readonly now: () => number = Date.now) {}
@@ -37,6 +41,13 @@ export class MemoryStore implements KeyValueStore {
       value: structuredClone(value),
       ...(opts.ttlMs !== undefined ? { expiresAt: this.now() + opts.ttlMs } : {}),
     });
+  }
+
+  async create<T>(key: string, value: T): Promise<boolean> {
+    // No await between the check and insertion: concurrent callers share one atomic map step.
+    if (this.live(key)) return false;
+    this.data.set(key, { value: structuredClone(value) });
+    return true;
   }
 
   async delete(key: string): Promise<void> {

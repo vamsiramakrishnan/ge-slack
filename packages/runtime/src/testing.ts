@@ -108,7 +108,7 @@ export class FakeSurface implements SurfacePort {
   }
   async capture(
     scope: ResolvedScope,
-    opts: { search?: string; actionToken?: string } = {},
+    opts: Partial<Parameters<SurfacePort['capture']>[1]> = {},
   ): Promise<CapturedContext> {
     if (scope.kind === 'search') {
       this.searches.push({

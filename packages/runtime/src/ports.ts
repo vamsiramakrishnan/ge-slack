@@ -1,5 +1,6 @@
 import type {
   AgentEntry,
+  CaptureCoverage,
   ConnectorEntry,
   AwaitingReason,
   ActuationRequest,
@@ -49,7 +50,10 @@ export interface CapturedContext {
   threadTs?: string;
   messages: CapturedMessage[];
   canvas?: { id: string; title: string; markdown: string };
-  /** Hit the capture budget; older content was not read. */
+  coverage?: CaptureCoverage;
+  /** Turn-local source-bound continuation handle, never a native Slack cursor. */
+  continuation?: string;
+  /** Hit the capture budget; content was omitted. */
   truncated: boolean;
 }
 
@@ -76,7 +80,7 @@ export interface ConversationInfo {
 
 /** Slack-side operations. Implemented by `@ge-slack/slack-bridge` — the only Slack API caller. */
 export interface SurfacePort {
-  conversationInfo(channel: string): Promise<ConversationInfo>;
+  conversationInfo(channel: string, opts?: { fresh?: boolean }): Promise<ConversationInfo>;
   /** Is this human a member of the conversation? (Bot membership is never authority.) */
   isMember(channel: string, userId: string, opts?: { fresh?: boolean }): Promise<boolean>;
   capture(
@@ -84,6 +88,8 @@ export interface SurfacePort {
     opts: {
       from: string[];
       maxMessages: number;
+      /** Native opaque continuation supplied only by the admitted runtime read workspace. */
+      cursor?: string;
       search?: string;
       /** Slack's per-event `action_token`, required for Real-time Search with a bot token. */
       actionToken?: string;

@@ -1,3 +1,4 @@
+import { ActuationKindSchema } from '@ge-slack/contracts';
 import type {
   ChannelNote,
   AgentHandle,
@@ -15,6 +16,7 @@ import type {
 import type { KeyValueStore } from '@ge-slack/identity';
 import type { CompiledEffect } from './compile.js';
 import type { ResolvedScope } from './ports.js';
+import type { SourceReceipt } from './evidence.js';
 
 export const PLAN_TTL_MS = 30 * 60_000;
 export const RESUME_TTL_MS = 10 * 60_000;
@@ -32,8 +34,12 @@ export interface PendingPlan {
   sources: SourceRef[];
   agentId: string;
   contentHash: string;
+  /** Bounded digests of the source context, never message bodies or saved approvals. */
+  evidence?: SourceReceipt[];
   /** Principal that drafted the content (`user:…` / `service:…`). Approval must match it. */
   identity: string;
+  /** SHA-256 of the immutable subject/provider binding, separate from the display label. */
+  principalBinding?: string;
   /** Channel notes that grounded the drafting turn (shown on the card, kept in the ledger). */
   memoryNotes?: number;
   /** changeIds the approver unticked (review findings). */
@@ -68,6 +74,7 @@ export interface StoredAnswer {
   text: string;
   provenance?: AnswerProvenance;
   principal: string;
+  principalBinding?: string;
   /** False for answers that must stay private (e.g. workspace search). */
   shareable?: boolean;
   /** What was asked (the request text), for *Save as FAQ* (ADR-0003 §5). */
@@ -97,6 +104,8 @@ export interface AgentContinuation {
   reason: AwaitingReason;
   handle: AgentHandle;
   identity: string;
+  /** SHA-256 of the immutable subject/provider binding, separate from the display label. */
+  principalBinding?: string;
   expiresAt: number;
 }
 
@@ -131,22 +140,78 @@ export interface LedgerEntry {
   undoneBy?: string;
 }
 
+/** Content-free durable claim. It correlates one approved intent, never an approval to replay. */
+export interface EffectClaim {
+  version: 1;
+  direction: 'apply' | 'undo';
+  teamId: string;
+  changeId: string;
+  invokerId: string;
+  principalHash: string;
+  intentHash: string;
+  kind: ActuationKind;
+  startedAt: string;
+}
+
+/** Slack response hooks and modal triggers are bearer capabilities, never durable context. */
+function storedOrigin(origin: Origin): Origin {
+  const copy = { ...origin };
+  delete copy.responseUrl;
+  delete copy.triggerId;
+  return copy;
+}
+function storedRecord<T extends { origin: Origin }>(value: T | undefined): T | undefined {
+  return value ? { ...value, origin: storedOrigin(value.origin) } : undefined;
+}
+
 export class RuntimeStores {
   /** The shared store (feature modules keep their own keys under their own prefixes). */
   constructor(readonly kv: KeyValueStore) {}
 
-  savePlan(p: PendingPlan, now = p.createdAt) {
-    // TTL counts from now so a re-save (e.g. a finding toggle) never extends the plan's life.
-    return this.kv.set(`plan/${p.id}`, p, {
-      ttlMs: Math.max(1, p.expiresAt - Math.min(now, p.expiresAt - 1)),
+  /** A claim has no TTL: uncertainty must not become replay permission when a lease expires. */
+  async claimEffect(claim: EffectClaim): Promise<boolean> {
+    if (!this.kv.create) throw new Error('The configured store cannot atomically claim writes.');
+    if (
+      claim.version !== 1 ||
+      !['apply', 'undo'].includes(claim.direction) ||
+      !ActuationKindSchema.safeParse(claim.kind).success ||
+      claim.startedAt.length > 64 ||
+      !Number.isFinite(Date.parse(claim.startedAt)) ||
+      !/^sha256:[a-f0-9]{64}$/.test(claim.principalHash) ||
+      !/^sha256:[a-f0-9]{64}$/.test(claim.intentHash) ||
+      [claim.teamId, claim.changeId, claim.invokerId].some((part) => !part || part.length > 200)
+    )
+      throw new Error('Invalid bounded write-claim metadata.');
+    const key = `${claim.direction === 'undo' ? 'undo-claim' : 'effect-claim'}/${encodeURIComponent(claim.teamId)}/${encodeURIComponent(claim.changeId)}`;
+    return this.kv.create(key, {
+      version: 1,
+      direction: claim.direction,
+      teamId: claim.teamId,
+      changeId: claim.changeId,
+      invokerId: claim.invokerId,
+      principalHash: claim.principalHash,
+      intentHash: claim.intentHash,
+      kind: claim.kind,
+      startedAt: claim.startedAt,
     });
   }
+
+  savePlan(p: PendingPlan, now = p.createdAt) {
+    // TTL counts from now so a re-save (e.g. a finding toggle) never extends the plan's life.
+    return this.kv.set(
+      `plan/${p.id}`,
+      { ...p, origin: storedOrigin(p.origin) },
+      {
+        ttlMs: Math.max(1, p.expiresAt - Math.min(now, p.expiresAt - 1)),
+      },
+    );
+  }
   getPlan(id: string) {
-    return this.kv.get<PendingPlan>(`plan/${id}`);
+    return this.kv.get<PendingPlan>(`plan/${id}`).then(storedRecord);
   }
   /** Approve/cancel consume the plan exactly once (no double-apply on double-click). */
   takePlan(id: string) {
-    return this.kv.take<PendingPlan>(`plan/${id}`);
+    return this.kv.take<PendingPlan>(`plan/${id}`).then(storedRecord);
   }
 
   saveAutomationDraft(a: PendingAutomation) {
@@ -160,13 +225,21 @@ export class RuntimeStores {
   }
 
   saveResume(id: string, value: { origin: Origin; invocation: Invocation }) {
-    return this.kv.set(`resume/${id}`, value, { ttlMs: RESUME_TTL_MS });
+    return this.kv.set(
+      `resume/${id}`,
+      { ...value, origin: storedOrigin(value.origin) },
+      { ttlMs: RESUME_TTL_MS },
+    );
   }
   getResume(id: string) {
-    return this.kv.get<{ origin: Origin; invocation: Invocation }>(`resume/${id}`);
+    return this.kv
+      .get<{ origin: Origin; invocation: Invocation }>(`resume/${id}`)
+      .then(storedRecord);
   }
   takeResume(id: string) {
-    return this.kv.take<{ origin: Origin; invocation: Invocation }>(`resume/${id}`);
+    return this.kv
+      .take<{ origin: Origin; invocation: Invocation }>(`resume/${id}`)
+      .then(storedRecord);
   }
 
   /** One key per note, so concurrent `remember`s never overwrite each other. */
@@ -183,20 +256,28 @@ export class RuntimeStores {
   }
 
   saveContinuation(c: AgentContinuation, now: number) {
-    return this.kv.set(`agent/${c.id}`, c, { ttlMs: Math.max(1, c.expiresAt - now) });
+    return this.kv.set(
+      `agent/${c.id}`,
+      { ...c, origin: storedOrigin(c.origin) },
+      { ttlMs: Math.max(1, c.expiresAt - now) },
+    );
   }
   getContinuation(id: string) {
-    return this.kv.get<AgentContinuation>(`agent/${id}`);
+    return this.kv.get<AgentContinuation>(`agent/${id}`).then(storedRecord);
   }
   takeContinuation(id: string) {
-    return this.kv.take<AgentContinuation>(`agent/${id}`);
+    return this.kv.take<AgentContinuation>(`agent/${id}`).then(storedRecord);
   }
 
   saveAnswer(a: StoredAnswer) {
-    return this.kv.set(`answer/${a.turnId}`, a, { ttlMs: ANSWER_TTL_MS });
+    return this.kv.set(
+      `answer/${a.turnId}`,
+      { ...a, origin: storedOrigin(a.origin) },
+      { ttlMs: ANSWER_TTL_MS },
+    );
   }
   getAnswer(id: string) {
-    return this.kv.get<StoredAnswer>(`answer/${id}`);
+    return this.kv.get<StoredAnswer>(`answer/${id}`).then(storedRecord);
   }
 
   /** Team-wide ledger since a time (admin export). */

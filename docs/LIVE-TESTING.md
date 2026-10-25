@@ -114,3 +114,30 @@ It must return that user's row. If `userPrincipal` isn't the email, set
 | `+brief`: App Home → *Set up daily brief* (one channel, a time 2 minutes ahead) | the brief arrives in your Gemini DM with no approval card; App Home lists "☀️ Daily brief" |
 | `+suggestions`: in a `user-preferred` channel with *Service may read* and *Suggest answers* ticked, post "How do I rotate the cache key?" and wait 10 min (one cron tick after) | only you see the suggestion in the thread; *Post as answer* replies as 🏢 with "approved"; another person never sees the buttons |
 | `+faq`: `/gemini ask how do I …? --as service` in a FAQ channel → *Save as FAQ* | the card in the stewards' channel shows the Q/A; the drafter can't publish; a steward's *Publish* creates the document (check it with `documents.get`, then ask a question that finds it); *Remove* deletes it |
+
+
+## Bounded evidence and durable attempts acceptance
+
+Run against the exact PR commit in a test workspace with disposable objects. Record build SHA,
+workspace/app configuration, principal mode, store adapter and scope. Do not substitute simulator
+results for native evidence.
+
+- Read a thread beyond one message/page/byte budget. Follow continuation and check native ordering,
+  no skipped records, explicit coverage, author/time constraints and revoked access mid-read.
+- Read a 100 KiB canvas and confirm the 60 KiB model projection cannot authorize replacement; test
+  a fully visible small canvas with a concurrent source edit before approval.
+- Revoke membership, change Slack Connect/identity policy and re-link a same-email different
+  IdP subject while a plan/continuation is pending. Each affected dispatch must refuse.
+- With two app instances sharing Firestore, race approval, undo, a cron slot, duplicate keyword and
+  duplicate reaction deliveries. Check one attempted dispatch per stable identity. A deliberate
+  distinct reaction and owner **Run now** must remain independent.
+- Fail the receipt checkpoint after a successful disposable write. Verify the landed receipt and
+  inverse remain honest, further writes stop and the claimed effect is not automatically retried.
+- Change a FAQ source to private/external after drafting, and revoke steward authority during the
+  durable claim wait. No publication/card disclosure/removal may bypass its current authority.
+- Confirm native canvas/List/streaming fallbacks and rate-limit responses. No backend transient
+  failure or unknown receipt may silently retry a mutation.
+
+Retain observed native IDs and build-specific reports in the operator's acceptance record without
+source text or credentials. The repository currently supplies deterministic regression/adapter
+checks; live Slack/Gemini and Firestore acceptance has not been run by this increment.

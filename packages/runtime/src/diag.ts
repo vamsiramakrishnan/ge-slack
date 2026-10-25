@@ -3,6 +3,9 @@ import type { Orchestrator } from './orchestrator.js';
 import { mrkdwnEscape } from './compile.js';
 import { resolveGrounds } from './resolve.js';
 import { licenceSummary } from './licence.js';
+import { EVIDENCE_LIMITS } from './evidence.js';
+import { PROMPT_LIMITS } from './prompt.js';
+import { MAX_CAPTURE_BYTES, MAX_CAPTURE_PAGES } from '@ge-slack/contracts';
 
 /**
  * `/gemini diag` (EXPERIENCE §10): run the real path as the invoker, in this channel, and report
@@ -23,7 +26,7 @@ export async function runDiagnostics(
   const channel = origin.channelId;
   const [policy, info] = await Promise.all([
     config.channelPolicy(origin.teamId, channel ?? ''),
-    channel ? surface.conversationInfo(channel) : Promise.resolve(undefined),
+    channel ? surface.conversationInfo(channel, { fresh: true }) : Promise.resolve(undefined),
   ]);
 
   const resolved = await identity.resolve({
@@ -52,7 +55,7 @@ export async function runDiagnostics(
   }
 
   if (channel) {
-    const member = await surface.isMember(channel, origin.userId);
+    const member = await surface.isMember(channel, origin.userId, { fresh: true });
     if (!member) {
       // Nothing about this channel (sources, connectors) is checked for a non-member.
       lines.push(
@@ -66,6 +69,14 @@ export async function runDiagnostics(
       return lines;
     }
   }
+
+  lines.push(
+    `*Evidence*  capture ≤${MAX_CAPTURE_BYTES / 1024} KiB / ${MAX_CAPTURE_PAGES} pages; retained ≤${EVIDENCE_LIMITS.bytes / 1024} KiB; prompt context ≤${PROMPT_LIMITS.context / 1024} KiB; ${EVIDENCE_LIMITS.reads} additional reads per task`,
+  );
+  const kv = orch.deps.stores.kv;
+  lines.push(
+    `*Effect claims*  atomic create ${kv.create ? 'available' : 'unavailable — writes refused'}; persistence ${kv.durable === true ? 'durable adapter' : kv.durable === false ? 'memory only' : 'not declared'}. Claims do not establish exactly-once delivery.`,
+  );
 
   const [catalog, unit, agents] = await Promise.all([
     config.catalog(origin.teamId),

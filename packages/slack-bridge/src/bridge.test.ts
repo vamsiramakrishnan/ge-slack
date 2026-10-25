@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { fromSlackMetadata, type ActuationRequest } from '@ge-slack/contracts';
+import {
+  fromSlackMetadata,
+  MAX_CAPTURE_BYTES,
+  MAX_CAPTURE_PAGES,
+  type ActuationRequest,
+} from '@ge-slack/contracts';
 import { SlackSurface } from './surface.js';
 import { SlackTurnSink, defaultResponsePoster } from './sink.js';
 import {
@@ -144,6 +149,210 @@ describe('SlackSurface reads', () => {
       String(1_800_000_000 - 86_400),
     );
     expect(ctx.label).toBe('#eng · last 1d');
+  });
+});
+
+describe('SlackSurface bounded capture coverage', () => {
+  const channel = { kind: 'channel' as const, channel: 'C1', sinceMs: 86_400_000 };
+  const info = () => ({ ok: true, channel: { name: 'eng' } });
+  it('continues within a native page without skipping messages beyond the budget', async () => {
+    const api = new FakeSlack({
+      'conversations.history': () => ({
+        ok: true,
+        messages: [
+          { ts: '3.0', text: 'third' },
+          { ts: '2.0', text: 'second' },
+          { ts: '1.0', text: 'first' },
+        ],
+      }),
+      'conversations.info': info,
+    });
+    const surface = new SlackSurface(api, { teamId: 'T1', domain: 'acme' });
+    const first = await surface.capture(channel, { from: [], maxMessages: 2 });
+    expect(first.messages.map((message) => message.ts)).toEqual(['2.0', '3.0']);
+    expect(first.coverage).toMatchObject({
+      complete: false,
+      reason: 'message_limit',
+      order: 'newest_first',
+    });
+    const second = await surface.capture(channel, {
+      from: [],
+      maxMessages: 2,
+      cursor: first.coverage!.nextCursor,
+    });
+    expect(second.messages.map((message) => message.ts)).toEqual(['1.0']);
+    expect(second.coverage?.complete).toBe(true);
+  });
+  it('reports a repeated native cursor and bounds empty-page traversal', async () => {
+    const repeated = new FakeSlack({
+      'conversations.replies': () => ({
+        ok: true,
+        messages: [],
+        response_metadata: { next_cursor: 'same' },
+      }),
+      'conversations.info': info,
+    });
+    const cyclic = await new SlackSurface(repeated, { teamId: 'T1', domain: 'acme' }).capture(
+      { kind: 'thread', channel: 'C1', ts: '1.0' },
+      { from: [], maxMessages: 10 },
+    );
+    expect(cyclic.coverage).toMatchObject({
+      complete: false,
+      reason: 'cursor_cycle',
+      order: 'oldest_first',
+      pages: 2,
+    });
+    let sequence = 0;
+    const empty = new FakeSlack({
+      'conversations.history': () => ({
+        ok: true,
+        messages: [],
+        response_metadata: { next_cursor: String(++sequence) },
+      }),
+      'conversations.info': info,
+    });
+    const bounded = await new SlackSurface(empty, { teamId: 'T1', domain: 'acme' }).capture(
+      channel,
+      { from: [], maxMessages: 10 },
+    );
+    expect(bounded.coverage).toMatchObject({
+      complete: false,
+      reason: 'page_limit',
+      pages: MAX_CAPTURE_PAGES,
+    });
+    expect(sequence).toBe(MAX_CAPTURE_PAGES);
+  });
+  it('keeps has_more without a usable native cursor explicitly partial', async () => {
+    const api = new FakeSlack({
+      'conversations.history': () => ({
+        ok: true,
+        messages: [{ ts: '1.0', text: 'partial' }],
+        has_more: true,
+      }),
+      'conversations.info': info,
+    });
+    const context = await new SlackSurface(api, { teamId: 'T1', domain: 'acme' }).capture(channel, {
+      from: [],
+      maxMessages: 10,
+    });
+    expect(context.coverage).toMatchObject({ complete: false, reason: 'page_limit' });
+    expect(context.coverage?.nextCursor).toBeUndefined();
+  });
+  it('bounds multibyte messages and large canvas markdown by encoded JSON bytes', async () => {
+    const body = '😀\n"'.repeat(100_000);
+    const api = new FakeSlack({
+      'conversations.history': () => ({ ok: true, messages: [{ ts: '1.0', text: body }] }),
+      'conversations.info': info,
+      'canvases.getContent': () => ({ ok: true, content: body }),
+      'files.info': () => ({ ok: true, file: { title: 'Large canvas' } }),
+    });
+    const surface = new SlackSurface(api, { teamId: 'T1', domain: 'acme' });
+    for (const scope of [channel, { kind: 'canvas' as const, id: 'F1' }]) {
+      const context = await surface.capture(scope, { from: [], maxMessages: 200 });
+      expect(new TextEncoder().encode(JSON.stringify(context)).byteLength).toBeLessThanOrEqual(
+        MAX_CAPTURE_BYTES,
+      );
+      expect(context.coverage).toMatchObject({ complete: false, reason: 'byte_limit' });
+      expect(context.coverage!.omittedBytes).toBeGreaterThan(0);
+    }
+  });
+  it('never substitutes a neighboring message for an exact timestamp', async () => {
+    const api = new FakeSlack({
+      'conversations.replies': () => ({ ok: true, messages: [] }),
+      'conversations.history': () => ({ ok: true, messages: [{ ts: '0.9', text: 'neighbor' }] }),
+      'conversations.info': info,
+    });
+    const context = await new SlackSurface(api, { teamId: 'T1', domain: 'acme' }).capture(
+      { kind: 'message', channel: 'C1', ts: '1.0' },
+      { from: [], maxMessages: 10 },
+    );
+    expect(context.messages).toEqual([]);
+  });
+  it('honors the search count limit and labels canvas previews incomplete', async () => {
+    const api = new FakeSlack({
+      'assistant.search.context': () => ({
+        ok: true,
+        results: {
+          messages: [
+            { channel_id: 'C1', message_ts: '1.0', content: 'one' },
+            { channel_id: 'C1', message_ts: '2.0', content: 'two' },
+          ],
+        },
+      }),
+      'conversations.info': info,
+      'canvases.getContent': () => ({ ok: false, error: 'unsupported' }),
+      'files.info': () => ({ ok: true, file: { title: 'Preview', preview: 'partial body' } }),
+    });
+    const surface = new SlackSurface(api, { teamId: 'T1', domain: 'acme' });
+    const found = await surface.capture(
+      { kind: 'search', channel: 'C1', sinceMs: 86_400_000, query: 'test' },
+      { from: [], maxMessages: 1, actionToken: 'memory-only' },
+    );
+    expect(found.messages).toHaveLength(1);
+    expect(found.coverage).toMatchObject({
+      complete: false,
+      reason: 'message_limit',
+      order: 'ranked',
+    });
+    const canvas = await surface.capture(
+      { kind: 'canvas', id: 'F1' },
+      { from: [], maxMessages: 1 },
+    );
+    expect(canvas.coverage).toMatchObject({ complete: false, reason: 'preview_only' });
+    expect(canvas.truncated).toBe(true);
+  });
+  it('does not treat a ranked result set without a cursor as exhaustive workspace evidence', async () => {
+    const api = new FakeSlack({
+      'assistant.search.context': () => ({
+        ok: true,
+        results: { messages: [{ channel_id: 'C1', message_ts: '1.0', content: 'top result' }] },
+      }),
+      'conversations.info': info,
+    });
+    const context = await new SlackSurface(api, { teamId: 'T1', domain: 'acme' }).capture(
+      { kind: 'search', channel: 'C1', sinceMs: 86_400_000, query: 'test' },
+      { from: [], maxMessages: 20, actionToken: 'memory-only' },
+    );
+    expect(context.coverage).toMatchObject({
+      complete: false,
+      reason: 'ranked_results',
+      order: 'ranked',
+    });
+    expect(context.truncated).toBe(true);
+  });
+  it('rechecks public search-hit visibility after cached metadata becomes private or shared', async () => {
+    let state: Record<string, unknown> = { name: 'eng' };
+    const api = new FakeSlack({
+      'conversations.info': () => ({ ok: true, channel: state }),
+      'assistant.search.context': () => ({
+        ok: true,
+        results: {
+          messages: [{ channel_id: 'C1', message_ts: '1.0', content: 'formerly public' }],
+        },
+      }),
+    });
+    const surface = new SlackSurface(api, { teamId: 'T1', domain: 'acme' });
+    await surface.conversationInfo('C1');
+    for (const flags of [{ is_private: true }, { is_ext_shared: true }, { is_mpim: true }]) {
+      state = { name: 'eng', ...flags };
+      const found = await surface.capture(
+        { kind: 'search', channel: 'C1', sinceMs: 86_400_000, query: 'test' },
+        { from: [], maxMessages: 10, actionToken: 'memory-only' },
+      );
+      expect(found.messages).toEqual([]);
+    }
+    expect(api.calls.filter((call) => call.method === 'conversations.info')).toHaveLength(4);
+  });
+  it('refuses invalid count and continuation inputs before native capture', async () => {
+    const api = new FakeSlack();
+    const surface = new SlackSurface(api, { teamId: 'T1', domain: 'acme' });
+    await expect(surface.capture(channel, { from: [], maxMessages: 0 })).rejects.toThrow(
+      'positive',
+    );
+    await expect(
+      surface.capture(channel, { from: [], maxMessages: 1, cursor: 'forged' }),
+    ).rejects.toThrow('continuation');
+    expect(api.calls).toEqual([]);
   });
 });
 

@@ -12,6 +12,7 @@ interface FirestoreLike {
     doc(id: string): {
       get(): Promise<{ exists: boolean; data(): Record<string, unknown> | undefined }>;
       set(v: Record<string, unknown>): Promise<unknown>;
+      create(v: Record<string, unknown>): Promise<unknown>;
       delete(): Promise<unknown>;
     };
     where(
@@ -37,6 +38,7 @@ interface FirestoreLike {
 }
 
 export class FirestoreStore implements KeyValueStore {
+  readonly durable = true;
   private constructor(
     private readonly db: FirestoreLike,
     private readonly collection: string,
@@ -79,6 +81,18 @@ export class FirestoreStore implements KeyValueStore {
       v: JSON.stringify(value),
       ...(opts.ttlMs !== undefined ? { expiresAt: new Date(this.now() + opts.ttlMs) } : {}),
     });
+  }
+
+  /** Firestore's exists:false precondition is atomic across Cloud Run instances. */
+  async create<T>(key: string, value: T): Promise<boolean> {
+    try {
+      await this.ref(key).create({ k: key, v: JSON.stringify(value) });
+      return true;
+    } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code;
+      if (code === 6 || code === '6' || code === 'already-exists') return false;
+      throw error;
+    }
   }
 
   async delete(key: string): Promise<void> {

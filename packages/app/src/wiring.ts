@@ -219,6 +219,7 @@ export function register(app: App, c: Container, botUserId: () => string | undef
           ts: event.item.ts,
           emoji: event.reaction.replace(/::skin-tone-\d$/, ''),
           userId: event.user,
+          eventTs: event.event_ts,
         },
         c.unattendedSink,
       );

@@ -605,3 +605,20 @@ A: Run `cache rotate` …
 - Publishing writes one document to the FAQ data store, using the curator service account.
 - **Remove from Gemini Enterprise** deletes the document again.
 - The person who drafted it gets a DM with the outcome.
+
+
+## 13. Bounded evidence and verified attempts
+
+Capture task labels say partial coverage without implying newest-first replies. Model prompts
+state native traversal direction and known omissions. The commander can follow a source-bound
+continuation within the requested thread/time/author scope. Missing content stays unknown.
+
+A changed source, lost membership or changed principal prevents a source-derived plan from
+applying and asks for a new plan. A partial canvas cannot authorize replacement. Exact stored
+answer sharing remains an explicit snapshot action.
+
+Every effect/undo has a durable attempt claim when the store supports atomic creation. Known
+landed receipts remain visible when a final checkpoint fails. Uncertain effects require inspection
+and stop subsequent writes. Diagnostics reports capture/prompt limits and store support; it does
+not expose source bodies or claim payloads. Existing plan/approval/landed cards and identity
+footers remain the interaction model. See [precise boundaries](BOUNDED-EVIDENCE-AND-EFFECTS.md).
