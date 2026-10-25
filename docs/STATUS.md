@@ -26,6 +26,18 @@ against live Slack or a live Gemini Enterprise engine.**
 | ADR-0003 §2–§5: delegation grants (default on), trust levels, daily brief, suggested answers, thread → FAQ | Implemented | unit-tested against fakes; **not run live**. The FAQ `documents.create` call and its search visibility are unverified (LIVE-TESTING §7) |
 | Agents (ADR-0002): `@agent` catalog, chat agents and Deep Research via `agentsSpec`, A2A proxy client, paused-agent continuations, connector-auth prompts, `actionDisabled`, `isSessionLess` removed | Implemented | unit-tested against scripted streams; **no live probe yet** (ADR-0002 § Live probes) |
 
+## Verified execution increment — October 25, 2026
+
+The ge-msft reliability lessons now apply to Slack: bounded native capture and serialized prompt
+windows, source-bound continuation, captured-window freshness receipts, model-visible canvas
+proof, immutable principal pins, fresh dispatch/undo authority, durable effect/trigger attempts and
+FAQ publication safeguards. See [implemented behavior and material limits](BOUNDED-EVIDENCE-AND-EFFECTS.md).
+
+Adversarial regressions cover changed sources, same-email re-linking, revoked membership/policy,
+competing workers, receipt/checkpoint failures, cursor cycles, exact-message fallback and partial
+canvas replacement. Native Slack, Firestore and Gemini acceptance is still pending. These claims
+do not establish exactly-once delivery or a general task-resume engine.
+
 ## Security review (2026-10-05)
 
 A `security-reviewer` pass found no criticals; all high findings and most mediums are fixed, each

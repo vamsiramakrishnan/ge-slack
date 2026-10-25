@@ -1,5 +1,9 @@
 import {
   toSlackMetadata,
+  MAX_CAPTURE_BYTES,
+  MAX_CAPTURE_MESSAGES,
+  MAX_CAPTURE_PAGES,
+  type CaptureCoverage,
   type ActuationRequest,
   type ActuationResult,
   type Inverse,
@@ -67,6 +71,148 @@ export interface SlackSurfaceOptions {
 const MEMBER_TTL_MS = 2 * 60_000;
 const INFO_TTL_MS = 5 * 60_000;
 
+const encoder = new TextEncoder();
+const byteLength = (value: string): number => encoder.encode(value).byteLength;
+function bytePrefix(value: string, limit: number): string {
+  const bytes = encoder.encode(value);
+  return bytes.byteLength <= limit
+    ? value
+    : new TextDecoder().decode(bytes.subarray(0, Math.max(0, limit)), { stream: true });
+}
+/** Binary-search encoded JSON size; escape-heavy content must not cause quadratic clipping. */
+function fitText(value: string, byteBudget: number, fits: (candidate: string) => boolean): string {
+  const bounded = bytePrefix(value, byteBudget);
+  if (fits(bounded)) return bounded;
+  let low = 0;
+  let high = bounded.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (fits(bounded.slice(0, middle))) low = middle;
+    else high = middle - 1;
+  }
+  const prefix = bounded.slice(0, low);
+  // Never split a surrogate pair at the final boundary.
+  return /[\uD800-\uDBFF]$/.test(prefix) ? prefix.slice(0, -1) : prefix;
+}
+interface ReadCursor {
+  cursor?: string;
+  offset: number;
+}
+const CURSOR_PREFIX = 'ge_capture_v1:';
+function encodeReadCursor(cursor: string | undefined, offset = 0): string {
+  if (cursor && cursor.length > 4096) throw new Error('Source continuation exceeds its budget.');
+  return CURSOR_PREFIX + Buffer.from(JSON.stringify({ cursor, offset })).toString('base64url');
+}
+function decodeReadCursor(cursor: string | undefined): ReadCursor {
+  if (!cursor) return { offset: 0 };
+  if (cursor.length > 8192 || !cursor.startsWith(CURSOR_PREFIX))
+    throw new Error('Invalid source continuation. Start a fresh read.');
+  try {
+    const value: unknown = JSON.parse(
+      Buffer.from(cursor.slice(CURSOR_PREFIX.length), 'base64url').toString(),
+    );
+    if (!value || typeof value !== 'object') throw new Error();
+    const parsed = value as { cursor?: unknown; offset?: unknown };
+    if (
+      (parsed.cursor !== undefined &&
+        (typeof parsed.cursor !== 'string' || parsed.cursor.length > 4096)) ||
+      !Number.isSafeInteger(parsed.offset) ||
+      Number(parsed.offset) < 0
+    )
+      throw new Error();
+    return {
+      ...(typeof parsed.cursor === 'string' ? { cursor: parsed.cursor } : {}),
+      offset: Number(parsed.offset),
+    };
+  } catch {
+    throw new Error('Invalid source continuation. Start a fresh read.');
+  }
+}
+function emptyCoverage(order: CaptureCoverage['order']): CaptureCoverage {
+  return {
+    complete: true,
+    order,
+    pages: 0,
+    capturedMessages: 0,
+    capturedBytes: 0,
+    omittedMessages: 0,
+    omittedBytes: 0,
+  };
+}
+/** Bound the actual serialized source data, including message metadata and canvas text. */
+function boundedContext(ctx: CapturedContext): CapturedContext {
+  const coverage = { ...(ctx.coverage ?? emptyCoverage('single')) };
+  const out: CapturedContext = {
+    label: bytePrefix(ctx.label, 1024),
+    messages: [],
+    truncated: ctx.truncated,
+    ...(ctx.channel ? { channel: bytePrefix(ctx.channel, 128) } : {}),
+    ...(ctx.threadTs ? { threadTs: bytePrefix(ctx.threadTs, 128) } : {}),
+  };
+  // Reserve space for the fixed coverage envelope itself.
+  const budget = MAX_CAPTURE_BYTES - 12 * 1024;
+  let used = byteLength(JSON.stringify(out));
+  for (const message of ctx.messages) {
+    const entry: CapturedMessage = {
+      ts: bytePrefix(message.ts, 128),
+      text: message.text,
+      ...(message.user ? { user: bytePrefix(message.user, 128) } : {}),
+      ...(message.author ? { author: bytePrefix(message.author, 512) } : {}),
+      ...(message.channel ? { channel: bytePrefix(message.channel, 128) } : {}),
+      ...(message.threadTs ? { threadTs: bytePrefix(message.threadTs, 128) } : {}),
+      ...(message.permalink ? { permalink: bytePrefix(message.permalink, 2048) } : {}),
+      ...(message.replyCount !== undefined ? { replyCount: message.replyCount } : {}),
+      ...(message.fromApp ? { fromApp: true } : {}),
+    };
+    const fullBytes = byteLength(entry.text);
+    const metadata = byteLength(JSON.stringify({ ...entry, text: '' }));
+    const remaining = Math.max(0, budget - used - metadata - 1);
+    // JSON escaping may expand text, so shrink against encoded JSON, not JS character counts.
+    entry.text = fitText(
+      entry.text,
+      remaining,
+      (text) => byteLength(JSON.stringify({ ...entry, text })) + used + 1 <= budget,
+    );
+    if (byteLength(JSON.stringify(entry)) + used + 1 > budget) {
+      coverage.omittedMessages += 1;
+      coverage.omittedBytes += fullBytes;
+      coverage.reason = 'byte_limit';
+      coverage.complete = false;
+      continue;
+    }
+    if (byteLength(entry.text) < fullBytes) {
+      coverage.omittedBytes += fullBytes - byteLength(entry.text);
+      coverage.reason = 'byte_limit';
+      coverage.complete = false;
+    }
+    out.messages.push(entry);
+    used += byteLength(JSON.stringify(entry)) + 1;
+  }
+  if (ctx.canvas) {
+    const canvas = {
+      id: bytePrefix(ctx.canvas.id, 128),
+      title: bytePrefix(ctx.canvas.title, 512),
+      markdown: '',
+    };
+    const remaining = Math.max(0, budget - used - byteLength(JSON.stringify(canvas)) - 12);
+    canvas.markdown = fitText(
+      ctx.canvas.markdown,
+      remaining,
+      (markdown) => byteLength(JSON.stringify({ ...canvas, markdown })) + used + 12 <= budget,
+    );
+    coverage.omittedBytes += byteLength(ctx.canvas.markdown) - byteLength(canvas.markdown);
+    if (canvas.markdown !== ctx.canvas.markdown) {
+      coverage.reason = 'byte_limit';
+      coverage.complete = false;
+    }
+    out.canvas = canvas;
+  }
+  coverage.capturedMessages = out.messages.length;
+  coverage.capturedBytes = byteLength(JSON.stringify(out));
+  out.truncated ||= !coverage.complete;
+  return { ...out, coverage };
+}
+
 /**
  * SurfacePort over the Slack Web API — the only place the bot reads or mutates Slack.
  * Reads are bounded; writes carry `ge_provenance` metadata and return a host inverse.
@@ -106,9 +252,12 @@ export class SlackSurface implements SurfacePort {
     }
   }
 
-  async conversationInfo(channel: string): Promise<ConversationInfo> {
+  async conversationInfo(
+    channel: string,
+    opts: { fresh?: boolean } = {},
+  ): Promise<ConversationInfo> {
     const hit = this.infoCache.get(channel);
-    if (hit && this.now() - hit.at < INFO_TTL_MS) return hit.v;
+    if (!opts.fresh && hit && this.now() - hit.at < INFO_TTL_MS) return hit.v;
     const r = await must(this.api, 'conversations.info', { channel });
     const c = r.channel as Record<string, unknown>;
     const v: ConversationInfo = {
@@ -379,7 +528,33 @@ export class SlackSurface implements SurfacePort {
 
   async capture(
     scope: ResolvedScope,
-    opts: { from: string[]; maxMessages: number; search?: string; actionToken?: string },
+    opts: {
+      from: string[];
+      maxMessages: number;
+      search?: string;
+      actionToken?: string;
+      cursor?: string;
+    },
+  ): Promise<CapturedContext> {
+    if (!Number.isFinite(opts.maxMessages) || Math.floor(opts.maxMessages) < 1)
+      throw new Error('A capture requires a positive message budget.');
+    return boundedContext(
+      await this.captureNative(scope, {
+        ...opts,
+        maxMessages: Math.min(MAX_CAPTURE_MESSAGES, Math.floor(opts.maxMessages)),
+      }),
+    );
+  }
+
+  private async captureNative(
+    scope: ResolvedScope,
+    opts: {
+      from: string[];
+      maxMessages: number;
+      search?: string;
+      actionToken?: string;
+      cursor?: string;
+    },
   ): Promise<CapturedContext> {
     const filter = (ms: CapturedMessage[]) =>
       ms.filter(
@@ -393,9 +568,12 @@ export class SlackSurface implements SurfacePort {
         return { label: 'no conversation', messages: [], truncated: false };
       case 'search': {
         if (opts.actionToken) {
-          const found = await this.search(scope.query, opts.actionToken, opts.from).catch(
-            () => undefined,
-          );
+          const found = await this.search(
+            scope.query,
+            opts.actionToken,
+            opts.from,
+            opts.maxMessages,
+          ).catch(() => undefined);
           if (found) return found;
         }
         // No action token (slash commands) or search unavailable: keyword filter of this channel.
@@ -410,10 +588,11 @@ export class SlackSurface implements SurfacePort {
       }
       case 'thread':
       case 'message': {
-        const { messages, truncated } = await this.page(
+        const { messages, truncated, coverage } = await this.page(
           'conversations.replies',
           { channel: scope.channel, ts: scope.ts },
           opts.maxMessages,
+          opts.cursor,
         );
         const msgs =
           scope.kind === 'message' ? messages.filter((m) => m.ts === scope.ts) : messages;
@@ -425,7 +604,9 @@ export class SlackSurface implements SurfacePort {
             inclusive: true,
             limit: 1,
           });
-          msgs.push(...((r.messages as SlackMessage[]) ?? []));
+          msgs.push(
+            ...((r.messages as SlackMessage[]) ?? []).filter((message) => message.ts === scope.ts),
+          );
         }
         const info = await this.conversationInfo(scope.channel);
         return {
@@ -440,16 +621,18 @@ export class SlackSurface implements SurfacePort {
             ),
           ),
           truncated,
+          coverage,
         };
       }
       case 'channel':
       case 'dm': {
         const oldest =
           scope.kind === 'channel' ? String((this.now() - scope.sinceMs) / 1000) : undefined;
-        const { messages, truncated } = await this.page(
+        const { messages, truncated, coverage } = await this.page(
           'conversations.history',
           { channel: scope.channel, ...(oldest ? { oldest } : {}) },
           opts.maxMessages,
+          opts.cursor,
         );
         const info = await this.conversationInfo(scope.channel);
         const days =
@@ -460,6 +643,7 @@ export class SlackSurface implements SurfacePort {
           channel: scope.channel,
           messages: filter(await this.toCaptured(scope.channel, messages.reverse())),
           truncated,
+          coverage,
         };
       }
       case 'canvas': {
@@ -487,7 +671,13 @@ export class SlackSurface implements SurfacePort {
                 ? content.content
                 : (f.plain_text ?? f.preview ?? ''),
           },
-          truncated: typeof content?.content !== 'string' && !(f.plain_text ?? f.preview),
+          truncated: typeof content?.content !== 'string',
+          coverage: {
+            ...emptyCoverage('single'),
+            pages: 1,
+            complete: typeof content?.content === 'string',
+            ...(typeof content?.content !== 'string' ? { reason: 'preview_only' as const } : {}),
+          },
         };
       }
     }
@@ -647,6 +837,7 @@ export class SlackSurface implements SurfacePort {
     query: string,
     actionToken: string,
     from: string[],
+    maxMessages: number,
   ): Promise<CapturedContext> {
     const r = await must(this.api, 'assistant.search.context', {
       query: query.slice(0, 500),
@@ -654,15 +845,19 @@ export class SlackSurface implements SurfacePort {
       channel_types: ['public_channel'],
       content_types: ['messages'],
       include_bots: false,
-      limit: 20,
+      limit: Math.min(20, maxMessages),
       sort: 'score',
     });
-    const raw = (r.results as { messages?: SearchHit[] } | undefined)?.messages ?? [];
+    const all = (r.results as { messages?: SearchHit[] } | undefined)?.messages ?? [];
+    const raw = all.slice(0, Math.min(20, maxMessages));
     // Trust but verify: keep only hits from public, non-DM conversations (L2).
     const publicChannel = new Map<string, boolean>();
     for (const c of new Set(raw.map((m) => m.channel_id).filter((c): c is string => Boolean(c)))) {
-      const info = await this.conversationInfo(c).catch(() => undefined);
-      publicChannel.set(c, Boolean(info && !info.isPrivate && !info.isIm));
+      const info = await this.conversationInfo(c, { fresh: true }).catch(() => undefined);
+      publicChannel.set(
+        c,
+        Boolean(info && !info.isPrivate && !info.isIm && !info.isMpim && !info.isExtShared),
+      );
     }
     const results = raw.filter((m) => m.channel_id && publicChannel.get(m.channel_id));
     const names = new Map<string, string>();
@@ -689,7 +884,17 @@ export class SlackSurface implements SurfacePort {
     return {
       label: `Slack search “${query.slice(0, 60)}” · ${messages.length} result${messages.length === 1 ? '' : 's'} (public channels)`,
       messages,
-      truncated: Boolean(r.response_metadata?.next_cursor),
+      // Ranked search results never certify exhaustive workspace coverage.
+      truncated: true,
+      coverage: {
+        ...emptyCoverage('ranked'),
+        pages: 1,
+        complete: false,
+        omittedMessages: Math.max(0, all.length - raw.length),
+        ...(r.response_metadata?.next_cursor || all.length > raw.length
+          ? { reason: 'message_limit' as const }
+          : { reason: 'ranked_results' as const }),
+      },
     };
   }
 
@@ -697,20 +902,67 @@ export class SlackSurface implements SurfacePort {
     method: string,
     args: Record<string, unknown>,
     max: number,
-  ): Promise<{ messages: SlackMessage[]; truncated: boolean }> {
+    continuation?: string,
+  ): Promise<{ messages: SlackMessage[]; truncated: boolean; coverage: CaptureCoverage }> {
     const out: SlackMessage[] = [];
-    let cursor: string | undefined;
-    for (;;) {
+    const initial = decodeReadCursor(continuation);
+    let cursor = initial.cursor;
+    let offset = initial.offset;
+    let bytes = 0;
+    const visited = new Set<string>();
+    const coverage = emptyCoverage(
+      method === 'conversations.replies' ? 'oldest_first' : 'newest_first',
+    );
+    for (let page = 0; page < MAX_CAPTURE_PAGES; page++) {
+      const key = cursor ?? '';
+      if (visited.has(key)) {
+        coverage.complete = false;
+        coverage.reason = 'cursor_cycle';
+        return { messages: out, truncated: true, coverage };
+      }
+      visited.add(key);
       const r = await must(this.api, method, {
         ...args,
-        limit: Math.min(200, max - out.length),
+        // A stable page size lets an in-page continuation revisit omitted records accurately.
+        limit: MAX_CAPTURE_MESSAGES,
         ...(cursor ? { cursor } : {}),
       });
-      out.push(...((r.messages as SlackMessage[]) ?? []));
-      cursor = r.response_metadata?.next_cursor || undefined;
-      if (!cursor || out.length >= max)
-        return { messages: out.slice(0, max), truncated: Boolean(cursor) };
+      coverage.pages++;
+      const messages = (r.messages as SlackMessage[]) ?? [];
+      const next = r.response_metadata?.next_cursor || undefined;
+      for (let index = offset; index < messages.length; index++) {
+        const message = messages[index]!;
+        const size = byteLength(JSON.stringify(message));
+        if (out.length >= max || (out.length > 0 && bytes + size > MAX_CAPTURE_BYTES - 16 * 1024)) {
+          coverage.complete = false;
+          coverage.reason = out.length >= max ? 'message_limit' : 'byte_limit';
+          coverage.omittedMessages += messages.length - index;
+          coverage.nextCursor = encodeReadCursor(cursor, index);
+          return { messages: out, truncated: true, coverage };
+        }
+        out.push(message);
+        bytes += size;
+      }
+      offset = 0;
+      if (!next) {
+        if (r.has_more === true) {
+          coverage.complete = false;
+          coverage.reason = 'page_limit';
+        }
+        return { messages: out, truncated: !coverage.complete, coverage };
+      }
+      if (out.length >= max || bytes >= MAX_CAPTURE_BYTES - 16 * 1024) {
+        coverage.complete = false;
+        coverage.reason = out.length >= max ? 'message_limit' : 'byte_limit';
+        coverage.nextCursor = encodeReadCursor(next);
+        return { messages: out, truncated: true, coverage };
+      }
+      cursor = next;
     }
+    coverage.complete = false;
+    coverage.reason = 'page_limit';
+    if (cursor) coverage.nextCursor = encodeReadCursor(cursor);
+    return { messages: out, truncated: true, coverage };
   }
 
   // ------------------------------------------------------------------ writes

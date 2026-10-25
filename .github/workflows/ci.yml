@@ -29,6 +29,11 @@ jobs:
       - run: bun run typecheck
       - run: bun run test
       - run: bun run test:skills
+      - name: Skill archives match current sources
+        run: |
+          skill/build_zip.sh slack-command-planner
+          skill/build_zip.sh slack-surface-commander
+          python3 skill/validate_bundles.py
       - run: bun run lint
       - name: Slack manifest matches the wiring
         run: bun run manifest:check

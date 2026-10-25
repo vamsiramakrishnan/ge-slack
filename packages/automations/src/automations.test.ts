@@ -248,6 +248,7 @@ describe('AutomationEngine', () => {
       ts: '1700000000.000100',
       emoji: 'memo',
       userId: 'U0MAYA',
+      eventTs: '1700000001.000100',
     };
     expect(await w.engine.onReaction(w.orch, ev, w.sinkFor)).toBe(1);
     expect(await w.engine.onReaction(w.orch, ev, w.sinkFor)).toBe(0);

@@ -53,7 +53,13 @@ export type CmdEffect =
     };
 
 export type CmdLine =
-  | { verb: 'read'; target: 'thread' | 'channel' | MessageRef; sinceText?: string; line: string }
+  | {
+      verb: 'read';
+      target: 'thread' | 'channel' | 'next' | MessageRef;
+      sinceText?: string;
+      cursor?: string;
+      line: string;
+    }
   | { verb: 'search'; query: string; line: string }
   | { verb: 'done'; line: string }
   | { verb: 'help'; line: string }
@@ -247,8 +253,20 @@ export function parseStatement(line: string, toks: Tok[]): CmdLine {
       const a = positional[0];
       if (!a)
         return err(
-          'read needs a target: read thread | read channel [since=24h] | read <permalink>',
+          'read needs a target: read thread | read channel [since=24h] | read <permalink> | read next cursor=<handle>',
         );
+      const cursor = prop(args, 'cursor');
+      if (a.kind === 'word' && a.text === 'next') {
+        if (
+          !cursor ||
+          !/^p_[a-f0-9]{32}$/.test(cursor) ||
+          positional.length !== 1 ||
+          prop(args, 'since')
+        )
+          return err('read next requires one source-bound cursor handle from the current context');
+        return { verb: 'read', target: 'next', cursor, line };
+      }
+      if (cursor) return err('cursor is valid only with read next');
       if (a.kind === 'word' && (a.text === 'thread' || a.text === 'channel')) {
         const since = prop(args, 'since');
         return { verb: 'read', target: a.text, ...(since ? { sinceText: since } : {}), line };
@@ -480,7 +498,7 @@ export function renderCmdSignature(kinds: readonly ActuationKind[]): string {
       'act <connector>.<tool> "what this does, in one line" """{json arguments}"""   (only the tools listed under connector tools)',
   };
   return [
-    'reads:   read thread | read channel [since=24h] | read <permalink> | search "query"',
+    'reads:   read thread | read channel [since=24h] | read <permalink> | read next cursor=<handle> | search "query"',
     ...kinds.map((k) => `effect:  ${usage[k]}`),
     'control: done | help',
   ].join('\n');

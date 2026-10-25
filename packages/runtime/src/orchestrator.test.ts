@@ -2461,3 +2461,555 @@ describe('ADR-0003: security review fixes', () => {
     expect(s.surface.suggestions).toHaveLength(0);
   });
 });
+
+describe('durable write boundary (simulated host)', () => {
+  const program = '```cmd\nreply "Durable generated reply"\ndone\n```';
+  async function prepared() {
+    const ctx = setup([program]);
+    const draft = await run(ctx.orch, 'draft a reply');
+    const planId = draft.last<PlanView>('plan')!.planId;
+    const pending = (await ctx.orch.deps.stores.getPlan(planId))!;
+    return { ...ctx, planId, pending };
+  }
+  const approval = { approval: 'human' as const, approvedBy: 'U0ALEX' };
+  const badge = { kind: 'user' as const, label: 'alex@acme.com' };
+
+  it('claims once across competing orchestrators and restart without storing write text', async () => {
+    const ctx = await prepared();
+    const second = new Orchestrator(ctx.orch.deps);
+    await Promise.all([
+      ctx.orch.apply(ctx.pending, ctx.pending.identity, badge, new RecordingSink(), approval),
+      second.apply(ctx.pending, ctx.pending.identity, badge, new RecordingSink(), approval),
+    ]);
+    expect(ctx.surface.actuated).toHaveLength(1);
+    const claim = JSON.stringify(await ctx.kv.list('effect-claim/'));
+    expect(claim).not.toContain('Durable generated reply');
+    expect(claim).not.toContain('alex@acme.com');
+    expect(claim).not.toContain('approval');
+    const restarted = new Orchestrator(ctx.orch.deps);
+    await restarted.apply(ctx.pending, ctx.pending.identity, badge, new RecordingSink(), approval);
+    expect(ctx.surface.actuated).toHaveLength(1);
+  });
+
+  it('does not replay a legacy receipt that predates durable claim keys', async () => {
+    const ctx = await prepared();
+    const effect = ctx.pending.effects[0]!;
+    await ctx.orch.deps.stores.record({
+      changeId: effect.changeId,
+      teamId: 'T1',
+      invokerId: 'U0ALEX',
+      approval: 'human',
+      approvedBy: 'U0ALEX',
+      kind: effect.params.kind,
+      label: effect.label,
+      outcome: 'applied',
+      principal: ctx.pending.identity,
+      at: NOW.toISOString(),
+    });
+    await ctx.orch.apply(ctx.pending, ctx.pending.identity, badge, new RecordingSink(), approval);
+    expect(ctx.surface.actuated).toHaveLength(0);
+    expect(await ctx.orch.deps.stores.getEntry('T1', effect.changeId)).toMatchObject({
+      outcome: 'applied',
+      at: NOW.toISOString(),
+    });
+  });
+
+  it('persists uncertainty before Slack dispatch and retains it after a timeout', async () => {
+    const ctx = await prepared();
+    const original = ctx.surface.actuate.bind(ctx.surface);
+    const effect = ctx.pending.effects[0]!;
+    const dispatch = vi.spyOn(ctx.surface, 'actuate').mockImplementation(async (req) => {
+      expect(await ctx.orch.deps.stores.getEntry('T1', effect.changeId)).toMatchObject({
+        outcome: 'uncertain',
+      });
+      await original(req);
+      throw new Error('response lost after host write');
+    });
+    const sink = new RecordingSink();
+    await ctx.orch.approve(ctx.planId, 'U0ALEX', sink);
+    expect(sink.last<LandedView>('landed')?.results[0]?.outcome).toBe('uncertain');
+    await new Orchestrator(ctx.orch.deps).apply(
+      ctx.pending,
+      ctx.pending.identity,
+      badge,
+      new RecordingSink(),
+      approval,
+    );
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['changeId', 'kind'] as const)(
+    'discards unrelated target/undo authority from a mismatched %s receipt',
+    async (mismatch) => {
+      const ctx = await prepared();
+      vi.spyOn(ctx.surface, 'actuate').mockImplementation(async (req) => ({
+        changeId: mismatch === 'changeId' ? 'unrelated-effect' : req.changeId,
+        kind: mismatch === 'kind' ? 'post' : req.params.kind,
+        outcome: 'applied',
+        provenancePersisted: true,
+        location: {
+          channel: 'C0OTHER',
+          ts: '1700000000.123456',
+          permalink: 'https://acme.slack.com/archives/C0OTHER/p1700000000123456',
+        },
+        inverse: { op: 'delete-message', channel: 'C0OTHER', ts: '1700000000.123456' },
+      }));
+      const sink = new RecordingSink();
+      await ctx.orch.approve(ctx.planId, 'U0ALEX', sink);
+      const changeId = ctx.pending.effects[0]!.changeId;
+      const result = sink.last<LandedView>('landed')!.results[0]!;
+      expect(result).toMatchObject({
+        changeId,
+        kind: 'reply',
+        outcome: 'uncertain',
+        undoable: false,
+        error: expect.stringContaining('receipt did not match'),
+      });
+      expect(result.permalink).toBeUndefined();
+      const ledger = await ctx.orch.deps.stores.getEntry('T1', changeId);
+      expect(ledger?.outcome).toBe('uncertain');
+      expect(ledger?.inverse).toBeUndefined();
+      expect(ledger?.location).toBeUndefined();
+      await ctx.orch.undo('T1', changeId, 'U0ALEX', new RecordingSink());
+      expect(ctx.surface.undone).toHaveLength(0);
+    },
+  );
+
+  it('keeps a landed receipt when its final checkpoint fails and refuses replay', async () => {
+    const ctx = await prepared();
+    const record = ctx.orch.deps.stores.record.bind(ctx.orch.deps.stores);
+    vi.spyOn(ctx.orch.deps.stores, 'record').mockImplementation(async (entry) => {
+      if (entry.outcome === 'applied') throw new Error('checkpoint unavailable');
+      await record(entry);
+    });
+    const sink = new RecordingSink();
+    await ctx.orch.approve(ctx.planId, 'U0ALEX', sink);
+    expect(sink.last<LandedView>('landed')?.results[0]).toMatchObject({
+      outcome: 'applied',
+      undoable: false,
+      note: expect.stringContaining('Audit checkpoint pending'),
+      permalink: expect.stringContaining('slack.com'),
+    });
+    expect(
+      await ctx.orch.deps.stores.getEntry('T1', ctx.pending.effects[0]!.changeId),
+    ).toMatchObject({ outcome: 'uncertain' });
+    await new Orchestrator(ctx.orch.deps).apply(
+      ctx.pending,
+      ctx.pending.identity,
+      badge,
+      new RecordingSink(),
+      approval,
+    );
+    expect(ctx.surface.actuated).toHaveLength(1);
+  });
+
+  it('does not dispatch when atomic claims are unsupported or persistence fails', async () => {
+    for (const unsupported of [false, true]) {
+      const ctx = await prepared();
+      if (unsupported) Object.defineProperty(ctx.kv, 'create', { value: undefined });
+      else vi.spyOn(ctx.kv, 'create').mockRejectedValue(new Error('storage unavailable'));
+      const sink = new RecordingSink();
+      await ctx.orch.approve(ctx.planId, 'U0ALEX', sink);
+      expect(ctx.surface.actuated).toHaveLength(0);
+      expect(sink.last<LandedView>('landed')?.results[0]).toMatchObject({
+        outcome: 'rejected',
+        error: expect.stringContaining('nothing was dispatched'),
+      });
+    }
+  });
+
+  it('does not dispatch when its preflight ledger cannot be persisted', async () => {
+    const ctx = await prepared();
+    vi.spyOn(ctx.orch.deps.stores, 'record').mockRejectedValue(new Error('ledger unavailable'));
+    const sink = new RecordingSink();
+    await ctx.orch.approve(ctx.planId, 'U0ALEX', sink);
+    expect(ctx.surface.actuated).toHaveLength(0);
+    expect(await ctx.kv.list('effect-claim/')).toHaveLength(1);
+  });
+
+  it('bypasses cached membership at approval', async () => {
+    const ctx = await prepared();
+    const member = vi
+      .spyOn(ctx.surface, 'isMember')
+      .mockImplementation(async (_channel, _user, opts?: { fresh?: boolean }) => !opts?.fresh);
+    const sink = new RecordingSink();
+    await ctx.orch.approve(ctx.planId, 'U0ALEX', sink);
+    expect(member).toHaveBeenCalledWith('C0ENG', 'U0ALEX', { fresh: true });
+    expect(ctx.surface.actuated).toHaveLength(0);
+    expect(sink.last<{ kind: string }>('notice')?.kind).toBe('denied');
+  });
+
+  it('rechecks membership after approval, immediately before dispatch', async () => {
+    const ctx = await prepared();
+    const sink = new RecordingSink();
+    vi.spyOn(sink, 'executing').mockImplementation(async () => {
+      ctx.surface.members.get('C0ENG')!.delete('U0ALEX');
+    });
+    await ctx.orch.approve(ctx.planId, 'U0ALEX', sink);
+    expect(ctx.surface.actuated).toHaveLength(0);
+    expect(JSON.stringify(sink.events)).toMatch(/denied|rejected/);
+  });
+
+  it('checks fresh Slack Connect metadata in the shared dispatch gate', async () => {
+    const ctx = await prepared();
+    const info = ctx.surface.conversationInfo.bind(ctx.surface);
+    vi.spyOn(ctx.surface, 'conversationInfo').mockImplementation(
+      async (channel, opts?: { fresh?: boolean }) => ({
+        ...(await info(channel)),
+        isExtShared: opts?.fresh === true,
+      }),
+    );
+    const sink = new RecordingSink();
+    await ctx.orch.apply(ctx.pending, ctx.pending.identity, badge, sink, approval);
+    expect(ctx.surface.actuated).toHaveLength(0);
+    expect(JSON.stringify(sink.events)).toMatch(/denied|rejected/);
+  });
+
+  it('undo checks current membership and is claimed once across instances', async () => {
+    const ctx = await prepared();
+    const landed = new RecordingSink();
+    await ctx.orch.approve(ctx.planId, 'U0ALEX', landed);
+    const changeId = landed.last<LandedView>('landed')!.results[0]!.changeId;
+    ctx.surface.members.get('C0ENG')!.delete('U0ALEX');
+    await ctx.orch.undo('T1', changeId, 'U0ALEX', new RecordingSink());
+    expect(ctx.surface.undone).toHaveLength(0);
+    ctx.surface.members.get('C0ENG')!.add('U0ALEX');
+    await Promise.all([
+      ctx.orch.undo('T1', changeId, 'U0ALEX', new RecordingSink()),
+      new Orchestrator(ctx.orch.deps).undo('T1', changeId, 'U0ALEX', new RecordingSink()),
+    ]);
+    expect(ctx.surface.undone).toHaveLength(1);
+  });
+});
+
+describe('fresh evidence at the write boundary', () => {
+  it('refuses changed source text at the same message identity before approval', async () => {
+    const ctx = setup(['```cmd\nreply "Proposed summary"\ndone\n```']);
+    const draft = await run(ctx.orch, 'draft a reply');
+    ctx.surface.contexts.get('C0ENG:1700000000.000100')!.messages[0]!.text =
+      'The source was edited';
+    const sink = new RecordingSink();
+    await ctx.orch.approve(draft.last<PlanView>('plan')!.planId, 'U0ALEX', sink);
+    expect(ctx.surface.actuated).toHaveLength(0);
+    expect(JSON.stringify(sink.events)).toMatch(/source|changed/i);
+  });
+
+  it('recaptures unchanged evidence and checks fresh membership before dispatch', async () => {
+    const ctx = setup(['```cmd\nreply "Proposed summary"\ndone\n```']);
+    const draft = await run(ctx.orch, 'draft a reply');
+    const capture = vi.spyOn(ctx.surface, 'capture');
+    const member = vi.spyOn(ctx.surface, 'isMember');
+    await ctx.orch.approve(draft.last<PlanView>('plan')!.planId, 'U0ALEX', new RecordingSink());
+    expect(ctx.surface.actuated).toHaveLength(1);
+    expect(capture).toHaveBeenCalled();
+    expect(member).toHaveBeenCalledWith('C0ENG', 'U0ALEX', { fresh: true });
+  });
+
+  it('does not replace a canvas when the source capture is truncated', async () => {
+    const ctx = setup(['```cmd\ncanvas-edit F0CAN "Replacement content"\ndone\n```']);
+    ctx.surface.canvases.set('F0CAN', ['C0ENG']);
+    ctx.surface.contexts.set('F0CAN', {
+      label: 'Canvas',
+      messages: [],
+      canvas: { id: 'F0CAN', title: 'Canvas', markdown: 'Only the beginning' },
+      truncated: true,
+    });
+    const draft = await run(ctx.orch, 'rewrite scope:canvas(F0CAN) improve it');
+    const plan = draft.last<PlanView>('plan');
+    expect(plan).toBeDefined();
+    const sink = new RecordingSink();
+    await ctx.orch.approve(plan!.planId, 'U0ALEX', sink);
+    expect(ctx.surface.actuated).toHaveLength(0);
+    expect(JSON.stringify(sink.events)).toMatch(/partial|complete|truncated/i);
+  });
+
+  it('rechecks membership after durable preflight awaits', async () => {
+    const ctx = setup(['```cmd\nreply "Proposed summary"\ndone\n```']);
+    const draft = await run(ctx.orch, 'draft a reply');
+    const record = ctx.orch.deps.stores.record.bind(ctx.orch.deps.stores);
+    vi.spyOn(ctx.orch.deps.stores, 'record').mockImplementation(async (entry) => {
+      await record(entry);
+      if (entry.outcome === 'uncertain') ctx.surface.members.get('C0ENG')!.delete('U0ALEX');
+    });
+    const sink = new RecordingSink();
+    await ctx.orch.approve(draft.last<PlanView>('plan')!.planId, 'U0ALEX', sink);
+    expect(ctx.surface.actuated).toHaveLength(0);
+    expect(sink.last<LandedView>('landed')?.results[0]?.outcome).toBe('rejected');
+  });
+});
+
+describe('immutable identity and checkpoint races', () => {
+  it('refuses a relink to a different subject under the same display email', async () => {
+    const ctx = setup(['```cmd\nreply "Proposed summary"\ndone\n```']);
+    const draft = await run(ctx.orch, 'draft a reply');
+    const resolve = ctx.identity.resolve.bind(ctx.identity);
+    vi.spyOn(ctx.identity, 'resolve').mockImplementation(async (input) => {
+      const resolved = await resolve(input);
+      if (resolved.ok && resolved.principal.kind === 'user')
+        resolved.principal.subject = 'different-subject';
+      return resolved;
+    });
+    const sink = new RecordingSink();
+    await ctx.orch.approve(draft.last<PlanView>('plan')!.planId, 'U0ALEX', sink);
+    expect(ctx.surface.actuated).toHaveLength(0);
+    expect(JSON.stringify(sink.events)).toMatch(/changed|principal/i);
+  });
+
+  it('revalidates changed source text after the durable preflight await', async () => {
+    const ctx = setup(['```cmd\nreply "Proposed summary"\ndone\n```']);
+    const draft = await run(ctx.orch, 'draft a reply');
+    const record = ctx.orch.deps.stores.record.bind(ctx.orch.deps.stores);
+    vi.spyOn(ctx.orch.deps.stores, 'record').mockImplementation(async (entry) => {
+      await record(entry);
+      if (entry.outcome === 'uncertain')
+        ctx.surface.contexts.get('C0ENG:1700000000.000100')!.messages[0]!.text =
+          'changed during checkpoint';
+    });
+    const sink = new RecordingSink();
+    await ctx.orch.approve(draft.last<PlanView>('plan')!.planId, 'U0ALEX', sink);
+    expect(ctx.surface.actuated).toHaveLength(0);
+    expect(sink.last<LandedView>('landed')?.results[0]?.outcome).toBe('rejected');
+    expect(JSON.stringify(sink.events)).toMatch(/source changed/i);
+  });
+});
+
+describe('scoped incremental read workspace', () => {
+  it('does not widen an admitted channel window to seven days', async () => {
+    const ctx = setup(['```cmd\nread channel since=7d\n```', '```cmd\nreply "Done"\ndone\n```']);
+    const capture = vi.spyOn(ctx.surface, 'capture');
+    await run(
+      ctx.orch,
+      'draft <#C0ENG|eng> --since 1h prepare a summary',
+      origin({ entry: 'slash', threadTs: undefined }),
+    );
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect(capture.mock.calls[0]![0]).toMatchObject({ kind: 'channel', sinceMs: 3_600_000 });
+    expect(ctx.gemini.turns[1]!.text).toContain('outside the admitted time window');
+  });
+
+  it('does not expand a thread into channel history', async () => {
+    const ctx = setup(['```cmd\nread channel\n```', '```cmd\nreply "Done"\ndone\n```']);
+    const capture = vi.spyOn(ctx.surface, 'capture');
+    await run(ctx.orch, 'draft a summary');
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect(ctx.gemini.turns[1]!.text).toContain('not in scope');
+  });
+
+  it('continues with the server-owned source cursor/filter and rejects its handle in another turn', async () => {
+    const ctx = setup([]);
+    const initial = ctx.surface.contexts.get('C0ENG:1700000000.000100')!;
+    initial.truncated = true;
+    initial.coverage = {
+      complete: false,
+      order: 'oldest_first',
+      pages: 1,
+      capturedMessages: 2,
+      capturedBytes: 200,
+      omittedMessages: 0,
+      omittedBytes: 0,
+      nextCursor: 'native-cursor-for-source',
+      reason: 'message_limit',
+    };
+    let captureCalls = 0;
+    const capture = vi
+      .spyOn(ctx.surface, 'capture')
+      .mockImplementation(async (_scope, options = {}) => {
+        captureCalls++;
+        return options.cursor
+          ? {
+              label: 'next source page',
+              channel: 'C0ENG',
+              threadTs: '1700000000.000100',
+              messages: [
+                {
+                  channel: 'C0ENG',
+                  ts: '1700000000.000300',
+                  user: 'U0MAYA',
+                  text: 'Older decision',
+                },
+              ],
+              truncated: false,
+            }
+          : structuredClone(initial);
+      });
+    let calls = 0;
+    let oldHandle = '';
+    vi.spyOn(ctx.gemini, 'stream').mockImplementation(async function* (_tokens, turn) {
+      ctx.gemini.turns.push(turn);
+      const call = calls++;
+      if (call === 0) oldHandle = /read next cursor=(p_[a-f0-9]{32})/.exec(turn.text)![1]!;
+      yield {
+        type: 'token',
+        text:
+          call === 0 || call === 2
+            ? `\`\`\`cmd\nread next cursor=${oldHandle}\n\`\`\``
+            : '```cmd\nreply "Done"\ndone\n```',
+      };
+      yield { type: 'done' };
+    });
+    await run(ctx.orch, 'draft a summary from:<@U0MAYA>');
+    expect(capture.mock.calls[1]![0]).toMatchObject({
+      kind: 'thread',
+      channel: 'C0ENG',
+      ts: '1700000000.000100',
+    });
+    expect(capture.mock.calls[1]![1]).toMatchObject({
+      from: ['U0MAYA'],
+      cursor: 'native-cursor-for-source',
+    });
+    expect(ctx.gemini.turns[1]!.text).not.toContain('native-cursor-for-source');
+    await run(ctx.orch, 'draft a second summary from:<@U0MAYA>');
+    expect(captureCalls).toBe(3); // first turn initial+next; second turn initial only
+    expect(ctx.gemini.turns[3]!.text).toContain('Unknown or expired source continuation');
+  });
+
+  it.each(['membership', 'service-policy'] as const)(
+    'checks fresh %s before fetching another source page',
+    async (mode) => {
+      const ctx = setup([]);
+      const initial = ctx.surface.contexts.get('C0ENG:1700000000.000100')!;
+      initial.truncated = true;
+      initial.coverage = {
+        complete: false,
+        order: 'oldest_first',
+        pages: 1,
+        capturedMessages: 2,
+        capturedBytes: 200,
+        omittedMessages: 0,
+        omittedBytes: 0,
+        nextCursor: 'native-next',
+        reason: 'message_limit',
+      };
+      if (mode === 'service-policy')
+        await ctx.config.setChannelPolicy('T1', 'C0ENG', {
+          identity: 'service-only',
+          serviceMayRead: true,
+        });
+      const capture = vi.spyOn(ctx.surface, 'capture');
+      let calls = 0;
+      vi.spyOn(ctx.gemini, 'stream').mockImplementation(async function* (_tokens, turn) {
+        ctx.gemini.turns.push(turn);
+        if (calls++ === 0) {
+          const handle = /read next cursor=(p_[a-f0-9]{32})/.exec(turn.text)![1]!;
+          if (mode === 'membership') ctx.surface.members.get('C0ENG')!.delete('U0ALEX');
+          else
+            await ctx.config.setChannelPolicy('T1', 'C0ENG', {
+              identity: 'service-only',
+              serviceMayRead: false,
+            });
+          yield { type: 'token', text: `\`\`\`cmd\nread next cursor=${handle}\n\`\`\`` };
+        } else yield { type: 'token', text: '```cmd\nreply "Done"\ndone\n```' };
+        yield { type: 'done' };
+      });
+      await run(ctx.orch, `draft a summary${mode === 'service-policy' ? ' --as service' : ''}`);
+      expect(capture).toHaveBeenCalledTimes(1);
+      expect(ctx.gemini.turns[1]!.text).toContain('Source access changed');
+    },
+  );
+});
+
+describe('canvas prompt completeness and narrow reminder undo', () => {
+  it('refuses a complete native canvas when the model saw only a clipped preview', async () => {
+    const ctx = setup(['```cmd\ncanvas-edit F0CAN "Replacement content"\ndone\n```']);
+    ctx.surface.canvases.set('F0CAN', ['C0ENG']);
+    ctx.surface.contexts.set('F0CAN', {
+      label: 'Canvas',
+      messages: [],
+      canvas: { id: 'F0CAN', title: 'Canvas', markdown: 'A'.repeat(100 * 1024) },
+      truncated: false,
+    });
+    const draft = await run(ctx.orch, 'rewrite scope:canvas(F0CAN) improve it');
+    const plan = draft.last<PlanView>('plan');
+    expect(plan).toBeDefined();
+    const sink = new RecordingSink();
+    await ctx.orch.approve(plan!.planId, 'U0ALEX', sink);
+    expect(ctx.surface.actuated).toHaveLength(0);
+    expect(JSON.stringify(sink.events)).toMatch(/partial|complete|preview/i);
+  });
+
+  it('lets the requester cancel their recorded reminder in a participant’s bot DM', async () => {
+    const ctx = setup(['```cmd\nremind <@U0MAYA> 2026-10-07T17:00:00Z "Follow up"\ndone\n```']);
+    vi.spyOn(ctx.surface, 'actuate').mockImplementation(async (req) => {
+      ctx.surface.actuated.push(req);
+      return {
+        changeId: req.changeId,
+        kind: 'remind',
+        outcome: 'applied',
+        location: { channel: 'D0MAYA' },
+        inverse: {
+          op: 'delete-scheduled',
+          channel: 'D0MAYA',
+          scheduledMessageId: 'scheduled-owned-reminder',
+          postAt: Math.floor(NOW.getTime() / 1000) + 86400,
+        },
+        provenancePersisted: true,
+      };
+    });
+    const draft = await run(ctx.orch, 'draft a reminder for Maya');
+    const sink = new RecordingSink();
+    await ctx.orch.approve(draft.last<PlanView>('plan')!.planId, 'U0ALEX', sink);
+    const changeId = sink.last<LandedView>('landed')!.results[0]!.changeId;
+    expect(await ctx.surface.isMember('D0MAYA', 'U0ALEX')).toBe(false);
+    await ctx.orch.undo('T1', changeId, 'U0ALEX', new RecordingSink());
+    expect(ctx.surface.undone).toEqual([
+      {
+        op: 'delete-scheduled',
+        channel: 'D0MAYA',
+        scheduledMessageId: 'scheduled-owned-reminder',
+        postAt: Math.floor(NOW.getTime() / 1000) + 86400,
+      },
+    ]);
+  });
+
+  it('does not extend the reminder exception to an arbitrary DM message inverse', async () => {
+    const ctx = setup([]);
+    await ctx.orch.deps.stores.record({
+      changeId: 'arbitrary-dm-change',
+      teamId: 'T1',
+      invokerId: 'U0ALEX',
+      approval: 'human',
+      kind: 'remind',
+      label: 'Recorded message',
+      outcome: 'applied',
+      location: { channel: 'D0MAYA' },
+      inverse: { op: 'delete-message', channel: 'D0MAYA', ts: '1700000000.000100' },
+      principal: 'user:alex@acme.com',
+      at: NOW.toISOString(),
+    });
+    await ctx.orch.undo('T1', 'arbitrary-dm-change', 'U0ALEX', new RecordingSink());
+    expect(ctx.surface.undone).toHaveLength(0);
+  });
+});
+
+describe('commander read completion and legacy evidence admission', () => {
+  it('feeds a read-only program ending in done into the next model turn before staging writes', async () => {
+    const ctx = setup([
+      '```cmd\nread thread\ndone\n```',
+      '```cmd\nreply "Summary after reading"\ndone\n```',
+    ]);
+    const sink = await run(ctx.orch, 'draft a summary after reading the thread');
+    expect(ctx.gemini.turns).toHaveLength(2);
+    expect(ctx.gemini.turns[1]!.text).toMatch(/read.*message/i);
+    const plan = sink.last<PlanView>('plan');
+    expect(plan?.effects).toHaveLength(1);
+    expect(ctx.surface.actuated).toHaveLength(0);
+    await ctx.orch.approve(plan!.planId, 'U0ALEX', new RecordingSink());
+    expect(ctx.surface.actuated).toHaveLength(1);
+  });
+
+  it('refuses captured-scope plans from a legacy release when source evidence is missing', async () => {
+    const ctx = setup(['```cmd\nreply "Proposed summary"\ndone\n```']);
+    const draft = await run(ctx.orch, 'draft a reply');
+    const planId = draft.last<PlanView>('plan')!.planId;
+    const pending = (await ctx.orch.deps.stores.getPlan(planId))!;
+    delete pending.evidence;
+    await ctx.kv.set(`plan/${planId}`, pending);
+    const sink = new RecordingSink();
+    await ctx.orch.approve(planId, 'U0ALEX', sink);
+    expect(ctx.surface.actuated).toHaveLength(0);
+    expect(sink.last<{ kind: string; text: string }>('notice')).toMatchObject({
+      kind: 'denied',
+      text: expect.stringMatching(/source|evidence|revision|read/i),
+    });
+  });
+});

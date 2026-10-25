@@ -27,9 +27,9 @@ for it, you cannot target it.
 | `reply` / `finding` | `chat.postMessage` with `thread_ts` | delete the bot's message |
 | `post` | `chat.postMessage` to the channel | delete |
 | `canvas` | `canvases.create` (shared to the scope channel) | delete canvas |
-| `canvas-edit` | `canvases.edit` section replace | best-effort restore |
+| `canvas-edit` | `canvases.edit` section replace | not reversible; no prior section body is exposed |
 | `schedule` | `chat.scheduleMessage` | cancel before it sends; *sent* cannot be undone |
-| `remind` | `reminders.add` (user principal only) | delete reminder |
+| `remind` | scheduled message in the participant's DM | cancel before delivery; never grants access to that DM |
 | `bookmark` | `bookmarks.add` on the scope channel | remove |
 | `react` | `reactions.add` | remove |
 
@@ -42,7 +42,14 @@ auto-apply — not even in automations.
 - Message text ≤ 4000 characters; prefer a canvas for anything long.
 - Canvas title ≤ 150 characters; markdown ≤ 100k.
 - `schedule` must be in the future and within 120 days.
-- `read channel` windows cap at 30 days and the capture budget.
+- `read channel` stays inside the admitted time window; it cannot widen a thread to a channel.
+- Native capture: ≤200 messages, eight native pages and 256 KiB of UTF-8 JSON. The prompt separately
+  includes ≤60 KiB of source context. Read omission counts and traversal direction literally.
+- Follow only a current `read next cursor=p_…` handle; eight additional reads per task. Retained
+  messages are bounded, so older inspected text can leave the current working window.
+- Ranked workspace search is never proof that all workspace content was read.
+- A complete native canvas can still be clipped in the prompt. Never replace a canvas unless its
+  full body was visible; partial/preview captures cannot authorize destructive replacement.
 
 ## Formatting
 

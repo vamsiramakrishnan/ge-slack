@@ -8,8 +8,10 @@ import {
   isSelfScoped,
   isUnattended,
   parsePlanBlock,
+  parseDuration,
   parseProgram,
   principalLabel,
+  principalBinding,
   renderInvocation,
   type ActuationParams,
   type AgentEntry,
@@ -42,7 +44,19 @@ import {
   sanitizeOutbound,
   type CompiledEffect,
 } from './compile.js';
-import { composeChatPrompt, composeCommandPrompt, composePlannerPrompt } from './prompt.js';
+import {
+  ReadWorkspace,
+  EVIDENCE_LIMITS,
+  contextHash,
+  captureReceipt,
+  mergeContext,
+} from './evidence.js';
+import {
+  composeChatPrompt,
+  composeCommandPrompt,
+  composePlannerPrompt,
+  renderContextWindow,
+} from './prompt.js';
 import {
   kindsFor,
   looksActionable,
@@ -561,7 +575,7 @@ export class Orchestrator {
       }
       await sink.task({
         id: 'capture',
-        title: `Read ${ctx.messages.length} message${ctx.messages.length === 1 ? '' : 's'}${ctx.truncated ? ' (most recent)' : ''}`,
+        title: `Read ${ctx.messages.length} message${ctx.messages.length === 1 ? '' : 's'}${ctx.truncated ? ' (partial coverage)' : ''}`,
         status: 'complete',
       });
     } else {
@@ -795,6 +809,7 @@ export class Orchestrator {
       text: answerText,
       ...(provenance ? { provenance } : {}),
       principal: turn.identity,
+      principalBinding: await contentHash(principalBinding(turn.principal)),
       shareable: turn.scope.kind !== 'search',
       ...(inv.instruction.trim() ? { question: inv.instruction.trim().slice(0, 500) } : {}),
       sourceUris: sources.flatMap((s) => (s.uri ? [s.uri] : [])).slice(0, 20),
@@ -894,6 +909,7 @@ export class Orchestrator {
       reason: e.reason,
       handle: e.handle,
       identity: turn.identity,
+      principalBinding: await contentHash(principalBinding(turn.principal)),
       expiresAt: this.now().getTime() + AGENT_CONTINUATION_TTL_MS,
     };
     await this.deps.stores.saveContinuation(c, this.now().getTime());
@@ -941,7 +957,11 @@ export class Orchestrator {
       const turn = await this.admit(c.invocation, c.origin, sink, { resume: true });
       if (!turn) return;
       if (opts.signal) turn.signal = opts.signal;
-      if (turn.identity !== c.identity) {
+      if (
+        turn.identity !== c.identity ||
+        (c.principalBinding !== undefined &&
+          (await contentHash(principalBinding(turn.principal))) !== c.principalBinding)
+      ) {
         await sink.notice(
           'denied',
           'This agent conversation was started under a different identity. Ask again to start a new one.',
@@ -1011,7 +1031,7 @@ export class Orchestrator {
     const target = targets[0]!;
     const [policy, info] = await Promise.all([
       this.deps.config.channelPolicy(origin.teamId, target),
-      this.deps.surface.conversationInfo(target),
+      this.deps.surface.conversationInfo(target, { fresh: true }),
     ]);
     if (info.isExtShared) return false;
     // The daily brief's own destination: the owner's 1:1 DM with the app, opened server-side
@@ -1084,7 +1104,18 @@ export class Orchestrator {
       sources,
       agentId: agentId ?? 'gemini-enterprise',
       contentHash: await contentHash(body),
+      evidence:
+        turn.ctx && turn.scope.kind !== 'none' && turn.scope.kind !== 'search'
+          ? [
+              await captureReceipt(
+                turn.scope,
+                { from: inv.from, maxMessages: this.deps.maxMessages ?? 200 },
+                turn.ctx,
+              ),
+            ]
+          : [],
       identity: turn.identity,
+      principalBinding: await contentHash(principalBinding(turn.principal)),
       ...(origin.automationId ? { automationId: origin.automationId } : {}),
       ...(turn.grantExpiresAt ? { grantExpiresAt: turn.grantExpiresAt } : {}),
       dryRun: false,
@@ -1236,6 +1267,16 @@ export class Orchestrator {
       truncated: false,
     };
 
+    const workspace = new ReadWorkspace();
+    if (turn.ctx && turn.scope.kind !== 'none' && turn.scope.kind !== 'search') {
+      await workspace.record(
+        turn.scope,
+        { from: inv.from, maxMessages: this.deps.maxMessages ?? 200 },
+        ctx,
+      );
+      mergeContext(ctx, { ...ctx, messages: [] });
+    }
+
     await sink.task({
       id: 'ask',
       title: `Drafting changes ${asWho(turn.principal)}`,
@@ -1246,6 +1287,10 @@ export class Orchestrator {
         await sink.notice('info', 'Stopped. Nothing was proposed or changed.');
         return;
       }
+      const visible = renderContextWindow(ctx);
+      for (const receipt of workspace.receipts)
+        if (receipt.scope.kind === 'canvas' && receipt.scope.id === ctx.canvas?.id)
+          receipt.modelComplete = receipt.complete && visible.canvasComplete;
       const r = await collectStream(
         this.deps.gemini.stream(turn.tokens, {
           text: composeCommandPrompt({
@@ -1295,7 +1340,7 @@ export class Orchestrator {
       const readResults: string[] = [];
       for (const line of program.lines) {
         if (line.verb === 'read' || line.verb === 'search') {
-          readResults.push(await this.serveRead(line, ctx, turn));
+          readResults.push(await this.serveRead(line, ctx, turn, workspace, origin));
         }
       }
       const knownUsers = this.knownUsers(ctx, inv, origin);
@@ -1348,7 +1393,7 @@ export class Orchestrator {
         compiled = [];
         continue;
       }
-      if (readResults.length && effects.length === 0 && !program.done) {
+      if (readResults.length && effects.length === 0) {
         feedback = readResults.join('\n');
         continue;
       }
@@ -1391,10 +1436,12 @@ export class Orchestrator {
       invocation: inv,
       scope: turn.scope,
       effects: compiled,
+      evidence: workspace.receipts,
       sources,
       agentId,
       contentHash: await contentHash(compiled.map((e) => JSON.stringify(e.params)).join('\n')),
       identity: turn.identity,
+      principalBinding: await contentHash(principalBinding(turn.principal)),
       ...(origin.automationId ? { automationId: origin.automationId } : {}),
       ...(turn.grantExpiresAt ? { grantExpiresAt: turn.grantExpiresAt } : {}),
       dryRun: inv.flags.dryRun === true,
@@ -1445,39 +1492,212 @@ export class Orchestrator {
     line: Extract<CmdLine, { verb: 'read' | 'search' }>,
     ctx: CapturedContext,
     turn: Turn,
+    workspace: ReadWorkspace,
+    origin: Origin,
   ): Promise<string> {
     if (line.verb === 'search') {
-      const q = line.query.toLowerCase();
-      const hits = ctx.messages.filter((m) => m.text.toLowerCase().includes(q));
-      return `search "${line.query}": ${hits.length} match(es): ${hits
+      const hits = ctx.messages.filter((m) =>
+        m.text.toLowerCase().includes(line.query.toLowerCase()),
+      );
+      return `search "${line.query}": ${hits.length} match(es) in retained evidence only: ${hits
         .slice(0, 20)
         .map((m) => m.permalink ?? m.ts)
         .join(', ')}`;
     }
+    if (turn.scope.kind === 'search')
+      return 'Workspace-search evidence is read-only; conversation expansion is unavailable.';
+    if (workspace.reads >= EVIDENCE_LIMITS.reads)
+      return 'Source read budget exhausted; start a new scoped task.';
     let scope: ResolvedScope | undefined;
-    if (
+    let options = {
+      from: workspace.receipts[0]?.options.from ?? [],
+      maxMessages: 100,
+      cursor: undefined as string | undefined,
+    };
+    if (line.target === 'next') {
+      const binding = line.cursor ? workspace.continuations.get(line.cursor) : undefined;
+      if (!binding) return 'Unknown or expired source continuation; use the handle from this turn.';
+      scope = binding.scope;
+      options = { ...binding.options, cursor: binding.options.cursor };
+    } else if (
       line.target === 'thread' &&
       (turn.scope.kind === 'thread' || turn.scope.kind === 'message')
     ) {
       scope = { kind: 'thread', channel: turn.scope.channel, ts: turn.scope.ts };
-    } else if (line.target === 'channel' && ctx.channel) {
-      scope = { kind: 'channel', channel: ctx.channel, sinceMs: 7 * 86_400_000 };
+    } else if (
+      line.target === 'channel' &&
+      (turn.scope.kind === 'channel' || turn.scope.kind === 'dm')
+    ) {
+      const admitted = turn.scope.kind === 'channel' ? turn.scope.sinceMs : 24 * 3_600_000;
+      const requested = line.sinceText ? parseDuration(line.sinceText) : admitted;
+      if (requested === undefined || requested > admitted)
+        return 'Requested history is outside the admitted time window.';
+      scope = { kind: 'channel', channel: turn.scope.channel, sinceMs: requested };
     } else if (typeof line.target === 'object') {
-      // A permalink read is only served within conversations already admitted for this turn.
-      if (!turn.readChannels.has(line.target.channel)) return `${line.line}: not in scope`;
-      scope = { kind: 'thread', channel: line.target.channel, ts: line.target.ts };
+      const target = line.target;
+      if (!turn.readChannels.has(target.channel))
+        return 'Message not in scope: outside the admitted conversations.';
+      if (
+        turn.scope.kind === 'thread' &&
+        target.ts !== turn.scope.ts &&
+        !ctx.messages.some(
+          (m) => m.ts === target.ts && (m.channel ?? ctx.channel) === target.channel,
+        )
+      )
+        return 'Message not in scope: outside the admitted thread.';
+      if (turn.scope.kind === 'message' && target.ts !== turn.scope.ts)
+        return 'Message not in scope: outside the named message.';
+      if (
+        (turn.scope.kind === 'channel' || turn.scope.kind === 'dm') &&
+        Number(target.ts) * 1000 <
+          this.now().getTime() -
+            (turn.scope.kind === 'channel' ? turn.scope.sinceMs : 24 * 3_600_000)
+      )
+        return 'Message not in scope: outside the admitted time window.';
+      scope = {
+        kind: 'thread',
+        channel: target.channel,
+        ts: turn.scope.kind === 'thread' ? turn.scope.ts : target.ts,
+      };
     }
-    if (!scope) return `${line.line}: nothing to read`;
-    const more = await this.deps.surface.capture(scope, { from: [], maxMessages: 100 });
-    const seen = new Set(ctx.messages.map((m) => m.ts));
-    const fresh = more.messages
-      .filter((m) => !seen.has(m.ts))
-      .map((m) => ({
-        ...m,
-        channel: m.channel ?? more.channel ?? ('channel' in scope ? scope.channel : undefined),
-      }));
-    ctx.messages.push(...fresh);
-    return `${line.line}: read ${fresh.length} new message(s); they are now in <slack_context>`;
+    if (!scope || !('channel' in scope) || !scope.channel || !turn.readChannels.has(scope.channel))
+      return 'Nothing readable: not in scope.';
+    if (
+      !(await this.sourceReadable(
+        scope,
+        origin.teamId,
+        origin.userId,
+        turn.identity,
+        await contentHash(principalBinding(turn.principal)),
+        origin,
+      ))
+    )
+      return 'Source access changed; start a new task.';
+    workspace.reads++;
+    turn.signal?.throwIfAborted();
+    const more = await this.deps.surface.capture(scope, options);
+    await workspace.record(scope, options, more);
+    const added = mergeContext(ctx, more);
+    ctx.continuation = more.continuation;
+    return `${line.line}: read ${more.messages.length} message(s), ${added} new; retained ${ctx.messages.length}. Coverage ${ctx.truncated ? 'partial' : 'complete for the captured window'}.${more.continuation ? ` Continue with read next cursor=${more.continuation}` : ''}`;
+  }
+
+  private async sourceReadable(
+    scope: ResolvedScope,
+    teamId: string,
+    userId: string,
+    identity: string,
+    binding?: string,
+    origin?: Origin,
+  ): Promise<boolean> {
+    const channels =
+      scope.kind === 'canvas'
+        ? (await this.deps.surface.canvasAccess(scope.id)).channels
+        : 'channel' in scope && scope.channel
+          ? [scope.channel]
+          : [];
+    if (scope.kind === 'none') return true;
+    if (!channels.length) return false;
+    for (const channel of channels) {
+      if (!(await this.deps.surface.isMember(channel, userId, { fresh: true }))) continue;
+      const info = await this.deps.surface.conversationInfo(channel, { fresh: true });
+      const policy = await this.deps.config.channelPolicy(teamId, channel);
+      if (identity.startsWith('service:') ? !policy.serviceMayRead : info.isExtShared) continue;
+      let delegated: boolean | undefined;
+      const unattended = origin !== undefined && isUnattended(origin);
+      if (unattended && identity.startsWith('user:') && delegationOn(this)) {
+        const automation =
+          origin.automationId && (await this.deps.automations?.get(teamId, origin.automationId));
+        if (
+          !automation ||
+          automation.ownerId !== userId ||
+          !(await delegationVerdict(this, automation, { reads: [channel], writes: [] })).ok
+        )
+          continue;
+        delegated = true;
+      }
+      const resolved = await this.deps.identity.resolve({
+        teamId,
+        userId,
+        policy: policy.identity,
+        requested: identity.startsWith('service:') ? 'service' : 'me',
+        unattended,
+        externallyShared: info.isExtShared,
+        ...(delegated !== undefined ? { delegated } : {}),
+      });
+      if (
+        resolved.ok &&
+        (binding
+          ? (await contentHash(principalBinding(resolved.principal))) === binding
+          : resolved.identity === identity)
+      )
+        return true;
+    }
+    return false;
+  }
+
+  private async revalidateEvidence(p: PendingPlan, sink: TurnSink): Promise<boolean> {
+    if (!p.evidence) {
+      if (
+        p.scope.kind === 'none' &&
+        !p.effects.some((effect) => effect.params.kind === 'canvas-edit')
+      )
+        return true;
+      await sink.notice(
+        'denied',
+        'This older source-derived plan has no source revision. Read the current source and draft it again.',
+      );
+      return false;
+    }
+    if (p.evidence.length > EVIDENCE_LIMITS.reads + 1) return false;
+    try {
+      for (const effect of p.effects) {
+        const params = effect.params;
+        if (
+          params.kind === 'canvas-edit' &&
+          !p.evidence.some(
+            (receipt) =>
+              receipt.scope.kind === 'canvas' &&
+              receipt.scope.id === params.canvasId &&
+              receipt.complete &&
+              receipt.modelComplete === true,
+          )
+        ) {
+          await sink.notice(
+            'denied',
+            'Canvas replacement requires a complete current source visible to the model; the captured or rendered canvas is partial.',
+          );
+          return false;
+        }
+      }
+      for (const receipt of p.evidence) {
+        if (
+          !(await this.sourceReadable(
+            receipt.scope,
+            p.teamId,
+            p.invokerId,
+            p.identity,
+            p.principalBinding,
+            p.origin,
+          ))
+        ) {
+          await sink.notice('denied', 'Source access changed; draft a new plan.');
+          return false;
+        }
+        const current = await this.deps.surface.capture(receipt.scope, receipt.options);
+        if ((await contextHash(current)) !== receipt.hash) {
+          await sink.notice(
+            'denied',
+            'The source changed after this plan was drafted. Review a new plan before writing.',
+          );
+          return false;
+        }
+      }
+      return true;
+    } catch {
+      await sink.notice('denied', 'Source freshness could not be verified. Nothing was applied.');
+      return false;
+    }
   }
 
   /** @internal */
@@ -1562,7 +1782,8 @@ export class Orchestrator {
     const targets = new Set(p.effects.flatMap((e) => targetChannels(e.params)));
     let externallyShared = Boolean(p.origin.externallyShared);
     for (const c of new Set([channel, ...targets].filter(Boolean))) {
-      if ((await this.deps.surface.conversationInfo(c)).isExtShared) externallyShared = true;
+      if ((await this.deps.surface.conversationInfo(c, { fresh: true })).isExtShared)
+        externallyShared = true;
     }
     const resolved = await this.deps.identity.resolve({
       teamId: p.teamId,
@@ -1577,7 +1798,11 @@ export class Orchestrator {
       return;
     }
     // The content was drafted by one principal; never land it under a different one (M5).
-    if (resolved.identity !== p.identity) {
+    if (
+      resolved.identity !== p.identity ||
+      (p.principalBinding !== undefined &&
+        (await contentHash(principalBinding(resolved.principal))) !== p.principalBinding)
+    ) {
       await sink.notice(
         'denied',
         'The identity this plan was drafted with no longer applies here (you connected, disconnected, or the channel policy changed). Run it again.',
@@ -1589,7 +1814,7 @@ export class Orchestrator {
       ...targets,
       ...(scopeChannel(p.scope) ? [scopeChannel(p.scope)!] : []),
     ])) {
-      if (!(await this.deps.surface.isMember(c, userId))) {
+      if (!(await this.deps.surface.isMember(c, userId, { fresh: true }))) {
         await sink.notice('denied', `You're no longer a member of <#${c}>; nothing was applied.`);
         return;
       }
@@ -1601,7 +1826,8 @@ export class Orchestrator {
       let ok = access.isCanvas;
       if (ok) {
         ok = false;
-        for (const c of access.channels) if (await this.deps.surface.isMember(c, userId)) ok = true;
+        for (const c of access.channels)
+          if (await this.deps.surface.isMember(c, userId, { fresh: true })) ok = true;
       }
       if (!ok) {
         await sink.notice(
@@ -1714,6 +1940,107 @@ export class Orchestrator {
     else await sink.notice('info', 'This plan was already handled.');
   }
 
+  /** Recheck live authority for every dispatch path, including auto/trust/share. */
+  private async writeAccess(
+    p: PendingPlan,
+    params: ActuationParams,
+    identity: string,
+    approval: 'human' | 'auto' | 'trust',
+  ): Promise<string | undefined> {
+    const channels = new Set([
+      ...targetChannels(params),
+      ...(scopeChannel(p.scope) ? [scopeChannel(p.scope)!] : []),
+    ]);
+    const canvasIds = new Set([
+      ...(p.scope.kind === 'canvas' ? [p.scope.id] : []),
+      ...(params.kind === 'canvas-edit' ? [params.canvasId] : []),
+    ]);
+    for (const canvasId of canvasIds) {
+      const access = await this.deps.surface.canvasAccess(canvasId);
+      if (!access.isCanvas) return 'The canvas is no longer accessible; nothing was changed.';
+      const visible: string[] = [];
+      for (const channel of access.channels)
+        if (await this.deps.surface.isMember(channel, p.invokerId, { fresh: true }))
+          visible.push(channel);
+      if (!visible.length) return 'You no longer have access to that canvas; nothing was changed.';
+      for (const channel of visible) channels.add(channel);
+    }
+    for (const channel of channels)
+      if (!(await this.deps.surface.isMember(channel, p.invokerId, { fresh: true })))
+        return 'Your conversation membership changed; nothing was changed.';
+    let externallyShared = false;
+    for (const channel of new Set([
+      ...channels,
+      ...(p.origin.channelId ? [p.origin.channelId] : []),
+    ]))
+      if ((await this.deps.surface.conversationInfo(channel, { fresh: true })).isExtShared)
+        externallyShared = true;
+    const policyChannel = scopeChannel(p.scope) ?? [...channels][0] ?? p.origin.channelId ?? '';
+    const policy = await this.deps.config.channelPolicy(p.teamId, policyChannel);
+    if (identity.startsWith('service:') && p.scope.kind !== 'none' && !policy.serviceMayRead)
+      return 'The Gemini service is no longer allowed to read this scope; run the request again.';
+    let delegated: boolean | undefined;
+    const unattended = approval === 'auto' && isUnattended(p.origin);
+    if (unattended && delegationOn(this)) {
+      delegated = false;
+      if (p.automationId && p.invocation.flags.as === 'me' && this.deps.automations) {
+        const automation = await this.deps.automations.get(p.teamId, p.automationId);
+        const verdict =
+          automation && automation.ownerId === p.invokerId
+            ? await delegationVerdict(this, automation, {
+                reads: scopeChannel(p.scope) ? [scopeChannel(p.scope)!] : [],
+                writes: targetChannels(params),
+              })
+            : { ok: false, message: 'This automation is no longer authorized.' };
+        if (!verdict.ok) return verdict.message;
+        delegated = true;
+      }
+    }
+    if (params.kind === 'connector-action') {
+      if (approval !== 'human' || !this.deps.features?.has('connector-actions'))
+        return 'Connector actions require a current human approval and enabled capability.';
+      const catalog = await this.deps.config.connectors(p.teamId);
+      const tool = catalog
+        .find((entry) => entry.alias === params.connector && entry.collection === params.collection)
+        ?.tools.find((entry) => entry.name === params.tool);
+      if (!tool || (identity.startsWith('service:') && !tool.serviceAllowed))
+        return 'This connector action is no longer allowed; nothing was dispatched.';
+    }
+    const resolved = await this.deps.identity.resolve({
+      teamId: p.teamId,
+      userId: p.invokerId,
+      policy: policy.identity,
+      requested: identity.startsWith('service:') ? 'service' : 'me',
+      unattended,
+      externallyShared,
+      ...(delegated !== undefined ? { delegated } : {}),
+    });
+    if (
+      !resolved.ok ||
+      resolved.identity !== identity ||
+      (p.principalBinding !== undefined &&
+        (await contentHash(principalBinding(resolved.principal))) !== p.principalBinding)
+    )
+      return 'The principal or conversation policy changed; run the request again.';
+    if (approval === 'auto' && !(await this.autoApplicable(params, p.invocation, p.origin)))
+      return 'The destination no longer permits unattended changes; review a new plan.';
+    if (approval === 'trust') {
+      const trusted = await trustFor(this, p.teamId, p.invokerId);
+      const dm =
+        p.origin.entry === 'agent-dm' && p.origin.channelId
+          ? {
+              channel: p.origin.channelId,
+              ...((p.origin.threadTs ?? p.origin.messageTs)
+                ? { threadTs: (p.origin.threadTs ?? p.origin.messageTs)! }
+                : {}),
+            }
+          : undefined;
+      if (!isSelfScoped(params, { userId: p.invokerId, trusted, ...(dm ? { dm } : {}) }))
+        return 'The self-scoped permission no longer applies; review a new plan.';
+    }
+    return undefined;
+  }
+
   /** @internal shared with feature modules (suggestions). */
   async apply(
     p: PendingPlan,
@@ -1723,7 +2050,9 @@ export class Orchestrator {
     approval: { approval: 'human' | 'auto' | 'trust'; approvedBy?: string },
     tokens?: TokenSource,
   ): Promise<void> {
+    if (!(await this.revalidateEvidence(p, sink))) return;
     const results: LandedView['results'] = [];
+    let dispatchedAny = false;
     const skipped = new Set(p.skipped ?? []);
     const sources = p.sources
       .slice(0, 20)
@@ -1753,8 +2082,66 @@ export class Orchestrator {
               argsHash: await contentHash(JSON.stringify(e.params.arguments)),
             }
           : undefined;
-      if (external) {
-        // Ledger first: if this instance dies mid-call, the action still leaves a trace (F7).
+      let accessError: string | undefined;
+      try {
+        accessError = await this.writeAccess(p, e.params, identity, approval.approval);
+      } catch {
+        accessError = 'Live authority could not be verified; nothing was changed.';
+      }
+      if (accessError) {
+        results.push({
+          changeId: e.changeId,
+          kind: e.params.kind,
+          label: e.label,
+          outcome: 'rejected',
+          undoable: false,
+          error: accessError,
+        });
+        break;
+      }
+      try {
+        const claimed = await this.deps.stores.claimEffect({
+          version: 1,
+          direction: 'apply',
+          teamId: p.teamId,
+          changeId: e.changeId,
+          invokerId: p.invokerId,
+          principalHash: p.principalBinding ?? (await contentHash(identity)),
+          intentHash: await contentHash(
+            JSON.stringify({
+              principal: p.principalBinding ?? identity,
+              invoker: p.invokerId,
+              params: e.params,
+            }),
+          ),
+          kind: e.params.kind,
+          startedAt: this.now().toISOString(),
+        });
+        if (!claimed) {
+          results.push({
+            changeId: e.changeId,
+            kind: e.params.kind,
+            label: e.label,
+            outcome: 'rejected',
+            undoable: false,
+            error:
+              'This change was already claimed and was not replayed. Inspect Changes before trying again.',
+          });
+          break;
+        }
+        // Older releases have ledger receipts but no claim key. Never overwrite one into a retry.
+        if (await this.deps.stores.getEntry(p.teamId, e.changeId)) {
+          results.push({
+            changeId: e.changeId,
+            kind: e.params.kind,
+            label: e.label,
+            outcome: 'rejected',
+            undoable: false,
+            error: 'This change already has a ledger record and was not replayed. Inspect Changes.',
+          });
+          break;
+        }
+        // Durable trace before every dispatch. A crash leaves uncertainty, never permission to replay.
         await this.deps.stores.record({
           changeId: e.changeId,
           teamId: p.teamId,
@@ -1765,10 +2152,54 @@ export class Orchestrator {
           label: e.label,
           outcome: 'uncertain',
           principal: identity,
-          external,
+          ...(external ? { external } : {}),
           at: this.now().toISOString(),
         });
+      } catch {
+        results.push({
+          changeId: e.changeId,
+          kind: e.params.kind,
+          label: e.label,
+          outcome: 'rejected',
+          undoable: false,
+          error:
+            'The write checkpoint could not be persisted; nothing was dispatched. Inspect Changes before trying again.',
+        });
+        break;
       }
+      // Durable I/O may have awaited while authority or the source changed. Recheck at dispatch.
+      let finalAccessError: string | undefined;
+      try {
+        finalAccessError = await this.writeAccess(p, e.params, identity, approval.approval);
+        if (
+          !finalAccessError &&
+          (!dispatchedAny || e.params.kind === 'canvas-edit') &&
+          !(await this.revalidateEvidence(p, sink))
+        )
+          finalAccessError =
+            'The source changed during the write checkpoint; nothing was dispatched.';
+      } catch {
+        finalAccessError =
+          'Live authority could not be verified after the checkpoint; nothing was dispatched.';
+      }
+      if (finalAccessError) {
+        try {
+          const entry = await this.deps.stores.getEntry(p.teamId, e.changeId);
+          if (entry) await this.deps.stores.record({ ...entry, outcome: 'rejected' });
+        } catch {
+          /* The retained claim still prevents any replay. */
+        }
+        results.push({
+          changeId: e.changeId,
+          kind: e.params.kind,
+          label: e.label,
+          outcome: 'rejected',
+          undoable: false,
+          error: finalAccessError,
+        });
+        break;
+      }
+      dispatchedAny = true;
       let res;
       try {
         res =
@@ -1786,30 +2217,64 @@ export class Orchestrator {
         };
       }
       if (res.changeId !== e.changeId || res.kind !== e.params.kind) {
-        res = { ...res, changeId: e.changeId, kind: e.params.kind, outcome: 'uncertain' as const };
+        // A receipt for another effect grants no target or undo authority to this change.
+        res = {
+          changeId: e.changeId,
+          kind: e.params.kind,
+          outcome: 'uncertain' as const,
+          provenancePersisted: false,
+          error: {
+            code: 'receipt_mismatch',
+            message:
+              'The host receipt did not match this change. Inspect the destination before trying again.',
+          },
+        };
       }
-      await this.deps.stores.record({
-        changeId: e.changeId,
-        teamId: p.teamId,
-        invokerId: p.invokerId,
-        ...(approval.approvedBy ? { approvedBy: approval.approvedBy } : {}),
-        approval: approval.approval,
-        kind: e.params.kind,
-        label: e.label,
-        outcome: res.outcome,
-        ...(res.location ? { location: res.location } : {}),
-        ...(res.inverse ? { inverse: res.inverse } : {}),
-        principal: identity,
-        ...(p.automationId ? { automationId: p.automationId } : {}),
-        ...(p.grantExpiresAt ? { grantExpiresAt: p.grantExpiresAt } : {}),
-        ...(p.memoryNotes ? { memoryNotes: p.memoryNotes } : {}),
-        ...(external
-          ? {
-              external: { ...external, ...(res.note ? { reference: res.note.slice(0, 120) } : {}) },
-            }
-          : {}),
-        at: this.now().toISOString(),
-      });
+      if (res.outcome === 'uncertain')
+        res = {
+          ...res,
+          note: `Later changes were not started. Inspect the uncertain effect before retrying.${res.note ? ` ${res.note}` : ''}`.slice(
+            0,
+            300,
+          ),
+        };
+      let checkpointPending = false;
+      try {
+        await this.deps.stores.record({
+          changeId: e.changeId,
+          teamId: p.teamId,
+          invokerId: p.invokerId,
+          ...(approval.approvedBy ? { approvedBy: approval.approvedBy } : {}),
+          approval: approval.approval,
+          kind: e.params.kind,
+          label: e.label,
+          outcome: res.outcome,
+          ...(res.location ? { location: res.location } : {}),
+          ...(res.inverse ? { inverse: res.inverse } : {}),
+          principal: identity,
+          ...(p.automationId ? { automationId: p.automationId } : {}),
+          ...(p.grantExpiresAt ? { grantExpiresAt: p.grantExpiresAt } : {}),
+          ...(p.memoryNotes ? { memoryNotes: p.memoryNotes } : {}),
+          ...(external
+            ? {
+                external: {
+                  ...external,
+                  ...(res.note ? { reference: res.note.slice(0, 120) } : {}),
+                },
+              }
+            : {}),
+          at: this.now().toISOString(),
+        });
+      } catch {
+        checkpointPending = true;
+        res = {
+          ...res,
+          note: `Audit checkpoint pending. Inspect the change before retrying; later changes were not started.${res.note ? ` ${res.note}` : ''}`.slice(
+            0,
+            300,
+          ),
+        };
+      }
       results.push({
         changeId: e.changeId,
         kind: e.params.kind,
@@ -1817,12 +2282,14 @@ export class Orchestrator {
         outcome: res.outcome,
         ...(res.location?.permalink ? { permalink: res.location.permalink } : {}),
         undoable:
+          !checkpointPending &&
           res.outcome === 'applied' &&
           res.inverse !== undefined &&
           res.inverse.op !== 'not-reversible',
         ...(res.error ? { error: res.error.message } : {}),
         ...(res.note ? { note: res.note } : {}),
       });
+      if (checkpointPending || res.outcome === 'uncertain') break;
     }
     await sink.landed({
       planId: p.id,
@@ -1915,9 +2382,107 @@ export class Orchestrator {
       await sink.notice('info', "Sent — scheduled messages can't be cancelled after they post.");
       return;
     }
-    const r = await this.deps.surface.undo(e.inverse);
-    if (r.ok)
-      await this.deps.stores.record({ ...e, undoneAt: this.now().toISOString(), undoneBy: userId });
+    const inverse = e.inverse;
+    // Cancelling this exact owned reminder neither reads nor writes the recipient's DM.
+    const ownedReminder =
+      e.kind === 'remind' &&
+      inverse.op === 'delete-scheduled' &&
+      e.location?.channel === inverse.channel &&
+      Boolean(inverse.scheduledMessageId);
+    const checkAccess = async (): Promise<string | undefined> => {
+      const channels = new Set([
+        ...(e.location?.channel ? [e.location.channel] : []),
+        ...('channel' in inverse ? [inverse.channel] : []),
+        ...(inverse.op === 'delete-list-items' && inverse.announcement
+          ? [inverse.announcement.channel]
+          : []),
+      ]);
+      if (inverse.op === 'delete-canvas') {
+        const access = await this.deps.surface.canvasAccess(inverse.canvasId);
+        if (!access.isCanvas) {
+          return 'That canvas is no longer accessible.';
+        }
+        // A canvas created by this exact change can be unshared; deleting it is its narrow inverse.
+        if (access.channels.length) {
+          let visible = false;
+          for (const channel of access.channels) {
+            if (await this.deps.surface.isMember(channel, userId, { fresh: true })) visible = true;
+          }
+          if (!visible) {
+            return 'You no longer have access to that canvas.';
+          }
+        } else if (e.kind !== 'canvas' || e.location?.canvasId !== inverse.canvasId) {
+          return 'You no longer have access to that canvas.';
+        }
+      }
+      if (ownedReminder) channels.delete(inverse.channel);
+      for (const channel of channels)
+        if (!(await this.deps.surface.isMember(channel, userId, { fresh: true }))) {
+          return 'You are no longer a member of that conversation.';
+        }
+      return undefined;
+    };
+    const accessError = await checkAccess();
+    if (accessError) {
+      await sink.notice('denied', accessError);
+      return;
+    }
+    try {
+      const claimed = await this.deps.stores.claimEffect({
+        version: 1,
+        direction: 'undo',
+        teamId,
+        changeId,
+        invokerId: userId,
+        principalHash: await contentHash(e.principal),
+        intentHash: await contentHash(JSON.stringify({ inverse: e.inverse, actor: userId })),
+        kind: e.kind,
+        startedAt: this.now().toISOString(),
+      });
+      if (!claimed) {
+        await sink.notice(
+          'warning',
+          'Undo was already claimed. Inspect the change; it will not be replayed automatically.',
+        );
+        return;
+      }
+    } catch {
+      await sink.notice(
+        'error',
+        'The undo checkpoint could not be persisted; nothing was dispatched.',
+      );
+      return;
+    }
+    const finalAccessError = await checkAccess();
+    if (finalAccessError) {
+      await sink.notice('denied', finalAccessError);
+      return;
+    }
+    let r: { ok: boolean; message: string };
+    try {
+      r = await this.deps.surface.undo(e.inverse);
+    } catch {
+      await sink.notice(
+        'warning',
+        'Undo may have run. Inspect the change before trying again; it will not be replayed automatically.',
+      );
+      return;
+    }
+    if (r.ok) {
+      try {
+        await this.deps.stores.record({
+          ...e,
+          undoneAt: this.now().toISOString(),
+          undoneBy: userId,
+        });
+      } catch {
+        await sink.notice(
+          'warning',
+          `${r.message} Audit checkpoint pending; inspect Changes before trying again.`,
+        );
+        return;
+      }
+    }
     await sink.notice(r.ok ? 'info' : 'error', r.message);
   }
 
@@ -1929,14 +2494,14 @@ export class Orchestrator {
       return;
     }
     const channel = a.origin.channelId;
-    if (!channel || !(await this.deps.surface.isMember(channel, userId))) {
+    if (!channel || !(await this.deps.surface.isMember(channel, userId, { fresh: true }))) {
       await sink.notice('denied', "You can't post in that conversation.");
       return;
     }
     // A user-grounded answer may quote sources external members can't open (H3).
     if (
       !a.principal.startsWith('service:') &&
-      (await this.deps.surface.conversationInfo(channel)).isExtShared
+      (await this.deps.surface.conversationInfo(channel, { fresh: true })).isExtShared
     ) {
       await sink.notice(
         'denied',
@@ -1979,6 +2544,7 @@ export class Orchestrator {
       agentId: a.provenance?.agentId ?? 'gemini-enterprise',
       contentHash: a.provenance?.contentHash ?? (await contentHash(a.text)),
       identity: a.principal,
+      ...(a.principalBinding ? { principalBinding: a.principalBinding } : {}),
       dryRun: false,
       createdAt: this.now().getTime(),
       expiresAt: this.now().getTime() + PLAN_TTL_MS,

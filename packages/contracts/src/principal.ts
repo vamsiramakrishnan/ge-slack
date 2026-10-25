@@ -34,6 +34,26 @@ export function principalId(p: Principal): string {
   return p.kind === 'user' ? `user:${p.email}` : `service:${p.serviceAccount}`;
 }
 
+/**
+ * Immutable identity binding for pending work. Compare this independently of the display/provenance
+ * id: an email can be re-linked to a different IdP subject. The versioned tuple has fixed ordering
+ * and unambiguous JSON escaping. Callers may hash it before persistence; never display or log it.
+ * `onBehalfOf` remains attribution, not authority — human membership/approval gates still apply.
+ */
+export function principalBinding(p: Principal): string {
+  return JSON.stringify(
+    p.kind === 'user'
+      ? ['principal-binding-v1', 'user', p.teamId, p.slackUserId, p.provider, p.subject]
+      : [
+          'principal-binding-v1',
+          'service',
+          p.serviceAccount,
+          p.onBehalfOf?.teamId ?? null,
+          p.onBehalfOf?.slackUserId ?? null,
+        ],
+  );
+}
+
 /** Per-channel identity policy (ADR-0001 §5). Default `user-only`. */
 export const IdentityPolicySchema = z.enum(['user-only', 'user-preferred', 'service-only']);
 export type IdentityPolicy = z.infer<typeof IdentityPolicySchema>;

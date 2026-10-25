@@ -104,3 +104,7 @@ The UX spec is [docs/EXPERIENCE.md](docs/EXPERIENCE.md) and the visual mockup is
 deployment and the live probes. CI (`.github/workflows/ci.yml`) runs every check above, renders
 the Cloud Run service, and builds the container image. [docs/STATUS.md](docs/STATUS.md) separates what is verified from what has not yet run
 against live Slack or Gemini Enterprise.
+
+
+Bounded source traversal, model visibility, source freshness and durable write attempts are
+implemented through the existing executor. See [behavior, limits and verification](docs/BOUNDED-EVIDENCE-AND-EFFECTS.md).

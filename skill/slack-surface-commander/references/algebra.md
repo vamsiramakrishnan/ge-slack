@@ -50,8 +50,9 @@ Statements end at a newline that is outside a string or block. Verbs are case-in
 
 | Statement | Valid when |
 |---|---|
-| `read thread` / `read channel [since=24h]` | literal `thread`/`channel`; `since` is `<n>h`, `<n>d`, `<n>w` (capped at 30d by the host) |
-| `read <permalink>` | a Slack message permalink (below) |
+| `read thread` / `read channel [since=24h]` | literal `thread`/`channel`; `since` is `<n>h`, `<n>d`, `<n>w` (never broader than the admitted window; parser caps duration at 30d) |
+| `read <permalink>` | an admitted Slack message permalink (below), within the requested thread/time window |
+| `read next cursor=<handle>` | the exact `p_` handle from the current context; bound to that source and author filter |
 | `search "query"` | a quoted string |
 | `reply "text"` | in the current scope (the thread, or a new thread on the scope message) |
 | `reply <permalink> "text"` | threaded under that message |

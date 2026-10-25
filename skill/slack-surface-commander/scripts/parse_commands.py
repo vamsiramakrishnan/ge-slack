@@ -321,7 +321,14 @@ def parse_statement(line: str, toks: list) -> dict:
     if verb == "read":
         a = _at(pos, 0)
         if not a:
-            return err("read needs a target: read thread | read channel [since=24h] | read <permalink>")
+            return err("read needs a target: read thread | read channel [since=24h] | read <permalink> | read next cursor=<handle>")
+        cursor = _prop(args, "cursor")
+        if a["kind"] == "word" and a["text"] == "next":
+            if not cursor or not re.fullmatch(r"p_[a-f0-9]{32}", cursor) or len(pos) != 1 or _prop(args, "since"):
+                return err("read next requires one source-bound cursor handle from the current context")
+            return {"verb": "read", "target": "next", "cursor": cursor, "line": line}
+        if cursor:
+            return err("cursor is valid only with read next")
         if a["kind"] == "word" and a["text"] in ("thread", "channel"):
             rec = {"verb": "read", "target": a["text"], "line": line}
             since = _prop(args, "since")

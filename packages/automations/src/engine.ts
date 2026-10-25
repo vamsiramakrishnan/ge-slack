@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   AutomationSchema,
   type Automation,
@@ -172,8 +172,48 @@ export class AutomationEngine implements AutomationPort {
   private readonly failures = new Map<string, number>();
 
   /**
-   * Run every due schedule. Advances `next` *before* executing so a retried tick (Cloud
-   * Scheduler at-least-once delivery) cannot double-run the same slot.
+   * A durable attempt marker, not an exactly-once delivery receipt. The claim is never expired or
+   * automatically retried: a crash after claiming may have reached Slack. Only metadata is stored.
+   */
+  private async claimRun(
+    a: Automation,
+    kind: 'schedule' | 'reaction' | 'keyword',
+    occurrence: readonly string[],
+  ): Promise<string | undefined> {
+    if (!this.kv.create)
+      throw new Error('Automatic triggers require an atomic create-if-absent store.');
+    const digest = createHash('sha256')
+      .update(JSON.stringify([kind, ...occurrence]))
+      .digest('hex');
+    const key = `automation-run/${a.teamId}/${a.id}/${digest}`;
+    const created = await this.kv.create(key, {
+      version: 1,
+      kind,
+      state: 'claimed',
+      claimedAt: this.now().toISOString(),
+    });
+    return created ? key : undefined;
+  }
+
+  private async finishRun(key: string): Promise<void> {
+    // A failed post-run checkpoint must never erase the durable claim or cause a replay. The
+    // retained `claimed` marker means the outcome needs inspection; it does not mean failure.
+    try {
+      const claim = await this.kv.get<Record<string, unknown>>(key);
+      if (claim)
+        await this.kv.set(key, {
+          ...claim,
+          state: 'finished',
+          finishedAt: this.now().toISOString(),
+        });
+    } catch {
+      // The task may already have written. Its effect ledger remains the source of receipts.
+    }
+  }
+
+  /**
+   * Run every due schedule. Atomically claim the persisted due slot before advancing `next` or
+   * invoking the task. Concurrent Cloud Run instances and retried ticks share the same claim.
    */
   async tick(
     orch: Orchestrator,
@@ -183,17 +223,21 @@ export class AutomationEngine implements AutomationPort {
     const ran: string[] = [];
     const now = this.now();
     for (const { key, value } of await this.kv.list<string>(`automation-next/${teamId}/`)) {
-      if (Date.parse(value) > now.getTime()) continue;
+      const due = Date.parse(value);
+      if (!Number.isFinite(due) || due > now.getTime()) continue;
       const id = key.split('/').at(-1)!;
       const a = await this.get(teamId, id);
       if (!a || !a.enabled || a.trigger.kind !== 'schedule') {
         await this.kv.delete(key);
         continue;
       }
+      const claim = await this.claimRun(a, 'schedule', [new Date(due).toISOString()]);
+      if (!claim) continue;
       const next = this.nextRun(a.trigger, now);
       if (next) await this.kv.set(key, next.toISOString());
       else await this.kv.delete(key);
       await this.execute(orch, a, this.originFor(a, 'schedule'), sinkFor);
+      await this.finishRun(claim);
       ran.push(id);
     }
     return ran;
@@ -232,6 +276,8 @@ export class AutomationEngine implements AutomationPort {
       threadTs?: string;
       emoji: string;
       userId: string;
+      /** Slack's reaction event timestamp, distinct from the reacted message timestamp. */
+      eventTs?: string;
     },
     sinkFor: UnattendedSinkFactory,
   ): Promise<number> {
@@ -245,7 +291,19 @@ export class AutomationEngine implements AutomationPort {
     );
     let n = 0;
     for (const a of matches) {
+      if (!ev.eventTs || !/^\d{6,}\.\d{1,8}$/.test(ev.eventTs))
+        throw new Error(
+          'Reaction automation skipped: Slack did not supply a stable event timestamp.',
+        );
       if (this.debounced(`r:${a.id}:${ev.channel}:${ev.ts}`, REACTION_DEBOUNCE_MS)) continue;
+      const claim = await this.claimRun(a, 'reaction', [
+        ev.channel,
+        ev.ts,
+        ev.eventTs,
+        ev.emoji,
+        ev.userId,
+      ]);
+      if (!claim) continue;
       const threadTs = ev.threadTs ?? ev.ts;
       await this.execute(
         orch,
@@ -253,6 +311,7 @@ export class AutomationEngine implements AutomationPort {
         this.originFor(a, 'reaction', { channelId: ev.channel, threadTs }),
         sinkFor,
       );
+      await this.finishRun(claim);
       n++;
     }
     return n;
@@ -283,13 +342,21 @@ export class AutomationEngine implements AutomationPort {
     );
     let n = 0;
     for (const a of matches) {
-      if (this.debounced(`k:${a.id}:${ev.threadTs ?? ev.ts}`, KEYWORD_DEBOUNCE_MS)) continue;
+      if (!/^\d{6,}\.\d{1,8}$/.test(ev.ts))
+        throw new Error(
+          'Keyword automation skipped: Slack did not supply a stable message timestamp.',
+        );
+      if (this.debounced(`k:${a.id}:${ev.channel}:${ev.threadTs ?? ev.ts}`, KEYWORD_DEBOUNCE_MS))
+        continue;
+      const claim = await this.claimRun(a, 'keyword', [ev.channel, ev.ts]);
+      if (!claim) continue;
       await this.execute(
         orch,
         a,
         this.originFor(a, 'keyword', { channelId: ev.channel, threadTs: ev.threadTs ?? ev.ts }),
         sinkFor,
       );
+      await this.finishRun(claim);
       n++;
     }
     return n;
