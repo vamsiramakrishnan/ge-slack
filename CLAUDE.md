@@ -42,3 +42,6 @@ bun install && bun run typecheck && bun run test && bun run test:skills && bun r
 ```
 Done = all of those clean (CI runs the same, plus the Cloud Run render and image build); run the
 `security-reviewer` agent after identity/provenance changes. `bun run probe` checks a live engine.
+`bun install` also points git at `.githooks/` (the `prepare` script): `git push` first runs eslint
+and prettier on the files the push changes and `bun run typecheck`. Fix what fails; do not push
+with `--no-verify`.
